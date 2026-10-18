@@ -1,0 +1,14 @@
+[workspace]
+members = ["bin/peppydb", "crates/peppydb-bftree"]
+default-members = ["bin/peppydb"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+
+[workspace.dependencies]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
