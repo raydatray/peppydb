@@ -43,6 +43,26 @@ which the logging and checkpoint design will define. A smaller mini-page header
 without recovery state is deferred to that design: it would not shrink
 upstream's allocation sizes, and the recovery state would need another home.
 
+## Slots and records
+
+Each slot uses 8 bytes:
+
+| Bytes | Meaning |
+| --- | --- |
+| `0..2` | Payload offset from the page start |
+| `2..4` | Record kind (high 2 bits) and key length (low 14 bits) |
+| `4..6` | Reference bit (high bit) and value length (low 15 bits) |
+| `6..8` | First two key bytes (preview), zero-padded |
+
+- Slots are sorted by full key bytes. Each payload holds the key followed by the
+  value.
+- Record kinds follow upstream: `Insert` (live value), `Delete` (tombstone),
+  `Cache` (clean cached value), and `Phantom` (clean cached absence).
+- Keys must be nonempty, as upstream requires. Values may be empty: an empty
+  value is a live record, and value length never encodes absence. Upstream
+  asserts that values are nonempty; peppydb allows empty values for
+  presence-only records.
+
 ## `Page` as a base type
 
 `Page` holds what every leaf-level page shares: the header, the slot directory,
@@ -69,3 +89,5 @@ structure design will define.
   packing. peppydb differs by encoding integers as explicit little-endian
   values, measuring payload offsets from the page start, and capping pages at
   4096 bytes (upstream allows up to 32 KiB).
+- Figure 3 of the paper shows a 14-bit value length and a separate fence bit.
+  peppydb follows upstream's current slot packing.
