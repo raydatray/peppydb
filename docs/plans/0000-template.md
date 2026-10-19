@@ -47,6 +47,7 @@ Update this section as the discussion resolves open questions.
 
 Repeat the subsection below for each diff. Keep the numbering and total
 accurate. Each diff builds on the previous one and includes its relevant tests.
+If the stack starts with a plan commit, list it as diff 1 and include it in `N`.
 
 ### `[1/N][plan][section] <Imperative commit title>`
 
@@ -73,7 +74,7 @@ they matter. Complement the per-diff checks with any necessary stack-wide checks
 ## Progress
 
 - [ ] Agree on the design and commit stack with the user.
-- [ ] Implement and verify diff 1. Add a checkbox for each additional diff.
+- [ ] Implement and verify each code diff. Add a checkbox per diff using the stack numbering.
 - [ ] Complete stack-wide verification and any required design-document updates.
 
 ## Discoveries and plan changes
