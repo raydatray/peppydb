@@ -279,3 +279,5 @@ In short:
   §3 for the architecture/layout, §4 for the buffer pool, and §5 for operations.
 - [RocksDB overview](../references.md#rocksdb-overview): High Level Architecture
   and Features, especially Persistence and Multi-Threaded Compactions.
+- [BF-Tree implementation roadmap](../plans/0002-bf-tree-roadmap.md): how we plan
+  to build these components in peppydb.
