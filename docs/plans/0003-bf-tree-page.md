@@ -1,8 +1,9 @@
 # 0003: Shared BF-Tree page primitive
 
-**Status:** Agreed; approved for end-to-end implementation.
+**Status:** In progress; approved for end-to-end implementation.
 
-**Design references:** [Project direction](../design/architecture.md).
+**Design references:** [Project direction](../design/architecture.md),
+[shared BF-Tree pages](../design/bf-tree-pages.md).
 
 **Parent roadmap:** [BF-Tree implementation](0002-bf-tree-roadmap.md).
 
@@ -598,12 +599,22 @@ cargo test --workspace
 - [x] Read the paper and inspect relevant upstream code.
 - [x] Agree on the page contract, header layout, and key/value policy.
 - [x] Agree on the six-diff stack: one plan commit and five implementation commits.
-- [ ] Implement and verify diff 2: header and initialization.
+- [x] Implement and verify diff 2: header and initialization.
 - [ ] Implement and verify diff 3: slot decoding and lookup.
 - [ ] Implement and verify diff 4: slot encoding and insertion.
 - [ ] Implement and verify diff 5: ordered iteration.
 - [ ] Implement and verify diff 6: model checks and workspace verification.
 - [ ] Record verification outcomes and finalize the page design note.
+
+## Verification outcomes
+
+Each commit passed `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace` on its own.
+
+- Diff 2 (3 unit tests): all 64 supported capacities initialize correctly on an
+  unaligned buffer; invalid capacities preserve the supplied bytes. Every error
+  variant implements `std::error::Error` with its message.
 
 ## Sources
 

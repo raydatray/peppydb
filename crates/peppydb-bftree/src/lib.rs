@@ -1,14 +1,5 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Building blocks for the BF-Tree storage engine.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod page;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use page::{Page, PageError};
