@@ -52,6 +52,16 @@ struct Slot {
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
 impl Slot {
+    /// Encode an unreferenced `Insert` record. Preflight must bound both lengths.
+    fn insert(offset: u16, key: &[u8], value_len: u16) -> Self {
+        Self {
+            offset: U16::new(offset),
+            kind_and_key_len: U16::new(RecordKind::Insert.key_word(key.len() as u16)),
+            ref_and_value_len: U16::new(value_len),
+            preview: [key[0], key.get(1).copied().unwrap_or(0)],
+        }
+    }
+
     /// Page-relative byte range of the key, excluding state bits from its length.
     fn key_range(&self) -> Range<usize> {
         let start = usize::from(self.offset.get());
@@ -76,6 +86,12 @@ pub enum RecordKind {
     Cache = 0b10,
     /// A clean cached absence.
     Phantom = 0b11,
+}
+
+impl RecordKind {
+    fn key_word(self, key_len: u16) -> u16 {
+        ((self as u16) << 14) | key_len
+    }
 }
 
 /// An operation rejected before changing any page bytes.
@@ -132,6 +148,56 @@ impl Page {
         Ok(page)
     }
 
+    /// Insert a distinct, nonempty key and its value, which may be empty.
+    ///
+    /// Validation rejects an empty key, then a record too large for an empty
+    /// page, then a duplicate key, then insufficient current space. Every error
+    /// leaves all bytes unchanged.
+    pub fn try_insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), PageError> {
+        if key.is_empty() {
+            return Err(PageError::EmptyKey);
+        }
+
+        let needed = key
+            .len()
+            .checked_add(value.len())
+            .and_then(|size| size.checked_add(SLOT_BYTES))
+            .filter(|&size| size <= self.capacity() - HEADER_BYTES)
+            .ok_or(PageError::RecordTooLarge)?;
+        let count = self.len();
+        let index = self.lower_bound(key);
+        if index < count && self.key_at(index) == key {
+            return Err(PageError::DuplicateKey);
+        }
+
+        let free = self.free_bytes();
+        if needed > free {
+            return Err(PageError::PageFull);
+        }
+
+        // Capacity is at most 4096: preflight also bounds lengths and offsets
+        // to their slot bit fields, and the count to fewer than 512 records.
+        let payload_start = HEADER_BYTES + count * SLOT_BYTES + free;
+        let offset = payload_start - (needed - SLOT_BYTES);
+        let value_start = offset + key.len();
+
+        let bytes = self.as_mut_bytes();
+        bytes[offset..value_start].copy_from_slice(key);
+        bytes[value_start..payload_start].copy_from_slice(value);
+
+        let (slots, _): (&mut [Slot], _) =
+            FromBytes::mut_from_prefix_with_elems(&mut self.data, count + 1)
+                .expect("preflight reserved space for the new slot");
+        slots.copy_within(index..count, index + 1);
+        slots[index] = Slot::insert(offset as u16, key, value.len() as u16);
+
+        let flags = self.header.count_and_flags.get() & !COUNT_MASK;
+        self.header.count_and_flags.set(flags | (count + 1) as u16);
+        self.header.remaining_size.set((free - needed) as u16);
+
+        Ok(())
+    }
+
     /// Borrow the value for a nonempty key, or return `None` if it is absent.
     ///
     /// An empty value is present and returns `Some(&[])`.
@@ -178,6 +244,11 @@ impl Page {
         slots
     }
 
+    /// Borrow the key addressed by slot `index` without decoding its value.
+    fn key_at(&self, index: usize) -> &[u8] {
+        &self.as_bytes()[self.slots()[index].key_range()]
+    }
+
     fn record_at(&self, index: usize) -> (&[u8], &[u8]) {
         let slot = self.slots()[index];
         let key = slot.key_range();
@@ -202,6 +273,9 @@ mod tests {
 
     // Tests decode raw byte offsets rather than `Header` and `Slot`, so they
     // check the structs against the documented format independently.
+    fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
 
     #[test]
     fn initialize_all_capacities_on_unaligned_buffers() {
@@ -363,5 +437,100 @@ mod tests {
         assert_eq!(page.get(b"missing"), Ok(None));
         assert_eq!(page.get(b""), Err(PageError::EmptyKey));
         assert_eq!(page.as_bytes(), before);
+    }
+
+    fn assert_rejected(page: &mut Page, key: &[u8], value: &[u8], error: PageError) {
+        let before = page.as_bytes().to_vec();
+        assert_eq!(page.try_insert(key, value), Err(error));
+        assert_eq!(page.as_bytes(), before);
+    }
+
+    #[test]
+    fn insert_worked_example_matches_golden_bytes() {
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        page.try_insert(b"30", b"cat").unwrap();
+        let first_payload = page.as_bytes()[123..].to_vec();
+        page.try_insert(b"10", b"dog").unwrap();
+        assert_eq!(&page.as_bytes()[123..], first_payload);
+        assert_eq!(page.free_bytes(), 70);
+        let old_payloads = page.as_bytes()[118..].to_vec();
+        page.try_insert(b"20", b"owl").unwrap();
+        assert_eq!(&page.as_bytes()[118..], old_payloads);
+        assert_eq!(page.len(), 3);
+        assert_eq!(page.free_bytes(), 57);
+        assert_eq!(32 + page.len() * 8 + page.free_bytes(), 113);
+        assert_eq!(
+            &page.as_bytes()[32..56],
+            &[
+                118, 0, 2, 0, 3, 0, b'1', b'0', 113, 0, 2, 0, 3, 0, b'2', b'0', 123, 0, 2, 0, 3, 0,
+                b'3', b'0',
+            ]
+        );
+        assert_eq!(&page.as_bytes()[113..], b"20owl10dog30cat");
+        for (key, value) in [(b"10", b"dog"), (b"20", b"owl"), (b"30", b"cat")] {
+            assert_eq!(page.get(key), Ok(Some(value.as_slice())));
+        }
+        assert_eq!(page.get(b"25"), Ok(None));
+    }
+
+    #[test]
+    fn insert_prefixes_zero_bytes_and_empty_values() {
+        let keys = [b"abc".as_slice(), b"\0\0", b"ab", b"\0", b"\xff", b"a"];
+        let sorted = [b"\0".as_slice(), b"\0\0", b"a", b"ab", b"abc", b"\xff"];
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        for key in keys {
+            page.try_insert(key, b"").unwrap();
+            assert_eq!(page.get(key), Ok(Some(b"".as_slice())));
+        }
+        for (index, key) in sorted.into_iter().enumerate() {
+            assert_eq!(page.record_at(index), (key, b"".as_slice()));
+            let slot = 32 + index * 8;
+            assert_eq!(read_u16(page.as_bytes(), slot + 2), key.len() as u16);
+            assert_eq!(read_u16(page.as_bytes(), slot + 4), 0);
+            assert_eq!(
+                &page.as_bytes()[slot + 6..slot + 8],
+                &[key[0], key.get(1).copied().unwrap_or(0)]
+            );
+        }
+        assert_rejected(page, b"ab", b"new", PageError::DuplicateKey);
+    }
+
+    #[test]
+    fn exact_fits_and_error_precedence_preserve_bytes() {
+        let mut storage = [0; 64];
+        let page = Page::init(&mut storage).unwrap();
+        // Exact fit: 32 header bytes + 8 slot bytes + 1 key byte + 23 value bytes.
+        let value = vec![0xa5; 23];
+        let too_large = vec![0xa5; value.len() + 1];
+        assert_rejected(page, b"", &too_large, PageError::EmptyKey);
+        assert_rejected(page, b"k", &too_large, PageError::RecordTooLarge);
+        assert_rejected(page, &vec![0; 0x4000], b"", PageError::RecordTooLarge);
+        assert_rejected(page, b"k", &vec![0; 0x8000], PageError::RecordTooLarge);
+        page.try_insert(b"k", &value).unwrap();
+        assert_eq!(page.free_bytes(), 0);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(b"k"), Ok(Some(value.as_slice())));
+        assert_rejected(page, b"", &too_large, PageError::EmptyKey);
+        assert_rejected(page, b"k", &too_large, PageError::RecordTooLarge);
+        assert_rejected(page, b"k", b"", PageError::DuplicateKey);
+        assert_rejected(page, b"x", b"", PageError::PageFull);
+    }
+
+    #[test]
+    fn insertion_preserves_flags_and_inactive_metadata() {
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        page.as_mut_bytes()[0..2].copy_from_slice(&0xb000u16.to_le_bytes());
+        page.as_mut_bytes()[6..32].fill(0xa5);
+        let inactive = page.as_bytes()[6..32].to_vec();
+        for (index, key) in [b"30", b"10", b"20"].into_iter().enumerate() {
+            page.try_insert(key, b"value").unwrap();
+            assert_eq!(page.len(), index + 1);
+            assert_eq!(read_u16(page.as_bytes(), 0), 0xb000 | (index + 1) as u16);
+            assert_eq!(&page.as_bytes()[6..32], inactive);
+            assert_eq!(page.capacity(), 128);
+        }
     }
 }

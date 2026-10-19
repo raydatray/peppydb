@@ -601,7 +601,7 @@ cargo test --workspace
 - [x] Agree on the six-diff stack: one plan commit and five implementation commits.
 - [x] Implement and verify diff 2: header and initialization.
 - [x] Implement and verify diff 3: slot decoding and lookup.
-- [ ] Implement and verify diff 4: slot encoding and insertion.
+- [x] Implement and verify diff 4: slot encoding and insertion.
 - [ ] Implement and verify diff 5: ordered iteration.
 - [ ] Implement and verify diff 6: model checks and workspace verification.
 - [ ] Record verification outcomes and finalize the page design note.
@@ -618,6 +618,9 @@ Each commit passed `cargo fmt --all -- --check`,
 - Diff 3 (7 unit tests): explicit byte fixtures verify full-key lookup, borrowed
   values, empty values, preview collisions, and masked lengths for every
   kind/reference combination. Lookup leaves the bytes unchanged.
+- Diff 4 (11 unit tests): golden bytes match the worked insertion. Exact fits and
+  rejection precedence preserve bytes; insertion preserves existing payloads,
+  flags, and inactive metadata.
 
 ## Sources
 
