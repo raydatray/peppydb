@@ -600,7 +600,7 @@ cargo test --workspace
 - [x] Agree on the page contract, header layout, and key/value policy.
 - [x] Agree on the six-diff stack: one plan commit and five implementation commits.
 - [x] Implement and verify diff 2: header and initialization.
-- [ ] Implement and verify diff 3: slot decoding and lookup.
+- [x] Implement and verify diff 3: slot decoding and lookup.
 - [ ] Implement and verify diff 4: slot encoding and insertion.
 - [ ] Implement and verify diff 5: ordered iteration.
 - [ ] Implement and verify diff 6: model checks and workspace verification.
@@ -615,6 +615,9 @@ Each commit passed `cargo fmt --all -- --check`,
 - Diff 2 (3 unit tests): all 64 supported capacities initialize correctly on an
   unaligned buffer; invalid capacities preserve the supplied bytes. Every error
   variant implements `std::error::Error` with its message.
+- Diff 3 (7 unit tests): explicit byte fixtures verify full-key lookup, borrowed
+  values, empty values, preview collisions, and masked lengths for every
+  kind/reference combination. Lookup leaves the bytes unchanged.
 
 ## Sources
 

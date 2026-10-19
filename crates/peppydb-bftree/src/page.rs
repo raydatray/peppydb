@@ -1,5 +1,7 @@
 //! Packed pages backed by caller-owned storage.
 
+use std::ops::Range;
+
 use zerocopy::little_endian::{U16, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -7,6 +9,9 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 const HEADER_BYTES: usize = 32;
 const COUNT_MASK: u16 = 0x0fff;
 const NO_BACKING_LEAF: u64 = u64::MAX;
+const SLOT_BYTES: usize = 8;
+const KEY_LEN_MASK: u16 = 0x3fff;
+const VALUE_LEN_MASK: u16 = 0x7fff;
 
 /// Page header at bytes `0..HEADER_BYTES`.
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -29,6 +34,49 @@ struct Header {
 }
 
 const _: () = assert!(size_of::<Header>() == HEADER_BYTES);
+
+/// One entry in the sorted slot directory, which follows the header.
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct Slot {
+    /// Page-relative offset of the key; the value follows the key.
+    offset: U16,
+    /// Record kind in the high 2 bits; key length in the low 14 bits.
+    kind_and_key_len: U16,
+    /// Reference bit in the high bit; value length in the low 15 bits.
+    ref_and_value_len: U16,
+    /// First two key bytes, zero-padded for one-byte keys.
+    preview: [u8; 2],
+}
+
+const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
+
+impl Slot {
+    /// Page-relative byte range of the key, excluding state bits from its length.
+    fn key_range(&self) -> Range<usize> {
+        let start = usize::from(self.offset.get());
+        start..start + usize::from(self.kind_and_key_len.get() & KEY_LEN_MASK)
+    }
+
+    /// Value length, excluding the reference bit.
+    fn value_len(&self) -> usize {
+        usize::from(self.ref_and_value_len.get() & VALUE_LEN_MASK)
+    }
+}
+
+/// Shared two-bit record-kind encoding for base leaves and mini-pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RecordKind {
+    /// A live value, or a buffered insertion in a mini-page.
+    Insert = 0b00,
+    /// A deletion awaiting reclamation or propagation.
+    Delete = 0b01,
+    /// A clean cached value.
+    Cache = 0b10,
+    /// A clean cached absence.
+    Phantom = 0b11,
+}
 
 /// An operation rejected before changing any page bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -84,6 +132,23 @@ impl Page {
         Ok(page)
     }
 
+    /// Borrow the value for a nonempty key, or return `None` if it is absent.
+    ///
+    /// An empty value is present and returns `Some(&[])`.
+    pub fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, PageError> {
+        if key.is_empty() {
+            return Err(PageError::EmptyKey);
+        }
+
+        let index = self.lower_bound(key);
+        if index == self.len() {
+            return Ok(None);
+        }
+
+        let (stored_key, value) = self.record_at(index);
+        Ok((stored_key == key).then_some(value))
+    }
+
     /// Number of records.
     pub fn len(&self) -> usize {
         usize::from(self.header.count_and_flags.get() & COUNT_MASK)
@@ -102,6 +167,32 @@ impl Page {
     /// Contiguous free space between the sorted slots and packed payloads.
     pub fn free_bytes(&self) -> usize {
         usize::from(self.header.remaining_size.get())
+    }
+
+    /// The sorted slot directory at the start of the record area.
+    fn slots(&self) -> &[Slot] {
+        let (slots, _): (&[Slot], _) =
+            FromBytes::ref_from_prefix_with_elems(&self.data, self.len())
+                .expect("slot directory fits the page");
+
+        slots
+    }
+
+    fn record_at(&self, index: usize) -> (&[u8], &[u8]) {
+        let slot = self.slots()[index];
+        let key = slot.key_range();
+        let value = key.end..key.end + slot.value_len();
+        let bytes = self.as_bytes();
+
+        (&bytes[key], &bytes[value])
+    }
+
+    /// Index of the first slot whose key is not less than `key`.
+    fn lower_bound(&self, key: &[u8]) -> usize {
+        let bytes = self.as_bytes();
+
+        self.slots()
+            .partition_point(|slot| &bytes[slot.key_range()] < key)
     }
 }
 
@@ -169,5 +260,108 @@ mod tests {
             let error: &dyn std::error::Error = &error;
             assert_eq!(error.to_string(), message);
         }
+    }
+
+    #[test]
+    fn lookup_worked_byte_fixture() {
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        page.as_mut_bytes()[0..2].copy_from_slice(&[3, 0xa0]);
+        // Free space: 113 - 32 header bytes - 3 slots * 8 bytes.
+        page.as_mut_bytes()[4..6].copy_from_slice(&57u16.to_le_bytes());
+        page.as_mut_bytes()[32..56].copy_from_slice(&[
+            118, 0, 2, 0, 3, 0, b'1', b'0', // 10/dog
+            113, 0, 2, 0, 3, 0, b'2', b'0', // 20/owl
+            123, 0, 2, 0, 3, 0, b'3', b'0', // 30/cat
+        ]);
+        page.as_mut_bytes()[113..128].copy_from_slice(b"20owl10dog30cat");
+        let before = page.as_bytes().to_vec();
+        assert_eq!(page.len(), 3);
+        assert!(!page.is_empty());
+        assert_eq!(page.free_bytes(), 57);
+        for (key, value) in [(b"10", b"dog"), (b"20", b"owl"), (b"30", b"cat")] {
+            assert_eq!(page.get(key), Ok(Some(value.as_slice())));
+        }
+        assert_eq!(
+            page.get(b"20").unwrap().unwrap().as_ptr(),
+            page.as_bytes()[115..].as_ptr()
+        );
+        for key in [b"01".as_slice(), b"15", b"25", b"40", b"20\0"] {
+            assert_eq!(page.get(key), Ok(None));
+        }
+        assert_eq!(page.get(b""), Err(PageError::EmptyKey));
+        assert_eq!(page.as_bytes(), before);
+    }
+
+    #[test]
+    fn lookup_prefixes_preview_collisions_and_empty_values() {
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        page.as_mut_bytes()[0..2].copy_from_slice(&[4, 0]);
+        // Free space: 118 - 32 header bytes - 4 slots * 8 bytes.
+        page.as_mut_bytes()[4..6].copy_from_slice(&54u16.to_le_bytes());
+        page.as_mut_bytes()[32..64].copy_from_slice(&[
+            118, 0, 1, 0, 1, 0, 0, 0, // \0/A
+            120, 0, 2, 0, 0, 0, 0, 0, // \0\0/empty
+            122, 0, 2, 0, 0, 0, b'a', b'b', // ab/empty
+            124, 0, 3, 0, 1, 0, b'a', b'b', // abc/Z
+        ]);
+        page.as_mut_bytes()[118..128].copy_from_slice(b"\0A\0\0ababcZ");
+        for (key, value) in [
+            (b"\0".as_slice(), b"A".as_slice()),
+            (b"\0\0", b""),
+            (b"ab", b""),
+            (b"abc", b"Z"),
+        ] {
+            assert_eq!(page.get(key), Ok(Some(value)));
+        }
+        for key in [b"\0\0\0".as_slice(), b"a", b"abb", b"abcd", b"\xff"] {
+            assert_eq!(page.get(key), Ok(None));
+        }
+    }
+
+    #[test]
+    fn slot_lengths_exclude_all_kind_and_reference_bits() {
+        for kind in [
+            RecordKind::Insert,
+            RecordKind::Delete,
+            RecordKind::Cache,
+            RecordKind::Phantom,
+        ] {
+            for referenced in [false, true] {
+                let mut storage = [0; 128];
+                let page = Page::init(&mut storage).unwrap();
+                page.as_mut_bytes()[0..2].copy_from_slice(&[1, 0]);
+                // Free space: 126 - 32 header bytes - 1 slot * 8 bytes.
+                page.as_mut_bytes()[4..6].copy_from_slice(&86u16.to_le_bytes());
+                let key_word = ((kind as u16) << 14) | 1;
+                let value_word = (u16::from(referenced) << 15) | 1;
+                page.as_mut_bytes()[32..40].copy_from_slice(&[
+                    126,
+                    0,
+                    key_word as u8,
+                    (key_word >> 8) as u8,
+                    value_word as u8,
+                    (value_word >> 8) as u8,
+                    b'k',
+                    0,
+                ]);
+                page.as_mut_bytes()[126..128].copy_from_slice(b"kV");
+                let before = page.as_bytes().to_vec();
+                assert_eq!(page.record_at(0), (b"k".as_slice(), b"V".as_slice()));
+                assert_eq!(page.get(b"k"), Ok(Some(b"V".as_slice())));
+                assert_eq!(page.as_bytes(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_empty_page_and_empty_key() {
+        let mut storage = [0; 64];
+        let page = Page::init(&mut storage).unwrap();
+        let before = page.as_bytes().to_vec();
+        assert_eq!(page.get(b"missing"), Ok(None));
+        assert_eq!(page.get(b""), Err(PageError::EmptyKey));
+        assert_eq!(page.as_bytes(), before);
     }
 }
