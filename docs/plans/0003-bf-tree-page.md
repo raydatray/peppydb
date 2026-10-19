@@ -1,6 +1,6 @@
 # 0003: Shared BF-Tree page primitive
 
-**Status:** In progress; approved for end-to-end implementation.
+**Status:** Complete.
 
 **Design references:** [Project direction](../design/architecture.md),
 [shared BF-Tree pages](../design/bf-tree-pages.md).
@@ -410,7 +410,7 @@ assert_eq!(records, vec![
 ]);
 ```
 
-## Proposed commit stack
+## Implemented commit stack
 
 This stack has six diffs: the existing plan commit is diff 1, followed by five
 implementation diffs. Include the plan commit in the total used by every title.
@@ -433,7 +433,7 @@ must compile and pass its focused tests without placeholder implementations.
 - **Changes:** Record the agreed header, slot encoding, API, examples,
   verification strategy, and commit stack in this plan.
 - **Verification:** Review byte accounting, API consistency, and document links.
-- **Existing commit:** Revise the plan commit as the design is finalized.
+- **Outcome:** Finalize the approved plan and number the existing commit as diff 1 of 6.
 
 ### `[2/6][bf-page][layout] define the page header and initialize page views`
 
@@ -603,8 +603,8 @@ cargo test --workspace
 - [x] Implement and verify diff 3: slot decoding and lookup.
 - [x] Implement and verify diff 4: slot encoding and insertion.
 - [x] Implement and verify diff 5: ordered iteration.
-- [ ] Implement and verify diff 6: model checks and workspace verification.
-- [ ] Record verification outcomes and finalize the page design note.
+- [x] Implement and verify diff 6: model checks and workspace verification.
+- [x] Record verification outcomes and finalize the page design note.
 
 ## Verification outcomes
 
@@ -625,6 +625,15 @@ Each commit passed `cargo fmt --all -- --check`,
   records in order for sorted, reverse, and mixed insertion sequences, including
   prefix keys, empty values, and iterator exhaustion. `page.iter()` and `for`
   loops over a `&Page` yield the same records, and the remaining length is exact.
+- Diff 6 (14 unit tests and 1 documentation test): the independent ordered-map
+  model passed all 66 combinations of 11 capacities, 3 key orders, and 2
+  value-size profiles. After each operation, it verifies expected errors,
+  failure atomicity, lookup, iteration, count, free space, and independently
+  decoded byte invariants. Dense 4096-byte pages exercise counts greater than 255.
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps` passed on
+  the final commit.
+- The stack implements the design recorded in this plan. The page design note
+  and parent roadmap are current. No unresolved failures or blockers remain.
 
 ## Sources
 
