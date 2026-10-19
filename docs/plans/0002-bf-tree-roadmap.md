@@ -138,11 +138,13 @@ the completed concurrent, larger-than-memory engine.
 
 - [x] Read the paper and inspect relevant Microsoft implementation code.
 - [x] Agree on the component map and incremental build direction.
-- [ ] Review and implement [the shared-page stack](0003-bf-tree-page.md).
+- [x] Review and implement [the shared-page stack](0003-bf-tree-page.md).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
-only when its behavior and verification are delivered. Next, review the shared-page
-stack's scope and layout choices, including the header-size budget.
+only when its behavior and verification are delivered. The
+[shared-page design](../design/bf-tree-pages.md) records the implemented contract.
+Next, plan page mutation and ranges: replacement/reclamation, record-kind
+semantics, fences, and incremental layout optimizations.
 
 ## Sources
 
