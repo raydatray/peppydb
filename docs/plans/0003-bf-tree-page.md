@@ -602,7 +602,7 @@ cargo test --workspace
 - [x] Implement and verify diff 2: header and initialization.
 - [x] Implement and verify diff 3: slot decoding and lookup.
 - [x] Implement and verify diff 4: slot encoding and insertion.
-- [ ] Implement and verify diff 5: ordered iteration.
+- [x] Implement and verify diff 5: ordered iteration.
 - [ ] Implement and verify diff 6: model checks and workspace verification.
 - [ ] Record verification outcomes and finalize the page design note.
 
@@ -621,6 +621,10 @@ Each commit passed `cargo fmt --all -- --check`,
 - Diff 4 (11 unit tests): golden bytes match the worked insertion. Exact fits and
   rejection precedence preserve bytes; insertion preserves existing payloads,
   flags, and inactive metadata.
+- Diff 5 (13 unit tests and 1 documentation test): iteration returns borrowed
+  records in order for sorted, reverse, and mixed insertion sequences, including
+  prefix keys, empty values, and iterator exhaustion. `page.iter()` and `for`
+  loops over a `&Page` yield the same records, and the remaining length is exact.
 
 ## Sources
 
