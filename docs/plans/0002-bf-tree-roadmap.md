@@ -80,7 +80,7 @@ The milestones below are not individual commits or reserved plan numbers.
 
 | Milestone | Builds on | Reviewable outcome |
 | --- | --- | --- |
-| 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. |
+| 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
 | 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. |
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and splits that account for variable record sizes. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
@@ -138,7 +138,7 @@ the completed concurrent, larger-than-memory engine.
 
 - [x] Read the paper and inspect relevant Microsoft implementation code.
 - [x] Agree on the component map and incremental build direction.
-- [ ] Review and implement the shared-page stack.
+- [ ] Review and implement [the shared-page stack](0003-bf-tree-page.md).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. Next, review the shared-page
