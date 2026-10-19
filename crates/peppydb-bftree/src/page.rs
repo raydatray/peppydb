@@ -1,5 +1,29 @@
 //! Packed pages backed by caller-owned storage.
+//!
+//! ```
+//! use peppydb_bftree::Page;
+//!
+//! let mut storage = [0; 128];
+//! let page = Page::init(&mut storage).unwrap();
+//! page.try_insert(b"30", b"cat").unwrap();
+//! page.try_insert(b"10", b"dog").unwrap();
+//! page.try_insert(b"20", b"owl").unwrap();
+//!
+//! // Reads need only a shared reference.
+//! let page: &Page = page;
+//! assert_eq!(page.get(b"20"), Ok(Some(b"owl".as_slice())));
+//! let records: Vec<_> = page.iter().collect();
+//! assert_eq!(records, vec![
+//!     (b"10".as_slice(), b"dog".as_slice()),
+//!     (b"20".as_slice(), b"owl".as_slice()),
+//!     (b"30".as_slice(), b"cat".as_slice()),
+//! ]);
+//! for (key, value) in page {
+//!     assert_eq!(page.get(key), Ok(Some(value)));
+//! }
+//! ```
 
+use std::iter::FusedIterator;
 use std::ops::Range;
 
 use zerocopy::little_endian::{U16, U64};
@@ -215,6 +239,14 @@ impl Page {
         Ok((stored_key == key).then_some(value))
     }
 
+    /// Borrow key/value pairs in lexicographic key order without allocation.
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            page: self,
+            indices: 0..self.len(),
+        }
+    }
+
     /// Number of records.
     pub fn len(&self) -> usize {
         usize::from(self.header.count_and_flags.get() & COUNT_MASK)
@@ -266,6 +298,40 @@ impl Page {
             .partition_point(|slot| &bytes[slot.key_range()] < key)
     }
 }
+
+impl<'p> IntoIterator for &'p Page {
+    type Item = (&'p [u8], &'p [u8]);
+    type IntoIter = Iter<'p>;
+
+    fn into_iter(self) -> Iter<'p> {
+        self.iter()
+    }
+}
+
+/// Borrowed key/value pairs of a [`Page`] in lexicographic key order.
+///
+/// Created by [`Page::iter`] or by iterating over `&Page`.
+#[derive(Clone, Debug)]
+pub struct Iter<'p> {
+    page: &'p Page,
+    indices: Range<usize>,
+}
+
+impl<'p> Iterator for Iter<'p> {
+    type Item = (&'p [u8], &'p [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|index| self.page.record_at(index))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {}
+
+impl FusedIterator for Iter<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -531,6 +597,57 @@ mod tests {
             assert_eq!(read_u16(page.as_bytes(), 0), 0xb000 | (index + 1) as u16);
             assert_eq!(&page.as_bytes()[6..32], inactive);
             assert_eq!(page.capacity(), 128);
+        }
+    }
+
+    #[test]
+    fn iterate_empty_page() {
+        let mut storage = [0; 64];
+        let page: &Page = Page::init(&mut storage).unwrap();
+        let mut iter = page.iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert_eq!(IntoIterator::into_iter(page).count(), 0);
+    }
+
+    #[test]
+    fn iterate_borrowed_records_in_key_order() {
+        let records = [
+            (b"\0".as_slice(), b"".as_slice()),
+            (b"\0\0", b"zero"),
+            (b"ab", b"short"),
+            (b"abc", b""),
+            (b"abcd", b"long"),
+            (b"\xff", b"\0"),
+        ];
+        for order in [[0, 1, 2, 3, 4, 5], [5, 4, 3, 2, 1, 0], [2, 5, 1, 4, 0, 3]] {
+            let mut storage = [0; 128];
+            let page = Page::init(&mut storage).unwrap();
+            for index in order {
+                let (key, value) = records[index];
+                page.try_insert(key, value).unwrap();
+            }
+            let page: &Page = page;
+            let before = page.as_bytes().to_vec();
+            let mut iter = page.iter();
+            for (index, &(key, value)) in records.iter().enumerate() {
+                assert_eq!(iter.len(), records.len() - index);
+                let actual = iter.next().unwrap();
+                assert_eq!(actual, (key, value));
+                let offset = usize::from(read_u16(page.as_bytes(), 32 + index * 8));
+                assert_eq!(actual.0.as_ptr(), page.as_bytes()[offset..].as_ptr());
+                assert_eq!(actual.1.as_ptr(), page.get(key).unwrap().unwrap().as_ptr());
+            }
+            assert_eq!(iter.len(), 0);
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next(), None);
+            let mut expected = records.iter().copied();
+            for record in page {
+                assert_eq!(Some(record), expected.next());
+            }
+            assert_eq!(expected.next(), None);
+            assert_eq!(page.as_bytes(), before);
         }
     }
 }
