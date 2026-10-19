@@ -122,6 +122,8 @@ Report any unresolved failures or blockers explicitly.
 ## Stacked diffs
 - Organize work as an ordered stack of small, cohesive commits. Each commit
   represents one reviewable diff and builds on the preceding commit.
+- When a stack starts with a plan commit, count it as diff 1 and include it
+  in the total number of diffs. Number implementation commits after it.
 - Aim for about 300 changed lines or fewer per diff (additions plus deletions
   relative to its parent). This is a reviewability guideline, not a hard limit.
   Large renames, mechanical moves, and similar mechanical changes can exceed
