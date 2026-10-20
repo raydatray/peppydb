@@ -15,8 +15,7 @@ impl Page {
 
     /// Insert a distinct key with any record state. Absence states store no value.
     ///
-    /// Validation and byte-preserving failure follow [`Page::try_insert`].
-    /// New records start with a clear reference bit.
+    /// Errors match [`Page::try_insert`]. New records start unreferenced.
     pub fn try_insert_record(
         &mut self,
         key: &[u8],

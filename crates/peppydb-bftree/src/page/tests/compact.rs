@@ -71,7 +71,7 @@ fn compaction_preserves_physical_tombstone_values_and_metadata() {
         page.try_insert_record(key, state).unwrap();
         page.set_referenced(key, true).unwrap();
     }
-    // Make a metadata-only tombstone before upsert is implemented.
+    // Mark `b` deleted while keeping its value bytes.
     page.as_mut_bytes()[43] |= 0x40;
     page.header
         .count_and_flags

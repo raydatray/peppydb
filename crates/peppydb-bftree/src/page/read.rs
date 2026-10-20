@@ -54,7 +54,6 @@ impl Page {
         })
     }
 
-    /// Borrow the key addressed by slot `index` without decoding its value.
     pub(super) fn key_at(&self, index: usize) -> &[u8] {
         &self.as_bytes()[self.record_slots()[index].key_range()]
     }
@@ -79,13 +78,12 @@ impl Page {
         }
     }
 
-    /// Index of the first slot whose key is not less than `key`.
     pub(super) fn lower_bound(&self, key: &[u8]) -> usize {
         self.record_slots()
             .partition_point(|slot| self.compare_key(slot, key).is_lt())
     }
 
-    /// Compare meaningful preview bytes before loading the complete key.
+    /// Compare previews first; load the stored key only on a tie.
     pub(super) fn compare_key(&self, slot: &Slot, key: &[u8]) -> Ordering {
         let stored_preview = &slot.preview[..slot.key_range().len().min(PREVIEW_BYTES)];
         let query_preview = &key[..key.len().min(PREVIEW_BYTES)];

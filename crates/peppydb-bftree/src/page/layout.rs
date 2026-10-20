@@ -78,13 +78,11 @@ impl Slot {
         }
     }
 
-    /// Page-relative byte range of the key, excluding state bits from its length.
     pub(super) fn key_range(&self) -> Range<usize> {
         let start = usize::from(self.offset.get());
         start..start + usize::from(self.kind_and_key_len.get() & KEY_LEN_MASK)
     }
 
-    /// Value length, excluding the reference bit.
     pub(super) fn value_len(&self) -> usize {
         usize::from(self.ref_and_value_len.get() & VALUE_LEN_MASK)
     }

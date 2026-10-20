@@ -41,8 +41,8 @@ impl Page {
         recovered
     }
 
-    /// Rebuild physical slots, not logical records: absence views hide values.
-    /// The destination already has the source header and the same capacity.
+    /// Copy raw slots and payloads rather than records from `iter()`, which hide
+    /// tombstone values. `destination` must already hold this page's header.
     fn pack_payloads_into(&self, destination: &mut Page) {
         let mut end = self.capacity();
 
