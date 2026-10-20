@@ -9,6 +9,10 @@ This walkthrough describes BF-Tree as presented in the paper. In the comparison,
 and inner nodes route searches. RocksDB provides the concrete example of a
 log-structured merge tree (LSM tree).
 
+For implementation details, see
+[page operations in Microsoft's BF-Tree](bf-tree-upstream-pages.md), which traces
+the pinned upstream code's reads, mutations, consolidation, and capacity handling.
+
 ## Conventional B-tree: cache and update whole pages
 
 The tree divides the keyspace into leaf pages. A lookup follows inner-node
