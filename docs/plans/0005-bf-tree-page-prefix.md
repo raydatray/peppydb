@@ -398,7 +398,7 @@ or new benchmark framework is part of this stack.
 - [x] Implement and verify diff 2: logical key views.
 - [x] Implement and verify diff 3: record/fence API migration.
 - [x] Implement and verify diff 4: prefix-aware decoding and search.
-- [ ] Implement and verify diff 5: physical mutation and compaction accounting.
+- [x] Implement and verify diff 5: physical mutation and compaction accounting.
 - [ ] Implement and verify diff 6: compressed initialization.
 - [ ] Implement and verify diff 7: model checks and final verification.
 - [ ] Update the design note and mark milestone 2 complete after delivery.

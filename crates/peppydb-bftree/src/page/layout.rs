@@ -19,10 +19,12 @@ pub(super) const HAS_FENCES: u16 = 1 << (FLAGS_SHIFT + 3);
 
 pub(super) const KIND_SHIFT: u32 = 14;
 const KEY_LEN_MASK: u16 = (1 << KIND_SHIFT) - 1;
+pub(super) const MAX_KEY_LEN: usize = KEY_LEN_MASK as usize;
 
 const REFERENCED_SHIFT: u32 = 15;
 const REFERENCED_BIT: u16 = 1 << REFERENCED_SHIFT;
 const VALUE_LEN_MASK: u16 = (1 << REFERENCED_SHIFT) - 1;
+pub(super) const MAX_VALUE_LEN: usize = VALUE_LEN_MASK as usize;
 
 /// Page header at bytes `0..HEADER_BYTES`.
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -64,15 +66,23 @@ pub(super) struct Slot {
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
 impl Slot {
-    /// Encode an unreferenced record. Preflight must bound both lengths.
-    pub(super) fn new(offset: u16, key: &[u8], value_len: u16, kind: RecordKind) -> Self {
+    /// Encode an unreferenced entry that omits the first `omitted` key bytes.
+    /// Preflight must bound both lengths.
+    pub(super) fn new(
+        offset: u16,
+        key: &[u8],
+        omitted: usize,
+        value_len: u16,
+        kind: RecordKind,
+    ) -> Self {
+        let stored = &key[omitted..];
         Self {
             offset: U16::new(offset),
             kind_and_key_len: U16::new(kind.key_word(key.len() as u16)),
             ref_and_value_len: U16::new(value_len),
             preview: [
-                key.first().copied().unwrap_or(0),
-                key.get(1).copied().unwrap_or(0),
+                stored.first().copied().unwrap_or(0),
+                stored.get(1).copied().unwrap_or(0),
             ],
         }
     }
@@ -87,12 +97,6 @@ impl Slot {
     pub(super) fn stored_key_range(&self, omitted: usize) -> Range<usize> {
         let start = usize::from(self.offset.get());
         start..start + self.key_len() - omitted
-    }
-
-    /// Page-relative range of the full stored key, for slots that omit no
-    /// prefix bytes. Valid only while the page prefix is empty.
-    pub(super) fn key_range(&self) -> Range<usize> {
-        self.stored_key_range(0)
     }
 
     pub(super) fn value_len(&self) -> usize {

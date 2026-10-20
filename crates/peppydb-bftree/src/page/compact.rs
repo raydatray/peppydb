@@ -1,16 +1,15 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::Page;
-use super::layout::{HEADER_BYTES, LOW_INFINITY, SLOT_BYTES};
+use super::layout::{HEADER_BYTES, SLOT_BYTES};
 
 impl Page {
     /// Unreachable payload bytes, excluding the contiguous free gap.
     /// Retained tombstone value allocations remain reachable.
     pub fn reclaimable_bytes(&self) -> usize {
-        let reachable: usize = self
-            .slots()
-            .iter()
-            .map(|slot| slot.key_range().len() + slot.value_len())
+        let reachable: usize = (0..self.slot_count())
+            .filter_map(|index| self.payload_range(index))
+            .map(|payload| payload.len())
             .sum();
 
         self.capacity()
@@ -42,25 +41,19 @@ impl Page {
     }
 
     /// Copy raw slots and payloads rather than records from `iter()`, which hide
-    /// tombstone values. `destination` must already hold this page's header.
+    /// tombstone values and include the prefix in keys. `destination` must
+    /// already hold this page's header.
     fn pack_payloads_into(&self, destination: &mut Page) {
         let mut end = self.capacity();
 
         for (index, slot) in self.slots().iter().enumerate() {
-            if slot.offset.get() >= LOW_INFINITY {
-                destination.slots_mut()[index] = *slot;
-                continue;
-            }
-
-            let start = slot.key_range().start;
-            let length = slot.key_range().len() + slot.value_len();
-
-            end -= length;
-            destination.as_mut_bytes()[end..end + length]
-                .copy_from_slice(&self.as_bytes()[start..start + length]);
-
             let mut packed = *slot;
-            packed.offset.set(end as u16);
+            if let Some(payload) = self.payload_range(index) {
+                end -= payload.len();
+                destination.as_mut_bytes()[end..end + payload.len()]
+                    .copy_from_slice(&self.as_bytes()[payload]);
+                packed.offset.set(end as u16);
+            }
             destination.slots_mut()[index] = packed;
         }
 
