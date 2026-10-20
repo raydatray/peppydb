@@ -5,16 +5,24 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::RecordKind;
 
-/// Encoded header length shared by every `Page`.
 pub(super) const HEADER_BYTES: usize = 32;
-pub(super) const COUNT_MASK: u16 = 0x0fff;
-pub(super) const NO_BACKING_LEAF: u64 = u64::MAX;
 pub(super) const SLOT_BYTES: usize = 8;
-pub(super) const HAS_FENCES: u16 = 0x8000;
+
+pub(super) const NO_BACKING_LEAF: u64 = u64::MAX;
+// Fence slot offsets that encode unbounded lower and upper fences.
 pub(super) const LOW_INFINITY: u16 = u16::MAX - 1;
 pub(super) const HIGH_INFINITY: u16 = u16::MAX;
-const KEY_LEN_MASK: u16 = 0x3fff;
-const VALUE_LEN_MASK: u16 = 0x7fff;
+
+const FLAGS_SHIFT: u32 = 12;
+pub(super) const COUNT_MASK: u16 = (1 << FLAGS_SHIFT) - 1;
+pub(super) const HAS_FENCES: u16 = 1 << (FLAGS_SHIFT + 3);
+
+pub(super) const KIND_SHIFT: u32 = 14;
+const KEY_LEN_MASK: u16 = (1 << KIND_SHIFT) - 1;
+
+const REFERENCED_SHIFT: u32 = 15;
+const REFERENCED_BIT: u16 = 1 << REFERENCED_SHIFT;
+const VALUE_LEN_MASK: u16 = (1 << REFERENCED_SHIFT) - 1;
 
 /// Page header at bytes `0..HEADER_BYTES`.
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -80,7 +88,7 @@ impl Slot {
     }
 
     pub(super) fn kind(&self) -> RecordKind {
-        match self.kind_and_key_len.get() >> 14 {
+        match self.kind_and_key_len.get() >> KIND_SHIFT {
             0 => RecordKind::Insert,
             1 => RecordKind::Delete,
             2 => RecordKind::Cache,
@@ -90,14 +98,14 @@ impl Slot {
     }
 
     pub(super) fn referenced(&self) -> bool {
-        self.ref_and_value_len.get() & !VALUE_LEN_MASK != 0
+        self.ref_and_value_len.get() & REFERENCED_BIT != 0
     }
 
     pub(super) fn set_referenced(&mut self, referenced: bool) {
         let length = self.ref_and_value_len.get() & VALUE_LEN_MASK;
 
         self.ref_and_value_len
-            .set(length | (u16::from(referenced) << 15));
+            .set(length | (u16::from(referenced) << REFERENCED_SHIFT));
     }
 
     pub(super) fn set_kind(&mut self, kind: RecordKind) {
@@ -107,6 +115,6 @@ impl Slot {
 
     pub(super) fn set_value_len(&mut self, length: u16) {
         self.ref_and_value_len
-            .set((self.ref_and_value_len.get() & !VALUE_LEN_MASK) | length);
+            .set((self.ref_and_value_len.get() & REFERENCED_BIT) | length);
     }
 }
