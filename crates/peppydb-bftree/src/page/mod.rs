@@ -12,14 +12,20 @@
 //! // Reads need only a shared reference.
 //! let page: &Page = page;
 //! assert_eq!(page.get(b"20").unwrap().unwrap().state, RecordState::Insert(b"owl"));
-//! let records: Vec<_> = page.iter().map(|record| (record.key, record.state.value())).collect();
+//!
+//! // Keys are borrowed logical views; materialize them only when needed.
+//! let records: Vec<_> = page
+//!     .iter()
+//!     .map(|record| (record.key.to_vec(), record.state.value()))
+//!     .collect();
 //! assert_eq!(records, vec![
-//!     (b"10".as_slice(), Some(b"dog".as_slice())),
-//!     (b"20".as_slice(), Some(b"owl".as_slice())),
-//!     (b"30".as_slice(), Some(b"cat".as_slice())),
+//!     (b"10".to_vec(), Some(b"dog".as_slice())),
+//!     (b"20".to_vec(), Some(b"owl".as_slice())),
+//!     (b"30".to_vec(), Some(b"cat".as_slice())),
 //! ]);
+//! assert!(page.iter().all(|record| record.key.cmp_bytes(b"05").is_gt()));
 //! for record in page {
-//!     assert_eq!(page.get(record.key), Ok(Some(record)));
+//!     assert_eq!(page.get(&record.key.to_vec()), Ok(Some(record)));
 //! }
 //! ```
 

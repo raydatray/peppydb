@@ -71,6 +71,19 @@ stored `Delete` or `Phantom` state. `Insert` and `Cache` borrow their logical va
 including an empty value. `RecordState::kind()` and `value()` expose these two
 views. `RecordRef` also borrows the key and reports the reference bit.
 
+### Logical keys
+
+`RecordRef::key` is a `KeyRef`: a borrowed logical key made of a prefix slice
+and a suffix slice. The parts may borrow disjoint page regions, and either may be
+empty. `prefix()` and `suffix()` return slices with the page lifetime, not the
+lifetime of the view value. `len()`, `bytes()`, `cmp_bytes(&[u8])`, and the `Eq`
+and `Ord` implementations use the concatenated bytes, so `ab` + `c` equals
+`a` + `bc`. This lets a compressed base-page key compare directly with an
+uncompressed mini-page key. `From<&[u8]>` builds a view with an empty prefix.
+`KeyRef` has no implicit contiguous-slice conversion, because flattening can
+require allocation; callers use `to_vec()` explicitly. Point operations and
+range bounds still take full `&[u8]` keys.
+
 `iter()` and iteration over `&Page` yield every stored record in key order,
 including absence records. The iterator is exact-sized and fused. Reads never
 change page bytes or reference bits. Borrowed results keep the page borrowed;
@@ -151,6 +164,12 @@ caller. An insertion rejected on a fragmented page leaves every byte unchanged.
 their keys. Ordinary records follow them. The header count includes these slots;
 `len`, lookup, and iteration exclude them. Both unbounded fences still consume
 16 directory bytes. `Page::init` creates an unfenced page with no such slots.
+
+`Fence<K>` and `Fences<K>` share one bound definition between representations.
+`init_with_fences` takes `Fences<&[u8]>` with full input keys, and `fences()`
+returns `Option<Fences<KeyRef>>` with borrowed logical bounds. `K` has no trait
+bound; derived traits apply when `K` supports them. `None` means the page has no
+fence slots. Membership checks compare logical fence views with the full query.
 
 `Fence::Key(b"")` is finite and distinct from `Fence::Unbounded`. Finite fences
 use normal `Insert` slots with zero value length and reference bit. Their keys

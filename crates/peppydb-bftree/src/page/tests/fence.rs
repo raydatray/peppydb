@@ -2,33 +2,34 @@ use super::*;
 
 #[test]
 fn initialize_fence_profiles_at_every_capacity_and_borrow_only_storage() {
+    let profiles: [Fences<&[u8]>; 6] = [
+        Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Unbounded,
+        },
+        Fences {
+            lower: Fence::Key(b""),
+            upper: Fence::Unbounded,
+        },
+        Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Key(b""),
+        },
+        Fences {
+            lower: Fence::Key(b"a"),
+            upper: Fence::Unbounded,
+        },
+        Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Key(b"z"),
+        },
+        Fences {
+            lower: Fence::Key(b"a"),
+            upper: Fence::Key(b"z"),
+        },
+    ];
     for capacity in (64..=4096).step_by(64) {
-        for fences in [
-            Fences {
-                lower: Fence::Unbounded,
-                upper: Fence::Unbounded,
-            },
-            Fences {
-                lower: Fence::Key(b""),
-                upper: Fence::Unbounded,
-            },
-            Fences {
-                lower: Fence::Unbounded,
-                upper: Fence::Key(b""),
-            },
-            Fences {
-                lower: Fence::Key(b"a"),
-                upper: Fence::Unbounded,
-            },
-            Fences {
-                lower: Fence::Unbounded,
-                upper: Fence::Key(b"z"),
-            },
-            Fences {
-                lower: Fence::Key(b"a"),
-                upper: Fence::Key(b"z"),
-            },
-        ] {
+        for fences in profiles {
             let mut storage = vec![0xa5; capacity + 1];
             let page = {
                 let lower = match fences.lower {
@@ -48,7 +49,7 @@ fn initialize_fence_profiles_at_every_capacity_and_borrow_only_storage() {
                 )
                 .unwrap()
             };
-            assert_eq!(page.fences(), Some(fences));
+            assert_eq!(page.fences(), Some(logical(fences)));
             assert_eq!(read_u16(page.as_bytes(), 0), 0x8002);
             assert!(page.is_empty());
             assert_eq!(page.iter().len(), 0);
@@ -85,7 +86,7 @@ fn initialize_fence_profiles_at_every_capacity_and_borrow_only_storage() {
                 }
             }
             assert_eq!(page.compact(), 0);
-            assert_eq!(page.fences(), Some(fences));
+            assert_eq!(page.fences(), Some(logical(fences)));
             assert_eq!(storage[0], 0xa5);
         }
     }
@@ -188,12 +189,12 @@ fn all_point_operations_enforce_half_open_fences_before_size() {
     assert_eq!(page.as_bytes(), before);
     page.try_upsert(b"a", RecordState::Delete).unwrap();
     page.set_referenced(b"a", true).unwrap();
-    let fences = Fences {
+    let fences: Fences<&[u8]> = Fences {
         lower: Fence::Key(b"a"),
         upper: Fence::Key(b"z"),
     };
     assert_eq!(page.compact(), 0);
-    assert_eq!(page.fences(), Some(fences));
+    assert_eq!(page.fences(), Some(logical(fences)));
     assert_eq!(page.get(b"a").unwrap().unwrap().state, RecordState::Delete);
     assert!(page.get(b"a").unwrap().unwrap().referenced);
     assert_eq!(page.remove(b"a"), Ok(true));
@@ -201,7 +202,7 @@ fn all_point_operations_enforce_half_open_fences_before_size() {
     assert_eq!(page.reclaimable_bytes(), 6);
     assert_eq!(page.compact(), 6);
     assert_eq!(page.free_bytes(), 14);
-    assert_eq!(page.fences(), Some(fences));
+    assert_eq!(page.fences(), Some(logical(fences)));
 }
 
 #[test]
@@ -219,4 +220,49 @@ fn finite_empty_upper_fence_accepts_no_nonempty_records() {
     let mut storage = [0; 64];
     let page = Page::init(&mut storage).unwrap();
     assert_eq!(page.fences(), None);
+}
+
+#[test]
+fn logical_views_borrow_the_page_rather_than_the_view() {
+    let mut storage = [0; 128];
+    let page = Page::init_with_fences(
+        &mut storage,
+        Fences {
+            lower: Fence::Key(b"acct/100"),
+            upper: Fence::Key(b"acct/200"),
+        },
+    )
+    .unwrap();
+    page.try_insert(b"acct/123", b"v").unwrap();
+    let page: &Page = page;
+    let (lower, upper, record) = {
+        // Each view is a temporary; the returned slices borrow only `page`.
+        let fences = page.fences().unwrap();
+        let (Fence::Key(lower), Fence::Key(upper)) = (fences.lower, fences.upper) else {
+            panic!("finite fences");
+        };
+        let record = page.get(b"acct/123").unwrap().unwrap();
+        (lower.suffix(), upper.suffix(), record.key.suffix())
+    };
+    let bytes = page.as_bytes().as_ptr_range();
+    for part in [lower, upper, record] {
+        assert!(bytes.contains(&part.as_ptr()));
+    }
+    // Fences compare with full-key inputs by logical bytes.
+    let Some(fences) = page.fences() else {
+        panic!("fenced page");
+    };
+    assert_eq!(
+        fences,
+        logical(Fences {
+            lower: Fence::Key(b"acct/100"),
+            upper: Fence::Key(b"acct/200"),
+        })
+    );
+    let Fence::Key(upper) = fences.upper else {
+        panic!("finite upper fence");
+    };
+    assert!(upper.cmp_bytes(b"acct/200").is_eq());
+    assert!(upper.cmp_bytes(b"acct/2").is_gt());
+    assert_eq!(upper.to_vec(), b"acct/200");
 }

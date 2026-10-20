@@ -212,7 +212,7 @@ fn upsert_all_state_transitions_and_sizes_preserve_references() {
                     assert_eq!(
                         page.get(b"k"),
                         Ok(Some(RecordRef {
-                            key: b"k",
+                            key: KeyRef::from(b"k".as_slice()),
                             state: new,
                             referenced
                         }))
