@@ -7,6 +7,7 @@ mod fence;
 mod key;
 mod layout;
 mod model;
+mod prefix;
 mod read;
 mod write;
 

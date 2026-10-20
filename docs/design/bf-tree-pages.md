@@ -101,12 +101,22 @@ only the page and retains no query slices. It is exact-sized, fused, and uses
 
 ### Preview-first search
 
-All point paths and range endpoints use one lower-bound search. It compares
-the meaningful first one or two preview bytes as slices, then loads the complete
+All point paths and range endpoints use one binary search. It returns
+`Ok(index)` for a stored key and `Err(index)` with the insertion position
+otherwise. Point operations decide hit or miss from that result without a second
+key comparison; range endpoints use the index from either variant. Each probe
+compares the meaningful first one or two preview bytes as slices, then loads the complete
 key only on a tie. Zero padding is excluded for short keys. This preserves full
 lexicographic byte ordering, including embedded zero bytes and preview collisions,
 without relying on native integer ordering. Unequal previews avoid payload access.
 This is a search fast path; no throughput claim is made without a workload.
+
+On a page with a nonzero prefix, the search first classifies the full query
+against the prefix. A query that diverges inside the prefix, or ends within it,
+sorts before or after every record without a slot comparison. Otherwise the
+binary search compares the query's remaining suffix with stored suffixes and
+their previews. A query equal to the prefix has an empty suffix and is searched
+normally. With a zero prefix, the search reduces to full-key comparison.
 
 ## Typed writes and reference hints
 

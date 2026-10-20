@@ -22,11 +22,7 @@ impl Page {
         state: RecordState<'_>,
     ) -> Result<(), PageError> {
         let needed = self.record_size(key, state)?;
-        let count = self.len();
-        let index = self.lower_bound(key);
-        if index < count && self.key_at(index) == key {
-            return Err(PageError::DuplicateKey);
-        }
+        let index = self.search(key).err().ok_or(PageError::DuplicateKey)?;
 
         self.insert_at(index, key, state, needed)
     }
@@ -43,14 +39,15 @@ impl Page {
         state: RecordState<'_>,
     ) -> Result<UpsertOutcome, PageError> {
         let needed = self.record_size(key, state)?;
-        let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
-            self.insert_at(index, key, state, needed)?;
+        let index = match self.search(key) {
+            Ok(index) => index + self.record_start(),
+            Err(index) => {
+                self.insert_at(index, key, state, needed)?;
 
-            return Ok(UpsertOutcome::Inserted);
-        }
+                return Ok(UpsertOutcome::Inserted);
+            }
+        };
 
-        let index = index + self.record_start();
         let mut slot = self.slots()[index];
 
         if state != RecordState::Delete {
@@ -139,10 +136,9 @@ impl Page {
     pub fn set_referenced(&mut self, key: &[u8], referenced: bool) -> Result<bool, PageError> {
         self.check_key(key)?;
 
-        let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
+        let Ok(index) = self.search(key) else {
             return Ok(false);
-        }
+        };
 
         let index = index + self.record_start();
         self.slots_mut()[index].set_referenced(referenced);
@@ -157,10 +153,9 @@ impl Page {
     pub fn remove(&mut self, key: &[u8]) -> Result<bool, PageError> {
         self.check_key(key)?;
 
-        let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
+        let Ok(index) = self.search(key) else {
             return Ok(false);
-        }
+        };
 
         let index = index + self.record_start();
         let count = self.slot_count();

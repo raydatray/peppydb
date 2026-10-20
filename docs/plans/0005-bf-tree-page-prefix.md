@@ -188,28 +188,35 @@ Point operations first retain 0004's empty-key and fence-membership checks.
 Membership compares logical fence views with the full query key. Range endpoints
 may be empty, shorter than the prefix, or outside the page's interval.
 
-`lower_bound` already returns an ordinary-record insertion position in
-`0..=len()`, including the end sentinel. Classify the query against the shared
-prefix once before binary-searching suffixes:
+A single `search` replaces 0004's `lower_bound`. It returns `Ok(index)` for a
+stored key and `Err(index)` with the ordinary-record insertion position in
+`0..=len()` otherwise. Strip the shared prefix once before binary-searching
+suffixes:
 
 ```rust
-let common = key.len().min(prefix.len());
-match key[..common].cmp(&prefix[..common]) {
-    Ordering::Less => return 0,
-    Ordering::Greater => return self.len(),
-    Ordering::Equal if key.len() < prefix.len() => return 0,
-    Ordering::Equal => {}
+match key.strip_prefix(prefix) {
+    // Compare meaningful suffix previews, then stored suffixes on a tie.
+    Some(query) => self
+        .record_slots()
+        .binary_search_by(|slot| self.compare_suffix(slot, query)),
+    None if key < prefix => Err(0),
+    None => Err(self.len()),
 }
-
-let query_suffix = &key[prefix.len()..];
-// Binary-search meaningful suffix previews, then stored suffixes on a tie.
 ```
 
-This preserves full-key ordering without allocating or repeatedly comparing the
+A query without the prefix either sorts before it, including a query that ends
+inside the prefix, or diverges above it and sorts after every record. This
+preserves full-key ordering without allocating or repeatedly comparing the
 shared prefix at every binary-search probe. A query equal to the prefix has an
 empty suffix and must be handled normally. With `p = 0`, the algorithm reduces
-to the existing full-key search. `get` compares its candidate's logical key with
-the original query; iteration reconstructs views, not owned keys.
+to full-key search.
+
+Keys on a page are unique, so `binary_search_by` returns the lower bound in
+both variants. Point operations use the variant directly: `get`, `remove`, and
+`set_referenced` need no second key comparison, `try_insert_record` rejects
+`Ok` as a duplicate, and `try_upsert` replaces on `Ok` and inserts on `Err`.
+Range endpoints use the index from either variant. Iteration reconstructs
+views, not owned keys.
 
 ### 6. Adapt mutation, accounting, and compaction
 
@@ -397,7 +404,7 @@ or new benchmark framework is part of this stack.
 - [x] Finalize diff 1: approved plan for implementation handoff.
 - [x] Implement and verify diff 2: logical key views.
 - [x] Implement and verify diff 3: record/fence API migration.
-- [ ] Implement and verify diff 4: prefix-aware decoding and search.
+- [x] Implement and verify diff 4: prefix-aware decoding and search.
 - [ ] Implement and verify diff 5: physical mutation and compaction accounting.
 - [ ] Implement and verify diff 6: compressed initialization.
 - [ ] Implement and verify diff 7: model checks and final verification.
