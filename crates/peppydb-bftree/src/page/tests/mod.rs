@@ -12,3 +12,11 @@ mod write;
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
+
+fn live<'a>(key: &'a [u8], value: &'a [u8]) -> RecordRef<'a> {
+    RecordRef {
+        key,
+        state: RecordState::Insert(value),
+        referenced: false,
+    }
+}
