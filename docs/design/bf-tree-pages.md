@@ -65,6 +65,10 @@ Each slot uses 8 bytes:
 
 ## `Page` as a base type
 
+The public `page` module uses private `layout`, `record`, `read`, and `write`
+submodules. They implement the same `Page` type and keep encoding details private.
+Unit tests use independent byte decoding alongside ordered-map checks.
+
 `Page` holds what every leaf-level page shares: the header, the slot directory,
 and the record operations. Later stacks add role types that wrap `Page`, expose
 the header fields their role uses, and enforce role-specific rules:
