@@ -188,3 +188,133 @@ fn iterate_borrowed_records_in_key_order() {
         assert_eq!(page.as_bytes(), before);
     }
 }
+
+#[test]
+fn bounded_iteration_matches_ordered_filtering_with_and_without_fences() {
+    let keys = [
+        b"\0".as_slice(),
+        b"\0\0",
+        b"a",
+        b"ab",
+        b"abc",
+        b"abd",
+        b"b",
+        b"\xff",
+    ];
+    let bounds = [
+        None,
+        Some(b"".as_slice()),
+        Some(b"\0"),
+        Some(b"\0\0"),
+        Some(b"aa"),
+        Some(b"ab"),
+        Some(b"abc"),
+        Some(b"abcd"),
+        Some(b"z"),
+        Some(b"\xff"),
+        Some(b"\xff\xff"),
+    ];
+    for fenced in [false, true] {
+        let mut storage = [0; 256];
+        let page = if fenced {
+            Page::init_with_fences(
+                &mut storage,
+                Fences {
+                    lower: Fence::Key(b"a"),
+                    upper: Fence::Key(b"z"),
+                },
+            )
+            .unwrap()
+        } else {
+            Page::init(&mut storage).unwrap()
+        };
+        let mut model = BTreeMap::new();
+        for (index, key) in keys.into_iter().enumerate() {
+            if fenced && !(b"a".as_slice()..b"z").contains(&key) {
+                continue;
+            }
+            let state = [
+                RecordState::Insert(b""),
+                RecordState::Delete,
+                RecordState::Cache(b"value"),
+                RecordState::Phantom,
+            ][index % 4];
+            page.try_insert_record(key, state).unwrap();
+            page.set_referenced(key, index % 2 == 0).unwrap();
+            model.insert(
+                key,
+                RecordRef {
+                    key,
+                    state,
+                    referenced: index % 2 == 0,
+                },
+            );
+        }
+        let before = page.as_bytes().to_vec();
+        for start in bounds {
+            for end in bounds {
+                if start.zip(end).is_some_and(|(start, end)| start > end) {
+                    assert_eq!(page.range(start, end).err(), Some(PageError::InvalidRange));
+                    continue;
+                }
+                let expected: Vec<_> = model
+                    .values()
+                    .copied()
+                    .filter(|record| {
+                        start.is_none_or(|start| record.key >= start)
+                            && end.is_none_or(|end| record.key < end)
+                    })
+                    .collect();
+                let mut actual = page.range(start, end).unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for (index, record) in expected.iter().enumerate() {
+                    assert_eq!(
+                        actual.size_hint(),
+                        (expected.len() - index, Some(expected.len() - index))
+                    );
+                    assert_eq!(actual.next(), Some(*record));
+                }
+                assert_eq!(actual.len(), 0);
+                assert_eq!(actual.next(), None);
+                assert_eq!(actual.next(), None);
+            }
+        }
+        let unbounded: Vec<_> = page.range(None, None).unwrap().collect();
+        let all: Vec<_> = page.iter().collect();
+        assert_eq!(unbounded, all);
+        assert_eq!(page.as_bytes(), before);
+        // Output lifetime is independent of the query's allocated storage.
+        let records = {
+            let start = b"a".to_vec();
+            let end = b"z".to_vec();
+            page.range(Some(&start), Some(&end)).unwrap()
+        };
+        assert_eq!(records.count(), 5);
+    }
+}
+
+#[test]
+fn ranges_on_empty_pages_obey_bound_ordering_only() {
+    let mut storage = [0; 64];
+    let page = Page::init_with_fences(
+        &mut storage,
+        Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Key(b""),
+        },
+    )
+    .unwrap();
+    for (start, end) in [
+        (None, None),
+        (Some(b"".as_slice()), None),
+        (None, Some(b"".as_slice())),
+        (Some(b"a".as_slice()), Some(b"a".as_slice())),
+        (Some(b"a".as_slice()), Some(b"z".as_slice())),
+    ] {
+        assert_eq!(page.range(start, end).unwrap().len(), 0);
+    }
+    assert_eq!(
+        page.range(Some(b"z"), Some(b"a")).err(),
+        Some(PageError::InvalidRange)
+    );
+}

@@ -58,6 +58,8 @@ pub enum PageError {
     FencesTooLarge,
     #[error("key is outside the page fence range")]
     KeyOutOfRange,
+    #[error("range start must not exceed its end")]
+    InvalidRange,
 }
 
 /// A leaf-level page viewed in place over caller-owned bytes: the header
