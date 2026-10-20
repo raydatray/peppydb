@@ -81,6 +81,9 @@ structure design will define.
 
 ## References
 
+- [Page operations in Microsoft's BF-Tree](../explanations/bf-tree-upstream-pages.md)
+  explains the pinned implementation's layout, mutation, consolidation, and
+  capacity-handling mechanisms.
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.2/Figure 3: leaf pages
   and mini-pages share one packed record format.
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
