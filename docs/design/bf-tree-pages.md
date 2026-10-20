@@ -86,6 +86,15 @@ returned. Two lower-bound searches choose an index interval; the iterator borrow
 only the page and retains no query slices. It is exact-sized, fused, and uses
 `O(log n + output)` comparisons without allocation.
 
+### Preview-first search
+
+All point paths and range endpoints use one lower-bound search. It compares
+the meaningful first one or two preview bytes as slices, then loads the complete
+key only on a tie. Zero padding is excluded for short keys. This preserves full
+lexicographic byte ordering, including embedded zero bytes and preview collisions,
+without relying on native integer ordering. Unequal previews avoid payload access.
+This is a search fast path; no throughput claim is made without a workload.
+
 ## Typed writes and reference hints
 
 `try_insert_record` inserts any `RecordState` at a distinct nonempty key;
