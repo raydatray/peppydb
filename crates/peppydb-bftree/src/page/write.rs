@@ -22,22 +22,89 @@ impl Page {
         key: &[u8],
         state: RecordState<'_>,
     ) -> Result<(), PageError> {
-        if key.is_empty() {
-            return Err(PageError::EmptyKey);
-        }
-
-        let value = state.value().unwrap_or_default();
-        let needed = key
-            .len()
-            .checked_add(value.len())
-            .and_then(|size| size.checked_add(SLOT_BYTES))
-            .filter(|&size| size <= self.capacity() - HEADER_BYTES)
-            .ok_or(PageError::RecordTooLarge)?;
+        let needed = self.record_size(key, state)?;
         let count = self.len();
         let index = self.lower_bound(key);
         if index < count && self.key_at(index) == key {
             return Err(PageError::DuplicateKey);
         }
+
+        self.insert_at(index, key, state, needed)
+    }
+
+    /// Insert or replace using existing storage and the contiguous free gap.
+    ///
+    /// Deleting an existing entry changes only its kind and retains its value
+    /// allocation. Smaller replacements leave holes; growing ones allocate a
+    /// complete new payload. Replacement preserves the reference bit. No path
+    /// compacts implicitly, and every error preserves the complete page image.
+    pub fn try_upsert(
+        &mut self,
+        key: &[u8],
+        state: RecordState<'_>,
+    ) -> Result<UpsertOutcome, PageError> {
+        let needed = self.record_size(key, state)?;
+        let index = self.lower_bound(key);
+        if index == self.len() || self.key_at(index) != key {
+            self.insert_at(index, key, state, needed)?;
+
+            return Ok(UpsertOutcome::Inserted);
+        }
+
+        let mut slot = self.slots()[index];
+
+        if state != RecordState::Delete {
+            let value = state.value().unwrap_or_default();
+            if value.len() <= slot.value_len() {
+                let start = slot.key_range().end;
+                self.as_mut_bytes()[start..start + value.len()].copy_from_slice(value);
+
+                slot.set_value_len(value.len() as u16);
+            } else {
+                let payload_len = needed - SLOT_BYTES;
+                let free = self.free_bytes();
+                if payload_len > free {
+                    return Err(PageError::PageFull);
+                }
+
+                let end = HEADER_BYTES + self.len() * SLOT_BYTES + free;
+                let offset = end - payload_len;
+                self.as_mut_bytes()[offset..offset + key.len()].copy_from_slice(key);
+                self.as_mut_bytes()[offset + key.len()..end].copy_from_slice(value);
+
+                slot.offset.set(offset as u16);
+                slot.set_value_len(value.len() as u16);
+
+                self.header.remaining_size.set((free - payload_len) as u16);
+            }
+        }
+        slot.set_kind(state.kind());
+        self.slots_mut()[index] = slot;
+
+        Ok(UpsertOutcome::Replaced)
+    }
+
+    fn record_size(&self, key: &[u8], state: RecordState<'_>) -> Result<usize, PageError> {
+        if key.is_empty() {
+            return Err(PageError::EmptyKey);
+        }
+
+        key.len()
+            .checked_add(state.value().map_or(0, <[u8]>::len))
+            .and_then(|size| size.checked_add(SLOT_BYTES))
+            .filter(|&size| size <= self.capacity() - HEADER_BYTES)
+            .ok_or(PageError::RecordTooLarge)
+    }
+
+    fn insert_at(
+        &mut self,
+        index: usize,
+        key: &[u8],
+        state: RecordState<'_>,
+        needed: usize,
+    ) -> Result<(), PageError> {
+        let count = self.len();
+        let value = state.value().unwrap_or_default();
 
         let free = self.free_bytes();
         if needed > free {
@@ -110,4 +177,11 @@ impl Page {
 
         Ok(true)
     }
+}
+
+/// Whether a successful upsert created a slot or replaced an existing record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    Inserted,
+    Replaced,
 }
