@@ -54,14 +54,15 @@ impl Page {
         })
     }
 
-    pub(super) fn key_at(&self, index: usize) -> &[u8] {
-        &self.as_bytes()[self.record_slots()[index].key_range()]
+    pub(super) fn key_at(&self, index: usize) -> KeyRef<'_> {
+        let suffix = self.suffix_range(&self.record_slots()[index]);
+        KeyRef::new(self.prefix(), &self.as_bytes()[suffix])
     }
 
     pub(super) fn record_at(&self, index: usize) -> RecordRef<'_> {
         let slot = self.record_slots()[index];
-        let key = slot.key_range();
-        let value = key.end..key.end + slot.value_len();
+        let suffix = self.suffix_range(&slot);
+        let value = suffix.end..suffix.end + slot.value_len();
         let bytes = self.as_bytes();
 
         let state = match slot.kind() {
@@ -72,25 +73,37 @@ impl Page {
         };
 
         RecordRef {
-            key: KeyRef::from(&bytes[key]),
+            key: KeyRef::new(self.prefix(), &bytes[suffix]),
             state,
             referenced: slot.referenced(),
         }
     }
 
+    /// Every record key starts with the prefix, so compare `key` with the
+    /// prefix once, then binary-search the stored suffixes.
     pub(super) fn lower_bound(&self, key: &[u8]) -> usize {
+        let prefix = self.prefix();
+        let common = key.len().min(prefix.len());
+        match key[..common].cmp(&prefix[..common]) {
+            Ordering::Less => return 0,
+            Ordering::Greater => return self.len(),
+            Ordering::Equal if key.len() < prefix.len() => return 0,
+            Ordering::Equal => {}
+        }
+        let query = &key[prefix.len()..];
         self.record_slots()
-            .partition_point(|slot| self.compare_key(slot, key).is_lt())
+            .partition_point(|slot| self.compare_suffix(slot, query).is_lt())
     }
 
-    /// Compare previews first; load the stored key only on a tie.
-    pub(super) fn compare_key(&self, slot: &Slot, key: &[u8]) -> Ordering {
-        let stored_preview = &slot.preview[..slot.key_range().len().min(2)];
-        let query_preview = &key[..key.len().min(2)];
+    /// Compare previews first; load the stored suffix only on a tie.
+    pub(super) fn compare_suffix(&self, slot: &Slot, query: &[u8]) -> Ordering {
+        let stored_len = slot.key_len() - self.prefix_len();
+        let stored_preview = &slot.preview[..stored_len.min(2)];
+        let query_preview = &query[..query.len().min(2)];
 
         stored_preview.cmp(query_preview).then_with(|| {
-            let stored_key = &self.as_bytes()[slot.key_range()];
-            stored_key.cmp(key)
+            let stored = &self.as_bytes()[self.suffix_range(slot)];
+            stored.cmp(query)
         })
     }
 }

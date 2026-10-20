@@ -24,7 +24,7 @@ impl Page {
         let needed = self.record_size(key, state)?;
         let count = self.len();
         let index = self.lower_bound(key);
-        if index < count && self.key_at(index) == key {
+        if index < count && self.key_at(index).cmp_bytes(key).is_eq() {
             return Err(PageError::DuplicateKey);
         }
 
@@ -44,7 +44,7 @@ impl Page {
     ) -> Result<UpsertOutcome, PageError> {
         let needed = self.record_size(key, state)?;
         let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
+        if index == self.len() || self.key_at(index).cmp_bytes(key).is_ne() {
             self.insert_at(index, key, state, needed)?;
 
             return Ok(UpsertOutcome::Inserted);
@@ -140,7 +140,7 @@ impl Page {
         self.check_key(key)?;
 
         let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
+        if index == self.len() || self.key_at(index).cmp_bytes(key).is_ne() {
             return Ok(false);
         }
 
@@ -158,7 +158,7 @@ impl Page {
         self.check_key(key)?;
 
         let index = self.lower_bound(key);
-        if index == self.len() || self.key_at(index) != key {
+        if index == self.len() || self.key_at(index).cmp_bytes(key).is_ne() {
             return Ok(false);
         }
 

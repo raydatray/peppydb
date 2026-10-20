@@ -108,6 +108,13 @@ lexicographic byte ordering, including embedded zero bytes and preview collision
 without relying on native integer ordering. Unequal previews avoid payload access.
 This is a search fast path; no throughput claim is made without a workload.
 
+On a page with a nonzero prefix, the search first classifies the full query
+against the prefix. A query that diverges inside the prefix, or ends within it,
+sorts before or after every record without a slot comparison. Otherwise the
+binary search compares the query's remaining suffix with stored suffixes and
+their previews. A query equal to the prefix has an empty suffix and is searched
+normally. With a zero prefix, the search reduces to full-key comparison.
+
 ## Typed writes and reference hints
 
 `try_insert_record` inserts any `RecordState` at a distinct nonempty key;

@@ -93,7 +93,8 @@ fn slot_lengths_exclude_all_kind_and_reference_bits() {
             page.as_mut_bytes()[126..128].copy_from_slice(b"kV");
             let before = page.as_bytes().to_vec();
             // Check physical lengths independently of logical absence.
-            assert_eq!(page.slots()[0].key_range(), 126..127);
+            assert_eq!(page.slots()[0].key_len(), 1);
+            assert_eq!(page.slots()[0].stored_key_range(0), 126..127);
             assert_eq!(page.slots()[0].value_len(), 1);
             let state = match kind {
                 RecordKind::Insert => RecordState::Insert(b"V"),
@@ -347,7 +348,7 @@ fn preview_comparisons_match_full_key_ordering() {
     for (slot, stored) in page.slots().iter().zip(&keys) {
         for query in &queries {
             assert_eq!(
-                page.compare_key(slot, query),
+                page.compare_suffix(slot, query),
                 stored.cmp(query),
                 "{stored:?} vs {query:?}"
             );
@@ -380,6 +381,6 @@ fn unequal_previews_do_not_access_payloads() {
     // An invalid offset in a local slot makes an accidental payload read panic.
     // The page itself still satisfies the trusted-byte invariant.
     slot.offset.set(u16::MAX);
-    assert!(page.compare_key(&slot, b"aa").is_gt());
-    assert!(page.compare_key(&slot, b"ac").is_lt());
+    assert!(page.compare_suffix(&slot, b"aa").is_gt());
+    assert!(page.compare_suffix(&slot, b"ac").is_lt());
 }

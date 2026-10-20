@@ -89,19 +89,23 @@ impl Page {
             return None;
         }
 
-        let decode = |index: usize, infinity| {
+        // Check for infinity sentinels before slicing.
+        let prefix = self.prefix();
+        let decode = |index: usize, infinity, omitted| {
+            let prefix = &prefix[..omitted];
             let slot = self.slots()[index];
 
             if slot.offset.get() == infinity {
                 return Fence::Unbounded;
             }
 
-            Fence::Key(KeyRef::from(&self.as_bytes()[slot.key_range()]))
+            let suffix = slot.stored_key_range(prefix.len());
+            Fence::Key(KeyRef::new(prefix, &self.as_bytes()[suffix]))
         };
 
         Some(Fences {
-            lower: decode(0, LOW_INFINITY),
-            upper: decode(1, HIGH_INFINITY),
+            lower: decode(0, LOW_INFINITY, 0),
+            upper: decode(1, HIGH_INFINITY, prefix.len()),
         })
     }
 

@@ -29,6 +29,8 @@
 //! }
 //! ```
 
+use std::ops::Range;
+
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 mod compact;
@@ -157,6 +159,27 @@ impl Page {
 
     fn record_slots(&self) -> &[Slot] {
         &self.slots()[self.record_start()..]
+    }
+
+    fn prefix_len(&self) -> usize {
+        usize::from(self.header.prefix_len.get())
+    }
+
+    /// Reads the low fence's payload directly, because `fences()` needs the
+    /// prefix to decode the high fence. A nonzero prefix implies a finite low
+    /// fence, so this never treats a sentinel as an offset.
+    fn prefix(&self) -> &[u8] {
+        let len = self.prefix_len();
+        if len == 0 {
+            return &[];
+        }
+        let start = usize::from(self.slots()[0].offset.get());
+        &self.as_bytes()[start..start + len]
+    }
+
+    /// Stored suffix of an ordinary record or finite high fence.
+    fn suffix_range(&self, slot: &Slot) -> Range<usize> {
+        slot.stored_key_range(self.prefix_len())
     }
 
     fn check_capacity(capacity: usize) -> Result<(), PageError> {
