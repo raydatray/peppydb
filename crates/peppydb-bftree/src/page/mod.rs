@@ -116,6 +116,15 @@ impl Page {
 
         slots
     }
+
+    fn slots_mut(&mut self) -> &mut [Slot] {
+        let count = self.len();
+        let (slots, _): (&mut [Slot], _) =
+            FromBytes::mut_from_prefix_with_elems(&mut self.data, count)
+                .expect("slot directory fits the page");
+
+        slots
+    }
 }
 
 #[cfg(test)]
