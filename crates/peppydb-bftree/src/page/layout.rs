@@ -35,7 +35,8 @@ pub(super) struct Header {
     pub(super) capacity: U16,
     /// Contiguous free bytes between the slot directory and the payloads.
     pub(super) remaining_size: U16,
-    /// Length of the prefix shared by all keys; zero until compression exists.
+    /// Length of the key prefix stored once in the low fence and omitted from
+    /// the high fence and every record. Zero unless both fences are finite.
     pub(super) prefix_len: U16,
     /// Location of the backing leaf, or `NO_BACKING_LEAF`.
     pub(super) backing_leaf: U64,
@@ -51,13 +52,13 @@ const _: () = assert!(size_of::<Header>() == HEADER_BYTES);
 #[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(super) struct Slot {
-    /// Page-relative offset of the key; the value follows the key.
+    /// Page-relative offset of the stored key bytes; the value follows them.
     pub(super) offset: U16,
-    /// Record kind in the high 2 bits; key length in the low 14 bits.
+    /// Record kind in the high 2 bits; logical key length in the low 14 bits.
     pub(super) kind_and_key_len: U16,
     /// Reference bit in the high bit; value length in the low 15 bits.
     pub(super) ref_and_value_len: U16,
-    /// First `PREVIEW_BYTES` key bytes, zero-padded for shorter keys.
+    /// First `PREVIEW_BYTES` stored key bytes, zero-padded for shorter stored keys.
     pub(super) preview: [u8; PREVIEW_BYTES],
 }
 
@@ -78,9 +79,23 @@ impl Slot {
         }
     }
 
-    pub(super) fn key_range(&self) -> Range<usize> {
+    /// Logical key length, including prefix bytes that are not stored.
+    pub(super) fn key_len(&self) -> usize {
+        usize::from(self.kind_and_key_len.get() & KEY_LEN_MASK)
+    }
+
+    /// Stored key bytes, which omit the first `omitted` logical bytes.
+    /// Callers must exclude infinite fences first.
+    pub(super) fn stored_key_range(&self, omitted: usize) -> Range<usize> {
         let start = usize::from(self.offset.get());
-        start..start + usize::from(self.kind_and_key_len.get() & KEY_LEN_MASK)
+
+        start..start + self.key_len() - omitted
+    }
+
+    /// Page-relative range of the full stored key, for slots that omit no
+    /// prefix bytes. Valid only while the page prefix is empty.
+    pub(super) fn key_range(&self) -> Range<usize> {
+        self.stored_key_range(0)
     }
 
     pub(super) fn value_len(&self) -> usize {

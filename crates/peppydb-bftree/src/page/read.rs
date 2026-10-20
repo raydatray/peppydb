@@ -15,13 +15,7 @@ impl Page {
     pub fn get(&self, key: &[u8]) -> Result<Option<RecordRef<'_>>, PageError> {
         self.check_key(key)?;
 
-        let index = self.lower_bound(key);
-        if index == self.len() {
-            return Ok(None);
-        }
-
-        let record = self.record_at(index);
-        Ok((record.key == KeyRef::from(key)).then_some(record))
+        Ok(self.search(key).ok().map(|index| self.record_at(index)))
     }
 
     /// Borrow all record states in lexicographic key order without allocation.
@@ -45,8 +39,9 @@ impl Page {
             return Err(PageError::InvalidRange);
         }
 
-        let start = start.map_or(0, |key| self.lower_bound(key));
-        let end = end.map_or(self.len(), |key| self.lower_bound(key));
+        let bound = |key: &[u8]| self.search(key).unwrap_or_else(|index| index);
+        let start = start.map_or(0, bound);
+        let end = end.map_or(self.len(), bound);
 
         Ok(Iter {
             page: self,
@@ -54,14 +49,10 @@ impl Page {
         })
     }
 
-    pub(super) fn key_at(&self, index: usize) -> &[u8] {
-        &self.as_bytes()[self.record_slots()[index].key_range()]
-    }
-
     pub(super) fn record_at(&self, index: usize) -> RecordRef<'_> {
         let slot = self.record_slots()[index];
-        let key = slot.key_range();
-        let value = key.end..key.end + slot.value_len();
+        let suffix = self.suffix_range(&slot);
+        let value = suffix.end..suffix.end + slot.value_len();
         let bytes = self.as_bytes();
 
         let state = match slot.kind() {
@@ -72,25 +63,37 @@ impl Page {
         };
 
         RecordRef {
-            key: KeyRef::from(&bytes[key]),
+            key: KeyRef::new(self.prefix(), &bytes[suffix]),
             state,
             referenced: slot.referenced(),
         }
     }
 
-    pub(super) fn lower_bound(&self, key: &[u8]) -> usize {
-        self.record_slots()
-            .partition_point(|slot| self.compare_key(slot, key).is_lt())
+    /// `Ok(index)` if `key` is stored, else `Err(insertion index)`.
+    ///
+    /// Every record key starts with the prefix, so strip it once, then
+    /// binary-search the stored suffixes. A key without the prefix sorts
+    /// before or after every record.
+    pub(super) fn search(&self, key: &[u8]) -> Result<usize, usize> {
+        let prefix = self.prefix();
+        match key.strip_prefix(prefix) {
+            Some(query) => self
+                .record_slots()
+                .binary_search_by(|slot| self.compare_suffix(slot, query)),
+            None if key < prefix => Err(0),
+            None => Err(self.len()),
+        }
     }
 
-    /// Compare previews first; load the stored key only on a tie.
-    pub(super) fn compare_key(&self, slot: &Slot, key: &[u8]) -> Ordering {
-        let stored_preview = &slot.preview[..slot.key_range().len().min(PREVIEW_BYTES)];
-        let query_preview = &key[..key.len().min(PREVIEW_BYTES)];
+    /// Compare previews first; load the stored suffix only on a tie.
+    pub(super) fn compare_suffix(&self, slot: &Slot, query: &[u8]) -> Ordering {
+        let stored_len = slot.key_len() - self.prefix_len();
+        let stored_preview = &slot.preview[..stored_len.min(PREVIEW_BYTES)];
+        let query_preview = &query[..query.len().min(PREVIEW_BYTES)];
 
         stored_preview.cmp(query_preview).then_with(|| {
-            let stored_key = &self.as_bytes()[slot.key_range()];
-            stored_key.cmp(key)
+            let stored = &self.as_bytes()[self.suffix_range(slot)];
+            stored.cmp(query)
         })
     }
 }
