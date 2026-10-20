@@ -92,4 +92,14 @@ impl Slot {
         self.ref_and_value_len
             .set(length | (u16::from(referenced) << 15));
     }
+
+    pub(super) fn set_kind(&mut self, kind: RecordKind) {
+        self.kind_and_key_len
+            .set(kind.key_word(self.kind_and_key_len.get() & KEY_LEN_MASK));
+    }
+
+    pub(super) fn set_value_len(&mut self, length: u16) {
+        self.ref_and_value_len
+            .set((self.ref_and_value_len.get() & !VALUE_LEN_MASK) | length);
+    }
 }

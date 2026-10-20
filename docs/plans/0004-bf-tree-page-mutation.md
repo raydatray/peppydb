@@ -732,7 +732,7 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Implement and verify diff 3: state-aware borrowed reads.
 - [x] Implement and verify diff 4: typed insertion and reference updates.
 - [x] Implement and verify diff 5: physical removal and reclamation.
-- [ ] Implement and verify diff 6: replacement/upsert.
+- [x] Implement and verify diff 6: replacement/upsert.
 - [ ] Implement and verify diff 7: fence ranges.
 - [ ] Implement and verify diff 8: bounded iteration.
 - [ ] Implement and verify diff 9: preview-based search.
@@ -779,13 +779,18 @@ change.
   recovers removal holes and preserves raw retained tombstone bytes, references,
   flags, and inactive metadata. Fragmented insertion fails atomically before an
   explicit compact-and-retry succeeds.
+- Diff 6: all 22 package tests and the documentation example pass. Transition
+  tests cover all 16 kind pairs, both reference bits, and empty/smaller/equal/
+  larger values. Full-page deletion changes only kind bits and permits in-place
+  resurrection. The worked 64-byte fragmentation boundary, compaction retry,
+  retained lengths, phantom shrink, and atomic capacity failures pass.
 
 ## Agent notes
 
 - **Stack:** Diff 2 mechanically reorganized
   `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
   `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** Diffs 2–5 are complete. Proceed with upsert in diff 6.
+- **Current state:** Diffs 2–6 are complete. Proceed with fences in diff 7.
 - **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
   borrowed record iteration. Ordinary record keys remain nonempty; fence/query
   bounds may be empty and must remain distinct from unbounded bounds.
