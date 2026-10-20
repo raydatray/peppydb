@@ -728,7 +728,7 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Agree on upstream-style capacity handling and metadata-only deletion.
 - [x] Agree on the read API, module organization, and ten-diff stack.
 - [x] Finalize diff 1: approved plan for implementation handoff.
-- [ ] Implement and verify diff 2: mechanical module reorganization.
+- [x] Implement and verify diff 2: mechanical module reorganization.
 - [ ] Implement and verify diff 3: state-aware borrowed reads.
 - [ ] Implement and verify diff 4: typed insertion and reference updates.
 - [ ] Implement and verify diff 5: physical removal and reclamation.
@@ -762,15 +762,19 @@ Diff 1 is a documentation-only planning handoff. The byte examples,
 space-accounting formulas, API lifetimes, upstream comparison, module boundaries,
 ten-diff numbering, and local document links were reviewed. Rust code remains at
 the completed 0003 baseline; Rust checks were not run for this documentation-only
-change. Record implementation verification as diffs 2–10 are delivered.
+change.
+
+- Diff 2: moved production code and all 14 existing tests into private page
+  submodules. Workspace tests (including the documentation example), workspace
+  Clippy with denied warnings, and formatting passed. Public paths, algorithms,
+  and byte fixtures are unchanged.
 
 ## Agent notes
 
-- **Start here:** Diff 2 is the mechanical reorganization of
+- **Stack:** Diff 2 mechanically reorganized
   `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
   `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** The full plan is agreed. Implementation has not started.
-  Begin with the module move and its existing tests, then proceed in stack order.
+- **Current state:** Diff 2 is complete. Proceed with state-aware reads in diff 3.
 - **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
   borrowed record iteration. Ordinary record keys remain nonempty; fence/query
   bounds may be empty and must remain distinct from unbounded bounds.
