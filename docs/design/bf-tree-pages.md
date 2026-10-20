@@ -87,6 +87,25 @@ New entries have a clear reference bit. `set_referenced` changes only that bit
 under exclusive access and returns whether an entry exists. Cache policy will
 decide when to mark accesses; raw reads remain pure.
 
+### Replacement
+
+`try_upsert` returns `Inserted` or `Replaced`. It preserves the reference bit of
+an existing entry. `Delete` changes only the kind, retaining the payload and its
+encoded value length. Later live writes may reuse that retained value region.
+`Phantom` stores a zero-length value. Other smaller/equal writes overwrite the
+existing value; shortening leaves a hole and reduces the encoded length. There
+is no separate allocation-capacity field.
+
+Growing replacements allocate the complete key/value payload from the gap,
+redirect the existing slot, and leave the old payload as a hole. They require
+no new slot but do not credit the old payload toward available space. `PageFull`
+describes this physical path, even when only the final logical records would
+fit. No write implicitly compacts. All fallible checks precede mutation.
+
+All kind transitions are mechanically supported. A later overlay must prevent
+cache fills from replacing newer dirty records. Generic pages do not infer
+that a deletion has reached its base leaf.
+
 ## Removal and compaction
 
 `remove` physically forgets any record kind. It immediately returns eight slot

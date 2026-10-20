@@ -34,6 +34,7 @@ mod write;
 use layout::{COUNT_MASK, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
+pub use write::UpsertOutcome;
 
 /// An operation rejected before changing any page bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
