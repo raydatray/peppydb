@@ -4,6 +4,7 @@ use super::*;
 
 mod compact;
 mod fence;
+mod key;
 mod layout;
 mod model;
 mod read;
