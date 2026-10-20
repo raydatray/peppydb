@@ -1,6 +1,8 @@
 use zerocopy::IntoBytes;
 
-use super::layout::{HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, LOW_INFINITY, SLOT_BYTES, Slot};
+use super::layout::{
+    HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, LOW_INFINITY, MAX_KEY_LEN, SLOT_BYTES, Slot,
+};
 use super::{KeyRef, Page, PageError, RecordKind};
 
 /// A page bound. A finite empty key is distinct from an unbounded endpoint.
@@ -33,44 +35,61 @@ impl<K> Fence<K> {
 impl Page {
     /// Initialize an empty fenced page, copying finite bounds into its storage.
     ///
-    /// Checks capacity, finite bound ordering, then fence storage size before
-    /// changing any bytes. The returned page borrows only `bytes`.
+    /// With two finite bounds, the page stores their longest common prefix once,
+    /// as the start of the full low fence, and omits it from the high fence and
+    /// every ordinary record. Every key in `[lower, upper)` shares that prefix.
+    /// Unbounded or one-sided pages use an empty prefix.
+    ///
+    /// Checks capacity, finite bound ordering, then compressed fence storage
+    /// size before changing any bytes. The returned page borrows only `bytes`.
     pub fn init_with_fences<'b>(
         bytes: &'b mut [u8],
         fences: Fences<&[u8]>,
     ) -> Result<&'b mut Self, PageError> {
         Self::check_capacity(bytes.len())?;
-        if let (Fence::Key(lower), Fence::Key(upper)) = (fences.lower, fences.upper)
-            && lower >= upper
-        {
-            return Err(PageError::InvalidFences);
-        }
+        let prefix_len = match (fences.lower, fences.upper) {
+            (Fence::Key(lower), Fence::Key(upper)) if lower >= upper => {
+                return Err(PageError::InvalidFences);
+            }
+            (Fence::Key(lower), Fence::Key(upper)) => lower
+                .iter()
+                .zip(upper)
+                .take_while(|(lower, upper)| lower == upper)
+                .count(),
+            _ => 0,
+        };
+        let entries = [
+            (fences.lower, LOW_INFINITY, 0),
+            (fences.upper, HIGH_INFINITY, prefix_len),
+        ];
+        let stored = |(fence, _, omitted): (Fence<&[u8]>, u16, usize)| {
+            fence.key().map_or(Some(0), |key| {
+                (key.len() <= MAX_KEY_LEN).then(|| key.len() - omitted)
+            })
+        };
 
-        let needed = fences
-            .lower
-            .key()
-            .map_or(0, <[u8]>::len)
-            .checked_add(fences.upper.key().map_or(0, <[u8]>::len))
-            .and_then(|size| size.checked_add(2 * SLOT_BYTES))
+        let needed = entries
+            .into_iter()
+            .map(stored)
+            .try_fold(2 * SLOT_BYTES, |size, stored| size.checked_add(stored?))
             .filter(|&size| size <= bytes.len() - HEADER_BYTES)
             .ok_or(PageError::FencesTooLarge)?;
 
         let page = Self::init(bytes)?;
         page.header.count_and_flags.set(HAS_FENCES | 2);
+        // The fit check bounds the prefix by the capacity.
+        page.header.prefix_len.set(prefix_len as u16);
 
         let mut end = page.capacity();
-        for (index, (fence, infinity)) in
-            [(fences.lower, LOW_INFINITY), (fences.upper, HIGH_INFINITY)]
-                .into_iter()
-                .enumerate()
-        {
+        for (index, (fence, infinity, omitted)) in entries.into_iter().enumerate() {
             let slot = match fence {
                 Fence::Unbounded => Slot::new(infinity, b"", 0, 0, RecordKind::Insert),
                 Fence::Key(key) => {
-                    end -= key.len();
-                    page.as_mut_bytes()[end..end + key.len()].copy_from_slice(key);
+                    let suffix = &key[omitted..];
+                    end -= suffix.len();
+                    page.as_mut_bytes()[end..end + suffix.len()].copy_from_slice(suffix);
 
-                    Slot::new(end as u16, key, 0, 0, RecordKind::Insert)
+                    Slot::new(end as u16, key, omitted, 0, RecordKind::Insert)
                 }
             };
             page.slots_mut()[index] = slot;

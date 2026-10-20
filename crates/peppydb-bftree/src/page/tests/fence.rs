@@ -266,3 +266,193 @@ fn logical_views_borrow_the_page_rather_than_the_view() {
     assert!(upper.cmp_bytes(b"acct/2").is_gt());
     assert_eq!(upper.to_vec(), b"acct/200");
 }
+
+#[test]
+fn worked_example_initializes_a_compressed_page_with_golden_bytes() {
+    let mut storage = [0; 128];
+    let page = Page::init_with_fences(
+        &mut storage,
+        Fences {
+            lower: Fence::Key(b"acct/100"),
+            upper: Fence::Key(b"acct/200"),
+        },
+    )
+    .unwrap();
+    assert_eq!(read_u16(page.as_bytes(), 6), 5);
+    assert_eq!(page.free_bytes(), 128 - 48 - 8 - 3);
+    assert_eq!(
+        &page.as_bytes()[32..48],
+        &[
+            120, 0, 8, 0, 0, 0, b'a', b'c', // low fence: full key and preview
+            117, 0, 8, 0, 0, 0, b'2', b'0', // high fence: full length, suffix preview
+        ]
+    );
+    assert_eq!(&page.as_bytes()[117..], b"200acct/100");
+    page.try_insert(b"acct/123", b"x").unwrap();
+    page.try_insert(b"acct/150", b"y").unwrap();
+    assert_eq!(page.free_bytes(), 45);
+    let records = [
+        (b"acct/123".as_slice(), RecordState::Insert(b"x"), false),
+        (b"acct/150", RecordState::Insert(b"y"), false),
+    ];
+    let mut expected = [0; 128];
+    super::prefix::compressed_fixture(&mut expected, b"acct/100", b"acct/200", 5, &records);
+    assert_eq!(page.as_bytes(), expected);
+    // The same records without compression leave 30 free bytes: 15 are saved.
+    let mut uncompressed = [0; 128];
+    let full =
+        super::prefix::compressed_fixture(&mut uncompressed, b"acct/100", b"acct/200", 0, &records);
+    assert_eq!(page.free_bytes() - full.free_bytes(), 15);
+    assert_eq!(&page.as_bytes()[109..117], b"150y123x");
+}
+
+#[test]
+fn constructor_selects_the_longest_common_fence_prefix() {
+    let cases: [(Fences<&[u8]>, usize); 10] = [
+        (
+            Fences {
+                lower: Fence::Key(b"a"),
+                upper: Fence::Key(b"b"),
+            },
+            0,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"ab"),
+                upper: Fence::Key(b"ac"),
+            },
+            1,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"abc"),
+                upper: Fence::Key(b"abd"),
+            },
+            2,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"abc"),
+                upper: Fence::Key(b"abcd"),
+            },
+            3,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"acct/100"),
+                upper: Fence::Key(b"acct/200"),
+            },
+            5,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b""),
+                upper: Fence::Key(b"a"),
+            },
+            0,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"abc"),
+                upper: Fence::Unbounded,
+            },
+            0,
+        ),
+        (
+            Fences {
+                lower: Fence::Unbounded,
+                upper: Fence::Key(b"abc"),
+            },
+            0,
+        ),
+        (
+            Fences {
+                lower: Fence::Unbounded,
+                upper: Fence::Unbounded,
+            },
+            0,
+        ),
+        (
+            Fences {
+                lower: Fence::Key(b"\0\0\x01"),
+                upper: Fence::Key(b"\0\0\x02\0"),
+            },
+            2,
+        ),
+    ];
+    for (fences, prefix_len) in cases {
+        for capacity in [64, 4096] {
+            let mut storage = vec![0xa5; capacity];
+            let page = Page::init_with_fences(&mut storage, fences).unwrap();
+            let bytes = page.as_bytes();
+            assert_eq!(usize::from(read_u16(bytes, 6)), prefix_len);
+            let mut stored = 0;
+            for (index, fence, omitted) in [(0, fences.lower, 0), (1, fences.upper, prefix_len)] {
+                let slot = 32 + 8 * index;
+                let Fence::Key(key) = fence else {
+                    assert_eq!(read_u16(bytes, slot), u16::MAX - 1 + index as u16);
+                    continue;
+                };
+                let offset = usize::from(read_u16(bytes, slot));
+                let suffix = &key[omitted..];
+                assert_eq!(usize::from(read_u16(bytes, slot + 2)), key.len());
+                assert_eq!(&bytes[offset..offset + suffix.len()], suffix);
+                assert_eq!(
+                    &bytes[slot + 6..slot + 8],
+                    &[
+                        suffix.first().copied().unwrap_or(0),
+                        suffix.get(1).copied().unwrap_or(0)
+                    ]
+                );
+                stored += suffix.len();
+            }
+            assert_eq!(page.free_bytes(), capacity - 48 - stored);
+            assert_eq!(page.fences(), Some(logical(fences)));
+            assert_eq!(page.reclaimable_bytes(), 0);
+            assert_eq!(page.compact(), 0);
+            assert_eq!(page.fences(), Some(logical(fences)));
+        }
+    }
+}
+
+#[test]
+fn fences_that_fit_only_after_compression_are_accepted_exactly() {
+    // A 64-byte page has 16 bytes for fence keys after the header and slots.
+    let lower = b"xxxxxxxxxxxxxxa".as_slice();
+    let mut storage = [0xa5; 64];
+    let fences = Fences {
+        lower: Fence::Key(lower),
+        upper: Fence::Key(b"xxxxxxxxxxxxxxb"),
+    };
+    let page = Page::init_with_fences(&mut storage, fences).unwrap();
+    assert_eq!(page.free_bytes(), 0);
+    assert_eq!(page.prefix(), &lower[..14]);
+    assert_eq!(page.fences(), Some(logical(fences)));
+    let before = page.as_bytes().to_vec();
+    assert_eq!(
+        page.try_insert(b"xxxxxxxxxxxxxxab", b""),
+        Err(PageError::RecordTooLarge)
+    );
+    assert_eq!(page.as_bytes(), before);
+    for (lower, upper) in [
+        (
+            b"xxxxxxxxxxxxxxxa".as_slice(),
+            b"xxxxxxxxxxxxxxxb".as_slice(),
+        ),
+        (b"xxxxxxxxxxxxxxa", b"xxxxxxxxxxxxxxbb"),
+    ] {
+        let mut storage = [0xa5; 64];
+        assert_eq!(
+            Page::init_with_fences(
+                &mut storage,
+                Fences {
+                    lower: Fence::Key(lower),
+                    upper: Fence::Key(upper),
+                },
+            )
+            .err(),
+            Some(PageError::FencesTooLarge)
+        );
+        assert_eq!(storage, [0xa5; 64]);
+    }
+}

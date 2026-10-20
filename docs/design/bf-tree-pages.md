@@ -34,7 +34,7 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 | `0..2` | `count_and_flags` | Total slot count (low 12 bits), including fences; flags (high 4 bits), including `HAS_FENCES = 0x8000` |
 | `2..4` | `capacity` | Page length in bytes |
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
-| `6..8` | `prefix_len` | Length of the key prefix shared by the page; zero until prefix compression |
+| `6..8` | `prefix_len` | Length of the key prefix stored once in the low fence and omitted from other keys; see [Prefix compression](#prefix-compression) |
 | `8..16` | `backing_leaf` | Base leaf that a mini-page or full-page cache belongs to; `u64::MAX` if none |
 | `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive |
 | `24..32` | `snapshot_version` | Checkpoint snapshot version; inactive |
@@ -191,7 +191,7 @@ use normal `Insert` slots with zero value length and reference bit. Their keys
 may be empty, with a normal offset at or below page end. Infinite fences use
 explicit offsets: `u16::MAX - 1` for lower and `u16::MAX` for upper, with all
 remaining fields zero. Decoding never infers infinity from key length. Compaction
-packs finite keys and preserves infinity tags. Prefix length remains zero.
+packs finite fence payloads and preserves infinity tags.
 
 Finite bounds must satisfy `lower < upper`. The domain is `[lower, upper)`.
 Every point operation checks membership, returning `KeyOutOfRange` for incorrect
@@ -203,6 +203,55 @@ the fences when deciding `RecordTooLarge`, before checking duplicates or space.
 Fences are immutable structural metadata. A split will initialize destination
 pages with new bounds and must budget their actual fence bytes. Fences alone do
 not guarantee that a page is a complete cache of its domain.
+
+## Prefix compression
+
+A fenced page stores a key prefix shared by its whole domain once. For two
+finite fences, `init_with_fences` selects their longest common prefix. Every key
+in `[lower, upper)` starts with that prefix. Unfenced pages, unbounded or
+one-sided fences, and fences with no common bytes use an empty prefix.
+
+| Entry | Stored key bytes | Slot key length | Preview |
+| --- | --- | --- | --- |
+| Finite low fence | Full key | Full length | First two full-key bytes |
+| Finite high fence | Suffix after the prefix | Full length | First two suffix bytes |
+| Ordinary record, any kind | Suffix after the prefix | Full length | First two suffix bytes |
+| Unbounded fence | None; offset tag | Zero | Zero |
+
+The prefix bytes are the first `prefix_len` bytes of the low fence's payload, so
+they need no separate allocation. Values follow the stored suffix. For example,
+bounds `[acct/100, acct/200)` select `acct/`. Records `acct/123` and `acct/150`
+store `123` and `150`, and the high fence stores `200`. With one-byte values on
+a 128-byte page, compression saves 15 bytes: 45 free bytes instead of 30.
+
+Invariants:
+
+- The prefix is fixed while the fences are fixed. Insertion, removal, and
+  compaction never recompute it from current records. A split must rebuild
+  destination pages with their own fences and prefixes.
+- A nonzero prefix requires two finite fences, must not exceed their common
+  prefix, and matches every ordinary logical key. A zero prefix is always a valid
+  representation, even when the fences would permit compression; reads and
+  writes honor the stored length.
+- Decoding recognizes infinity tags before subtracting the prefix or slicing a
+  payload. A zero prefix never follows an infinite fence's offset.
+- An ordinary key may equal the prefix. It then has an empty stored suffix and,
+  with an empty value, a zero-byte payload whose offset may equal the payload
+  boundary. Its logical key is still nonempty.
+
+Physical size uses stored bytes, not logical views. With `p = prefix_len`:
+
+```text
+fence_bytes = 16 + lower.len() + (upper.len() - p)   // finite fences
+packed_size = 32 + fence_bytes + sum(8 + (key_len - p) + stored_value_len)
+```
+
+An unbounded fence keeps its eight-byte slot and has no payload.
+`stored_value_len` includes value bytes retained by tombstones.
+
+Search classifies a query against the prefix once and then compares suffixes;
+see [Preview-first search](#preview-first-search). Reads return borrowed
+`KeyRef` views whose prefix borrows the low-fence payload; no read allocates.
 
 ## `Page` as a base type
 
@@ -231,9 +280,8 @@ structure design will define.
 ## Staged integration
 
 [Plan 0004](../plans/0004-bf-tree-page-mutation.md) delivers the mutable, fenced,
-range-aware page. [Agreed plan 0005](../plans/0005-bf-tree-page-prefix.md) specifies
-fence-derived prefix compression and a borrowed prefix/suffix key view. Current
-keys are complete contiguous slices and `prefix_len` stays zero.
+range-aware page. [Plan 0005](../plans/0005-bf-tree-page-prefix.md) delivers
+fence-derived prefix compression and borrowed logical keys.
 
 The page primitive makes no base/mini/cache role decisions. Growth, merging,
 splitting, and selection of records during rebuild belong to later components.
