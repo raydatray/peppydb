@@ -65,12 +65,12 @@ impl Page {
                 .enumerate()
         {
             let slot = match fence {
-                Fence::Unbounded => Slot::new(infinity, b"", 0, RecordKind::Insert),
+                Fence::Unbounded => Slot::new(infinity, b"", 0, 0, RecordKind::Insert),
                 Fence::Key(key) => {
                     end -= key.len();
                     page.as_mut_bytes()[end..end + key.len()].copy_from_slice(key);
 
-                    Slot::new(end as u16, key, 0, RecordKind::Insert)
+                    Slot::new(end as u16, key, 0, 0, RecordKind::Insert)
                 }
             };
             page.slots_mut()[index] = slot;
@@ -128,11 +128,9 @@ impl Page {
 
     /// Space available to a single ordinary record, including its slot.
     pub(super) fn record_capacity(&self) -> usize {
-        let fence_bytes = self.fences().map_or(0, |fences| {
-            2 * SLOT_BYTES
-                + fences.lower.key().map_or(0, KeyRef::len)
-                + fences.upper.key().map_or(0, KeyRef::len)
-        });
+        let fence_bytes: usize = (0..self.record_start())
+            .map(|index| SLOT_BYTES + self.payload_range(index).map_or(0, |payload| payload.len()))
+            .sum();
 
         self.capacity() - HEADER_BYTES - fence_bytes
     }

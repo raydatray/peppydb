@@ -43,7 +43,10 @@ mod write;
 
 pub use fence::{Fence, Fences};
 pub use key::KeyRef;
-use layout::{COUNT_MASK, HAS_FENCES, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
+use layout::{
+    COUNT_MASK, HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, Header, LOW_INFINITY, NO_BACKING_LEAF,
+    Slot,
+};
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
 pub use write::UpsertOutcome;
@@ -181,6 +184,21 @@ impl Page {
     /// Stored suffix of an ordinary record or finite high fence.
     fn suffix_range(&self, slot: &Slot) -> Range<usize> {
         slot.stored_key_range(self.prefix_len())
+    }
+
+    /// Stored key and value bytes of slot `index`, counting fence slots, or
+    /// `None` for an infinite fence.
+    fn payload_range(&self, index: usize) -> Option<Range<usize>> {
+        let slot = self.slots()[index];
+        let omitted = match (self.record_start(), index) {
+            (2, 0) if slot.offset.get() == LOW_INFINITY => return None,
+            (2, 1) if slot.offset.get() == HIGH_INFINITY => return None,
+            (2, 0) => 0,
+            _ => self.prefix_len(),
+        };
+
+        let key = slot.stored_key_range(omitted);
+        Some(key.start..key.end + slot.value_len())
     }
 
     fn check_capacity(capacity: usize) -> Result<(), PageError> {
