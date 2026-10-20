@@ -395,7 +395,7 @@ or new benchmark framework is part of this stack.
 - [x] Agree on generic fences and their concrete input/output representations.
 - [x] Agree on the complete design and seven-diff stack.
 - [x] Finalize diff 1: approved plan for implementation handoff.
-- [ ] Implement and verify diff 2: logical key views.
+- [x] Implement and verify diff 2: logical key views.
 - [ ] Implement and verify diff 3: record/fence API migration.
 - [ ] Implement and verify diff 4: prefix-aware decoding and search.
 - [ ] Implement and verify diff 5: physical mutation and compaction accounting.
