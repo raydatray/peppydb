@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use zerocopy::IntoBytes;
 
-use super::layout::Slot;
+use super::layout::{PREVIEW_BYTES, Slot};
 use super::{Page, PageError, RecordKind, RecordRef, RecordState};
 
 impl Page {
@@ -87,8 +87,8 @@ impl Page {
 
     /// Compare meaningful preview bytes before loading the complete key.
     pub(super) fn compare_key(&self, slot: &Slot, key: &[u8]) -> Ordering {
-        let stored_preview = &slot.preview[..slot.key_range().len().min(2)];
-        let query_preview = &key[..key.len().min(2)];
+        let stored_preview = &slot.preview[..slot.key_range().len().min(PREVIEW_BYTES)];
+        let query_preview = &key[..key.len().min(PREVIEW_BYTES)];
 
         stored_preview.cmp(query_preview).then_with(|| {
             let stored_key = &self.as_bytes()[slot.key_range()];
