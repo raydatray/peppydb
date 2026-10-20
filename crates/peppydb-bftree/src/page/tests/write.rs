@@ -94,3 +94,87 @@ fn insertion_preserves_flags_and_inactive_metadata() {
         assert_eq!(page.capacity(), 128);
     }
 }
+
+#[test]
+fn typed_insertions_and_reference_updates_preserve_other_bytes() {
+    let states = [
+        RecordState::Insert(b""),
+        RecordState::Delete,
+        RecordState::Cache(b"value"),
+        RecordState::Phantom,
+    ];
+    for order in [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]] {
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        for index in order {
+            let key = [b'a' + index as u8];
+            page.try_insert_record(&key, states[index]).unwrap();
+        }
+        for (index, state) in states.into_iter().enumerate() {
+            let key = [b'a' + index as u8];
+            assert_eq!(page.get(&key).unwrap().unwrap().state, state);
+            let slot = 32 + index * 8;
+            assert_eq!(
+                read_u16(page.as_bytes(), slot + 2),
+                ((state.kind() as u16) << 14) | 1
+            );
+            assert_eq!(
+                read_u16(page.as_bytes(), slot + 4) as usize,
+                state.value().map_or(0, <[u8]>::len)
+            );
+            for incoming in states {
+                let before = page.as_bytes().to_vec();
+                assert_eq!(
+                    page.try_insert_record(&key, incoming),
+                    Err(PageError::DuplicateKey)
+                );
+                assert_eq!(page.as_bytes(), before);
+            }
+            for referenced in [true, true, false] {
+                let mut expected = page.as_bytes().to_vec();
+                expected[slot + 5] = (expected[slot + 5] & 0x7f) | (u8::from(referenced) << 7);
+                assert_eq!(page.set_referenced(&key, referenced), Ok(true));
+                assert_eq!(page.as_bytes(), expected);
+                assert_eq!(page.get(&key).unwrap().unwrap().referenced, referenced);
+            }
+        }
+        let before = page.as_bytes().to_vec();
+        assert_eq!(page.set_referenced(b"missing", true), Ok(false));
+        assert_eq!(page.set_referenced(b"", true), Err(PageError::EmptyKey));
+        assert_eq!(
+            page.try_insert_record(b"", RecordState::Delete),
+            Err(PageError::EmptyKey)
+        );
+        assert_eq!(page.as_bytes(), before);
+    }
+}
+
+#[test]
+fn every_state_can_exactly_fill_a_page() {
+    for state in [
+        RecordState::Insert(b""),
+        RecordState::Delete,
+        RecordState::Cache(b""),
+        RecordState::Phantom,
+    ] {
+        let mut storage = [0; 64];
+        let page = Page::init(&mut storage).unwrap();
+        let key = [b'k'; 24];
+        page.try_insert_record(&key, state).unwrap();
+        assert_eq!(page.free_bytes(), 0);
+        let before = page.as_bytes().to_vec();
+        assert_eq!(
+            page.try_insert_record(&[b'k'; 25], state),
+            Err(PageError::RecordTooLarge)
+        );
+        assert_eq!(
+            page.try_insert_record(&key, state),
+            Err(PageError::DuplicateKey)
+        );
+        assert_eq!(
+            page.try_insert_record(b"x", state),
+            Err(PageError::PageFull)
+        );
+        assert_eq!(page.as_bytes(), before);
+    }
+}

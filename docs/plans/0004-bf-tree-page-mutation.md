@@ -730,7 +730,7 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Finalize diff 1: approved plan for implementation handoff.
 - [x] Implement and verify diff 2: mechanical module reorganization.
 - [x] Implement and verify diff 3: state-aware borrowed reads.
-- [ ] Implement and verify diff 4: typed insertion and reference updates.
+- [x] Implement and verify diff 4: typed insertion and reference updates.
 - [ ] Implement and verify diff 5: physical removal and reclamation.
 - [ ] Implement and verify diff 6: replacement/upsert.
 - [ ] Implement and verify diff 7: fence ranges.
@@ -771,13 +771,16 @@ change.
 - Diff 3: all 14 package tests and the updated documentation example pass.
   Raw fixtures cover all four states and both reference bits, independently
   check encoded length masks, and verify exact/fused iteration and pure reads.
+- Diff 4: all 16 package tests and the documentation example pass. Typed writes
+  cover all kinds, insertion positions, cross-kind duplicates, exact capacity,
+  unchanged rejected writes, and byte-exact reference-bit updates.
 
 ## Agent notes
 
 - **Stack:** Diff 2 mechanically reorganized
   `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
   `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** Diffs 2–3 are complete. Proceed with typed writes in diff 4.
+- **Current state:** Diffs 2–4 are complete. Proceed with reclamation in diff 5.
 - **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
   borrowed record iteration. Ordinary record keys remain nonempty; fence/query
   bounds may be empty and must remain distinct from unbounded bounds.

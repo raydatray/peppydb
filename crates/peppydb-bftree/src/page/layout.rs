@@ -52,11 +52,11 @@ pub(super) struct Slot {
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
 impl Slot {
-    /// Encode an unreferenced `Insert` record. Preflight must bound both lengths.
-    pub(super) fn insert(offset: u16, key: &[u8], value_len: u16) -> Self {
+    /// Encode an unreferenced record. Preflight must bound both lengths.
+    pub(super) fn new(offset: u16, key: &[u8], value_len: u16, kind: RecordKind) -> Self {
         Self {
             offset: U16::new(offset),
-            kind_and_key_len: U16::new(RecordKind::Insert.key_word(key.len() as u16)),
+            kind_and_key_len: U16::new(kind.key_word(key.len() as u16)),
             ref_and_value_len: U16::new(value_len),
             preview: [key[0], key.get(1).copied().unwrap_or(0)],
         }
@@ -85,5 +85,11 @@ impl Slot {
 
     pub(super) fn referenced(&self) -> bool {
         self.ref_and_value_len.get() & !VALUE_LEN_MASK != 0
+    }
+
+    pub(super) fn set_referenced(&mut self, referenced: bool) {
+        let length = self.ref_and_value_len.get() & VALUE_LEN_MASK;
+        self.ref_and_value_len
+            .set(length | (u16::from(referenced) << 15));
     }
 }
