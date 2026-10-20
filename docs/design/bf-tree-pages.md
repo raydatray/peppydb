@@ -87,9 +87,27 @@ New entries have a clear reference bit. `set_referenced` changes only that bit
 under exclusive access and returns whether an entry exists. Cache policy will
 decide when to mark accesses; raw reads remain pure.
 
+## Removal and compaction
+
+`remove` physically forgets any record kind. It immediately returns eight slot
+bytes to the contiguous gap and leaves the old payload unreachable. Callers must
+not use it to discard an unapplied deletion.
+
+`free_bytes()` counts only the contiguous gap. `reclaimable_bytes()` counts holes
+outside that gap. The payload boundary is `32 + 8 * slot_count + free_bytes()`;
+reachable payloads are disjoint and lie above it, but need not start at it.
+
+`compact()` packs all reachable payloads using one zero-initialized 4096-byte
+scratch image and returns the recovered byte count. It preserves every record,
+kind, reference bit, retained tombstone value, flag, and recovery/backing-leaf
+field. It rebuilds physical slots because logical absence views hide retained
+values. The completed image replaces the source; compaction does not apply a
+pending write or choose records to discard. Capacity handling remains with the
+caller. An insertion rejected on a fragmented page leaves every byte unchanged.
+
 ## `Page` as a base type
 
-The public `page` module uses private `layout`, `record`, `read`, and `write`
+The public `page` module uses private `layout`, `record`, `read`, `write`, and `compact`
 submodules. They implement the same `Page` type and keep encoding details private.
 Unit tests use independent byte decoding alongside ordered-map checks.
 
