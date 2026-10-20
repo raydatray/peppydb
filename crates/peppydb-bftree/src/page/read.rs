@@ -1,8 +1,10 @@
+use std::cmp::Ordering;
 use std::iter::FusedIterator;
 use std::ops::Range;
 
 use zerocopy::IntoBytes;
 
+use super::layout::Slot;
 use super::{Page, PageError, RecordKind, RecordRef, RecordState};
 
 impl Page {
@@ -79,10 +81,19 @@ impl Page {
 
     /// Index of the first slot whose key is not less than `key`.
     pub(super) fn lower_bound(&self, key: &[u8]) -> usize {
-        let bytes = self.as_bytes();
-
         self.record_slots()
-            .partition_point(|slot| &bytes[slot.key_range()] < key)
+            .partition_point(|slot| self.compare_key(slot, key).is_lt())
+    }
+
+    /// Compare meaningful preview bytes before loading the complete key.
+    pub(super) fn compare_key(&self, slot: &Slot, key: &[u8]) -> Ordering {
+        let stored_preview = &slot.preview[..slot.key_range().len().min(2)];
+        let query_preview = &key[..key.len().min(2)];
+
+        stored_preview.cmp(query_preview).then_with(|| {
+            let stored_key = &self.as_bytes()[slot.key_range()];
+            stored_key.cmp(key)
+        })
     }
 }
 

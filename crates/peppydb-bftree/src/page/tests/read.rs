@@ -318,3 +318,64 @@ fn ranges_on_empty_pages_obey_bound_ordering_only() {
         Some(PageError::InvalidRange)
     );
 }
+
+#[test]
+fn preview_comparisons_match_full_key_ordering() {
+    let mut keys: Vec<_> = (0..=255).map(|byte| vec![byte]).collect();
+    for first in [0, 1, 0x7f, 0x80, 0xfe, 0xff] {
+        for second in [0, 1, 0x80, 0xff] {
+            keys.extend([
+                vec![first, second],
+                vec![first, second, 0],
+                vec![first, second, 1, 0xff],
+            ]);
+        }
+    }
+    keys.sort();
+    let mut storage = [0; 4096];
+    let page = Page::init(&mut storage).unwrap();
+    for key in keys.iter().rev() {
+        page.try_insert(key, b"").unwrap();
+    }
+    let mut queries = keys.clone();
+    queries.extend([vec![], vec![0; 8], vec![0xff; 8], b"abcd".to_vec()]);
+    let before = page.as_bytes().to_vec();
+    for (slot, stored) in page.slots().iter().zip(&keys) {
+        for query in &queries {
+            assert_eq!(
+                page.compare_key(slot, query),
+                stored.cmp(query),
+                "{stored:?} vs {query:?}"
+            );
+        }
+    }
+    for query in &queries {
+        assert_eq!(
+            page.lower_bound(query),
+            keys.iter().take_while(|key| *key < query).count()
+        );
+        if !query.is_empty() {
+            assert_eq!(
+                page.get(query),
+                Ok(keys
+                    .iter()
+                    .find(|key| *key == query)
+                    .map(|key| live(key, b"")))
+            );
+        }
+    }
+    assert_eq!(page.as_bytes(), before);
+}
+
+#[test]
+fn unequal_previews_do_not_access_payloads() {
+    let mut storage = [0; 64];
+    let page = Page::init(&mut storage).unwrap();
+    page.try_insert(b"ab", b"").unwrap();
+    let mut slot = page.slots()[0];
+    // An invalid offset in a local slot makes an accidental payload read panic.
+    // The page itself still satisfies the trusted-byte invariant.
+    slot.offset.set(u16::MAX);
+    assert!(page.compare_key(&slot, b"aa").is_gt());
+    assert!(page.compare_key(&slot, b"ac").is_lt());
+}
