@@ -258,13 +258,17 @@ see [Preview-first search](#preview-first-search). Reads return borrowed
 
 ## `Page` as a base type
 
-The public `page` module uses private `layout`, `record`, `read`, `write`,
+The public `page` module uses private `layout`, `key`, `record`, `read`, `write`,
 `compact`, and `fence` submodules. They implement the same `Page` type and keep
-encoding details private. Unit tests use independent byte decoding alongside
-ordered-map checks. The mixed-operation model owns retained physical values and
-tracks the contiguous gap from operation history. It checks errors, logical
-states, ranges, references, payload overlap, and full byte accounting after each
-operation, across representative capacities and fence profiles.
+encoding details private; `KeyRef` is the public logical-key view. Unit tests use
+independent byte decoding alongside ordered-map checks, and an independent
+fixture encoder builds compressed pages with any stored prefix length. The
+mixed-operation model owns full logical keys and retained physical values,
+derives the fence prefix and suffix lengths itself, and tracks the contiguous
+gap from operation history. It checks errors, logical states, ranges, references,
+the stored prefix length, suffix previews, payload overlap, and full byte
+accounting after each operation, across representative capacities and fence
+profiles, including compressed ones.
 
 `Page` holds what every leaf-level page shares: the header, the slot directory,
 and the record operations. Later stacks add role types that wrap `Page`, expose
@@ -307,5 +311,12 @@ reference-bit update protocol.
   packing. peppydb differs by encoding integers as explicit little-endian
   values, measuring payload offsets from the page start, and capping pages at
   4096 bytes (upstream allows up to 32 KiB).
+- [BF-Tree paper](../references.md#bf-tree-paper), §3.5: fence-derived prefix
+  compression and look-ahead (preview) bytes. The
+  [upstream page explanation](../explanations/bf-tree-upstream-pages.md#fences-prefixes-and-previews)
+  describes upstream's stored logical lengths, full low fence, suffix-only high
+  fence and records, and suffix previews, which peppydb follows. peppydb differs
+  by keeping finite empty fences distinct from infinity, checking fence
+  membership on every point operation, and returning segmented `KeyRef` views.
 - Figure 3 of the paper shows a 14-bit value length and a separate fence bit.
   peppydb follows upstream's current slot packing.
