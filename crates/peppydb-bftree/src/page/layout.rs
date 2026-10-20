@@ -72,4 +72,18 @@ impl Slot {
     pub(super) fn value_len(&self) -> usize {
         usize::from(self.ref_and_value_len.get() & VALUE_LEN_MASK)
     }
+
+    pub(super) fn kind(&self) -> RecordKind {
+        match self.kind_and_key_len.get() >> 14 {
+            0 => RecordKind::Insert,
+            1 => RecordKind::Delete,
+            2 => RecordKind::Cache,
+            3 => RecordKind::Phantom,
+            _ => unreachable!("two-bit record kind"),
+        }
+    }
+
+    pub(super) fn referenced(&self) -> bool {
+        self.ref_and_value_len.get() & !VALUE_LEN_MASK != 0
+    }
 }

@@ -1,7 +1,7 @@
 //! Packed pages backed by caller-owned storage.
 //!
 //! ```
-//! use peppydb_bftree::Page;
+//! use peppydb_bftree::{Page, RecordState};
 //!
 //! let mut storage = [0; 128];
 //! let page = Page::init(&mut storage).unwrap();
@@ -11,15 +11,15 @@
 //!
 //! // Reads need only a shared reference.
 //! let page: &Page = page;
-//! assert_eq!(page.get(b"20"), Ok(Some(b"owl".as_slice())));
-//! let records: Vec<_> = page.iter().collect();
+//! assert_eq!(page.get(b"20").unwrap().unwrap().state, RecordState::Insert(b"owl"));
+//! let records: Vec<_> = page.iter().map(|record| (record.key, record.state.value())).collect();
 //! assert_eq!(records, vec![
-//!     (b"10".as_slice(), b"dog".as_slice()),
-//!     (b"20".as_slice(), b"owl".as_slice()),
-//!     (b"30".as_slice(), b"cat".as_slice()),
+//!     (b"10".as_slice(), Some(b"dog".as_slice())),
+//!     (b"20".as_slice(), Some(b"owl".as_slice())),
+//!     (b"30".as_slice(), Some(b"cat".as_slice())),
 //! ]);
-//! for (key, value) in page {
-//!     assert_eq!(page.get(key), Ok(Some(value)));
+//! for record in page {
+//!     assert_eq!(page.get(record.key), Ok(Some(record)));
 //! }
 //! ```
 
@@ -32,7 +32,7 @@ mod write;
 
 use layout::{COUNT_MASK, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
 pub use read::Iter;
-pub use record::RecordKind;
+pub use record::{RecordKind, RecordRef, RecordState};
 
 /// An operation rejected before changing any page bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

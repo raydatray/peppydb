@@ -3,13 +3,14 @@ use std::ops::Range;
 
 use zerocopy::IntoBytes;
 
-use super::{Page, PageError};
+use super::{Page, PageError, RecordKind, RecordRef, RecordState};
 
 impl Page {
-    /// Borrow the value for a nonempty key, or return `None` if it is absent.
+    /// Borrow a stored record for a nonempty key, or `None` on a page miss.
     ///
-    /// An empty value is present and returns `Some(&[])`.
-    pub fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, PageError> {
+    /// Tombstones and phantoms return `Some` with their explicit absence state.
+    /// Reads leave all bytes, including reference bits, unchanged.
+    pub fn get(&self, key: &[u8]) -> Result<Option<RecordRef<'_>>, PageError> {
         if key.is_empty() {
             return Err(PageError::EmptyKey);
         }
@@ -19,11 +20,11 @@ impl Page {
             return Ok(None);
         }
 
-        let (stored_key, value) = self.record_at(index);
-        Ok((stored_key == key).then_some(value))
+        let record = self.record_at(index);
+        Ok((record.key == key).then_some(record))
     }
 
-    /// Borrow key/value pairs in lexicographic key order without allocation.
+    /// Borrow all record states in lexicographic key order without allocation.
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             page: self,
@@ -36,13 +37,23 @@ impl Page {
         &self.as_bytes()[self.slots()[index].key_range()]
     }
 
-    pub(super) fn record_at(&self, index: usize) -> (&[u8], &[u8]) {
+    pub(super) fn record_at(&self, index: usize) -> RecordRef<'_> {
         let slot = self.slots()[index];
         let key = slot.key_range();
         let value = key.end..key.end + slot.value_len();
         let bytes = self.as_bytes();
 
-        (&bytes[key], &bytes[value])
+        let state = match slot.kind() {
+            RecordKind::Insert => RecordState::Insert(&bytes[value]),
+            RecordKind::Delete => RecordState::Delete,
+            RecordKind::Cache => RecordState::Cache(&bytes[value]),
+            RecordKind::Phantom => RecordState::Phantom,
+        };
+        RecordRef {
+            key: &bytes[key],
+            state,
+            referenced: slot.referenced(),
+        }
     }
 
     /// Index of the first slot whose key is not less than `key`.
@@ -55,7 +66,7 @@ impl Page {
 }
 
 impl<'p> IntoIterator for &'p Page {
-    type Item = (&'p [u8], &'p [u8]);
+    type Item = RecordRef<'p>;
     type IntoIter = Iter<'p>;
 
     fn into_iter(self) -> Iter<'p> {
@@ -63,7 +74,7 @@ impl<'p> IntoIterator for &'p Page {
     }
 }
 
-/// Borrowed key/value pairs of a [`Page`] in lexicographic key order.
+/// Borrowed records of a [`Page`] in lexicographic key order, including absence.
 ///
 /// Created by [`Page::iter`] or by iterating over `&Page`.
 #[derive(Clone, Debug)]
@@ -73,7 +84,7 @@ pub struct Iter<'p> {
 }
 
 impl<'p> Iterator for Iter<'p> {
-    type Item = (&'p [u8], &'p [u8]);
+    type Item = RecordRef<'p>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.indices.next().map(|index| self.page.record_at(index))

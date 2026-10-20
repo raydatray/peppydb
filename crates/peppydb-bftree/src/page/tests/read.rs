@@ -18,10 +18,16 @@ fn lookup_worked_byte_fixture() {
     assert!(!page.is_empty());
     assert_eq!(page.free_bytes(), 57);
     for (key, value) in [(b"10", b"dog"), (b"20", b"owl"), (b"30", b"cat")] {
-        assert_eq!(page.get(key), Ok(Some(value.as_slice())));
+        assert_eq!(page.get(key), Ok(Some(live(key, value))));
     }
     assert_eq!(
-        page.get(b"20").unwrap().unwrap().as_ptr(),
+        page.get(b"20")
+            .unwrap()
+            .unwrap()
+            .state
+            .value()
+            .unwrap()
+            .as_ptr(),
         page.as_bytes()[115..].as_ptr()
     );
     for key in [b"01".as_slice(), b"15", b"25", b"40", b"20\0"] {
@@ -51,7 +57,7 @@ fn lookup_prefixes_preview_collisions_and_empty_values() {
         (b"ab", b""),
         (b"abc", b"Z"),
     ] {
-        assert_eq!(page.get(key), Ok(Some(value)));
+        assert_eq!(page.get(key), Ok(Some(live(key, value))));
     }
     for key in [b"\0\0\0".as_slice(), b"a", b"abb", b"abcd", b"\xff"] {
         assert_eq!(page.get(key), Ok(None));
@@ -86,8 +92,28 @@ fn slot_lengths_exclude_all_kind_and_reference_bits() {
             ]);
             page.as_mut_bytes()[126..128].copy_from_slice(b"kV");
             let before = page.as_bytes().to_vec();
-            assert_eq!(page.record_at(0), (b"k".as_slice(), b"V".as_slice()));
-            assert_eq!(page.get(b"k"), Ok(Some(b"V".as_slice())));
+            // Check physical lengths independently of logical absence.
+            assert_eq!(page.slots()[0].key_range(), 126..127);
+            assert_eq!(page.slots()[0].value_len(), 1);
+            let state = match kind {
+                RecordKind::Insert => RecordState::Insert(b"V"),
+                RecordKind::Delete => RecordState::Delete,
+                RecordKind::Cache => RecordState::Cache(b"V"),
+                RecordKind::Phantom => RecordState::Phantom,
+            };
+            let expected = RecordRef {
+                key: b"k",
+                state,
+                referenced,
+            };
+            assert_eq!(state.kind(), kind);
+            assert_eq!(page.get(b"k"), Ok(Some(expected)));
+            let mut iter = page.iter();
+            assert_eq!(iter.len(), 1);
+            assert_eq!(iter.next(), Some(expected));
+            assert_eq!(iter.len(), 0);
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next(), None);
             assert_eq!(page.as_bytes(), before);
         }
     }
@@ -137,15 +163,24 @@ fn iterate_borrowed_records_in_key_order() {
         for (index, &(key, value)) in records.iter().enumerate() {
             assert_eq!(iter.len(), records.len() - index);
             let actual = iter.next().unwrap();
-            assert_eq!(actual, (key, value));
+            assert_eq!(actual, live(key, value));
             let offset = usize::from(read_u16(page.as_bytes(), 32 + index * 8));
-            assert_eq!(actual.0.as_ptr(), page.as_bytes()[offset..].as_ptr());
-            assert_eq!(actual.1.as_ptr(), page.get(key).unwrap().unwrap().as_ptr());
+            assert_eq!(actual.key.as_ptr(), page.as_bytes()[offset..].as_ptr());
+            assert_eq!(
+                actual.state.value().unwrap().as_ptr(),
+                page.get(key)
+                    .unwrap()
+                    .unwrap()
+                    .state
+                    .value()
+                    .unwrap()
+                    .as_ptr()
+            );
         }
         assert_eq!(iter.len(), 0);
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next(), None);
-        let mut expected = records.iter().copied();
+        let mut expected = records.iter().map(|&(key, value)| live(key, value));
         for record in page {
             assert_eq!(Some(record), expected.next());
         }
