@@ -10,6 +10,9 @@ pub(super) const HEADER_BYTES: usize = 32;
 pub(super) const COUNT_MASK: u16 = 0x0fff;
 pub(super) const NO_BACKING_LEAF: u64 = u64::MAX;
 pub(super) const SLOT_BYTES: usize = 8;
+pub(super) const HAS_FENCES: u16 = 0x8000;
+pub(super) const LOW_INFINITY: u16 = u16::MAX - 1;
+pub(super) const HIGH_INFINITY: u16 = u16::MAX;
 const KEY_LEN_MASK: u16 = 0x3fff;
 const VALUE_LEN_MASK: u16 = 0x7fff;
 
@@ -58,7 +61,10 @@ impl Slot {
             offset: U16::new(offset),
             kind_and_key_len: U16::new(kind.key_word(key.len() as u16)),
             ref_and_value_len: U16::new(value_len),
-            preview: [key[0], key.get(1).copied().unwrap_or(0)],
+            preview: [
+                key.first().copied().unwrap_or(0),
+                key.get(1).copied().unwrap_or(0),
+            ],
         }
     }
 

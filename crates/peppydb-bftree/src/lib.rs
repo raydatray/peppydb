@@ -2,4 +2,4 @@
 
 pub mod page;
 
-pub use page::{Page, PageError, RecordKind, RecordRef, RecordState, UpsertOutcome};
+pub use page::{Fence, Fences, Page, PageError, RecordKind, RecordRef, RecordState, UpsertOutcome};

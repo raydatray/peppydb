@@ -6,9 +6,9 @@ use super::{Page, PageError, RecordState};
 impl Page {
     /// Insert a distinct, nonempty key and its value, which may be empty.
     ///
-    /// Validation rejects an empty key, then a record too large for an empty
-    /// page, then a duplicate key, then insufficient current space. Every error
-    /// leaves all bytes unchanged.
+    /// Validation rejects an empty key, an out-of-range key, a record too large
+    /// for an empty page with these fences, a duplicate key, then insufficient
+    /// current space, in that order. Every error leaves all bytes unchanged.
     pub fn try_insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), PageError> {
         self.try_insert_record(key, RecordState::Insert(value))
     }
@@ -48,6 +48,7 @@ impl Page {
             self.insert_at(index, key, state, needed)?;
             return Ok(UpsertOutcome::Inserted);
         }
+        let index = index + self.record_start();
         let mut slot = self.slots()[index];
         if state != RecordState::Delete {
             let value = state.value().unwrap_or_default();
@@ -61,7 +62,7 @@ impl Page {
                 if payload_len > free {
                     return Err(PageError::PageFull);
                 }
-                let end = HEADER_BYTES + self.len() * SLOT_BYTES + free;
+                let end = HEADER_BYTES + self.slot_count() * SLOT_BYTES + free;
                 let offset = end - payload_len;
                 self.as_mut_bytes()[offset..offset + key.len()].copy_from_slice(key);
                 self.as_mut_bytes()[offset + key.len()..end].copy_from_slice(value);
@@ -76,13 +77,11 @@ impl Page {
     }
 
     fn record_size(&self, key: &[u8], state: RecordState<'_>) -> Result<usize, PageError> {
-        if key.is_empty() {
-            return Err(PageError::EmptyKey);
-        }
+        self.check_key(key)?;
         key.len()
             .checked_add(state.value().map_or(0, <[u8]>::len))
             .and_then(|size| size.checked_add(SLOT_BYTES))
-            .filter(|&size| size <= self.capacity() - HEADER_BYTES)
+            .filter(|&size| size <= self.record_capacity())
             .ok_or(PageError::RecordTooLarge)
     }
 
@@ -93,7 +92,8 @@ impl Page {
         state: RecordState<'_>,
         needed: usize,
     ) -> Result<(), PageError> {
-        let count = self.len();
+        let count = self.slot_count();
+        let index = index + self.record_start();
         let value = state.value().unwrap_or_default();
 
         let free = self.free_bytes();
@@ -128,13 +128,12 @@ impl Page {
     ///
     /// Requires a nonempty key. No bytes change for a missing key or an error.
     pub fn set_referenced(&mut self, key: &[u8], referenced: bool) -> Result<bool, PageError> {
-        if key.is_empty() {
-            return Err(PageError::EmptyKey);
-        }
+        self.check_key(key)?;
         let index = self.lower_bound(key);
         if index == self.len() || self.key_at(index) != key {
             return Ok(false);
         }
+        let index = index + self.record_start();
         self.slots_mut()[index].set_referenced(referenced);
         Ok(true)
     }
@@ -144,14 +143,13 @@ impl Page {
     /// This is not a logical deletion: callers must retain unapplied tombstones.
     /// Its slot becomes free immediately; its payload becomes reclaimable space.
     pub fn remove(&mut self, key: &[u8]) -> Result<bool, PageError> {
-        if key.is_empty() {
-            return Err(PageError::EmptyKey);
-        }
+        self.check_key(key)?;
         let index = self.lower_bound(key);
-        let count = self.len();
-        if index == count || self.key_at(index) != key {
+        if index == self.len() || self.key_at(index) != key {
             return Ok(false);
         }
+        let index = index + self.record_start();
+        let count = self.slot_count();
         self.slots_mut().copy_within(index + 1..count, index);
         let flags = self.header.count_and_flags.get() & !COUNT_MASK;
         self.header.count_and_flags.set(flags | (count - 1) as u16);

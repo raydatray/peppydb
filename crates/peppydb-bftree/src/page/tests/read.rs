@@ -4,7 +4,7 @@ use super::*;
 fn lookup_worked_byte_fixture() {
     let mut storage = [0; 128];
     let page = Page::init(&mut storage).unwrap();
-    page.as_mut_bytes()[0..2].copy_from_slice(&[3, 0xa0]);
+    page.as_mut_bytes()[0..2].copy_from_slice(&[3, 0x20]);
     // Free space: 113 - 32 header bytes - 3 slots * 8 bytes.
     page.as_mut_bytes()[4..6].copy_from_slice(&57u16.to_le_bytes());
     page.as_mut_bytes()[32..56].copy_from_slice(&[

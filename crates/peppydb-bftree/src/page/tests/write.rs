@@ -83,13 +83,13 @@ fn exact_fits_and_error_precedence_preserve_bytes() {
 fn insertion_preserves_flags_and_inactive_metadata() {
     let mut storage = [0; 128];
     let page = Page::init(&mut storage).unwrap();
-    page.as_mut_bytes()[0..2].copy_from_slice(&0xb000u16.to_le_bytes());
+    page.as_mut_bytes()[0..2].copy_from_slice(&0x3000u16.to_le_bytes());
     page.as_mut_bytes()[6..32].fill(0xa5);
     let inactive = page.as_bytes()[6..32].to_vec();
     for (index, key) in [b"30", b"10", b"20"].into_iter().enumerate() {
         page.try_insert(key, b"value").unwrap();
         assert_eq!(page.len(), index + 1);
-        assert_eq!(read_u16(page.as_bytes(), 0), 0xb000 | (index + 1) as u16);
+        assert_eq!(read_u16(page.as_bytes(), 0), 0x3000 | (index + 1) as u16);
         assert_eq!(&page.as_bytes()[6..32], inactive);
         assert_eq!(page.capacity(), 128);
     }
