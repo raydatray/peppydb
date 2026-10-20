@@ -1,3 +1,4 @@
+use super::KeyRef;
 use super::layout::KIND_SHIFT;
 
 /// Shared two-bit record-kind encoding for base leaves and mini-pages.
@@ -56,9 +57,11 @@ impl<'a> RecordState<'a> {
 }
 
 /// A record borrowed from a page, including its exact state and reference hint.
+///
+/// The key is a logical view: it may borrow a page prefix and a stored suffix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecordRef<'a> {
-    pub key: &'a [u8],
-    pub state: RecordState<'a>,
+pub struct RecordRef<'p> {
+    pub key: KeyRef<'p>,
+    pub state: RecordState<'p>,
     pub referenced: bool,
 }

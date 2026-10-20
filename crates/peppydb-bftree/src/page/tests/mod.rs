@@ -18,8 +18,20 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 
 fn live<'a>(key: &'a [u8], value: &'a [u8]) -> RecordRef<'a> {
     RecordRef {
-        key,
+        key: KeyRef::from(key),
         state: RecordState::Insert(value),
         referenced: false,
+    }
+}
+
+/// View full-key input bounds as the logical bounds a page should report.
+fn logical<'a>(fences: Fences<&'a [u8]>) -> Fences<KeyRef<'a>> {
+    let view = |fence| match fence {
+        Fence::Unbounded => Fence::Unbounded,
+        Fence::Key(key) => Fence::Key(KeyRef::from(key)),
+    };
+    Fences {
+        lower: view(fences.lower),
+        upper: view(fences.upper),
     }
 }

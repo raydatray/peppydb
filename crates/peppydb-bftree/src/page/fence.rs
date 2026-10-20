@@ -1,25 +1,28 @@
 use zerocopy::IntoBytes;
 
 use super::layout::{HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, LOW_INFINITY, SLOT_BYTES, Slot};
-use super::{Page, PageError, RecordKind};
+use super::{KeyRef, Page, PageError, RecordKind};
 
 /// A page bound. A finite empty key is distinct from an unbounded endpoint.
+///
+/// [`Page::init_with_fences`] accepts full keys as `Fence<&[u8]>`;
+/// [`Page::fences`] returns logical views as `Fence<KeyRef>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fence<'a> {
+pub enum Fence<K> {
     /// Negative infinity for a lower fence; positive infinity for an upper fence.
     Unbounded,
-    Key(&'a [u8]),
+    Key(K),
 }
 
 /// Lower-inclusive, upper-exclusive page bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Fences<'a> {
-    pub lower: Fence<'a>,
-    pub upper: Fence<'a>,
+pub struct Fences<K> {
+    pub lower: Fence<K>,
+    pub upper: Fence<K>,
 }
 
-impl<'a> Fence<'a> {
-    fn key(self) -> Option<&'a [u8]> {
+impl<K> Fence<K> {
+    fn key(self) -> Option<K> {
         match self {
             Self::Unbounded => None,
             Self::Key(key) => Some(key),
@@ -34,7 +37,7 @@ impl Page {
     /// changing any bytes. The returned page borrows only `bytes`.
     pub fn init_with_fences<'b>(
         bytes: &'b mut [u8],
-        fences: Fences<'_>,
+        fences: Fences<&[u8]>,
     ) -> Result<&'b mut Self, PageError> {
         Self::check_capacity(bytes.len())?;
         if let (Fence::Key(lower), Fence::Key(upper)) = (fences.lower, fences.upper)
@@ -81,7 +84,7 @@ impl Page {
     }
 
     /// Borrow the page's structural bounds, or `None` on an unfenced page.
-    pub fn fences(&self) -> Option<Fences<'_>> {
+    pub fn fences(&self) -> Option<Fences<KeyRef<'_>>> {
         if self.record_start() == 0 {
             return None;
         }
@@ -93,7 +96,7 @@ impl Page {
                 return Fence::Unbounded;
             }
 
-            Fence::Key(&self.as_bytes()[slot.key_range()])
+            Fence::Key(KeyRef::from(&self.as_bytes()[slot.key_range()]))
         };
 
         Some(Fences {
@@ -109,8 +112,14 @@ impl Page {
         }
 
         if let Some(fences) = self.fences()
-            && (fences.lower.key().is_some_and(|lower| key < lower)
-                || fences.upper.key().is_some_and(|upper| key >= upper))
+            && (fences
+                .lower
+                .key()
+                .is_some_and(|lower| lower.cmp_bytes(key).is_gt())
+                || fences
+                    .upper
+                    .key()
+                    .is_some_and(|upper| upper.cmp_bytes(key).is_le()))
         {
             return Err(PageError::KeyOutOfRange);
         }
@@ -122,8 +131,8 @@ impl Page {
     pub(super) fn record_capacity(&self) -> usize {
         let fence_bytes = self.fences().map_or(0, |fences| {
             2 * SLOT_BYTES
-                + fences.lower.key().map_or(0, <[u8]>::len)
-                + fences.upper.key().map_or(0, <[u8]>::len)
+                + fences.lower.key().map_or(0, KeyRef::len)
+                + fences.upper.key().map_or(0, KeyRef::len)
         });
 
         self.capacity() - HEADER_BYTES - fence_bytes

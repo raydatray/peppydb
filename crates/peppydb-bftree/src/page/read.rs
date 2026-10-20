@@ -5,7 +5,7 @@ use std::ops::Range;
 use zerocopy::IntoBytes;
 
 use super::layout::Slot;
-use super::{Page, PageError, RecordKind, RecordRef, RecordState};
+use super::{KeyRef, Page, PageError, RecordKind, RecordRef, RecordState};
 
 impl Page {
     /// Borrow a stored record for a nonempty key, or `None` on a page miss.
@@ -21,7 +21,7 @@ impl Page {
         }
 
         let record = self.record_at(index);
-        Ok((record.key == key).then_some(record))
+        Ok(record.key.cmp_bytes(key).is_eq().then_some(record))
     }
 
     /// Borrow all record states in lexicographic key order without allocation.
@@ -72,7 +72,7 @@ impl Page {
         };
 
         RecordRef {
-            key: &bytes[key],
+            key: KeyRef::from(&bytes[key]),
             state,
             referenced: slot.referenced(),
         }
