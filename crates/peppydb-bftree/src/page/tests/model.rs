@@ -172,7 +172,7 @@ impl ModelRecord {
 
     fn borrow<'a>(&'a self, key: &'a [u8]) -> RecordRef<'a> {
         RecordRef {
-            key,
+            key: KeyRef::from(key),
             state: match self.kind {
                 0 => RecordState::Insert(&self.stored),
                 1 => RecordState::Delete,
@@ -188,12 +188,12 @@ impl ModelRecord {
 struct MutationModel {
     records: BTreeMap<Vec<u8>, ModelRecord>,
     capacity: usize,
-    fences: Option<Fences<'static>>,
+    fences: Option<Fences<&'static [u8]>>,
     gap: usize,
 }
 
 impl MutationModel {
-    fn new(capacity: usize, fences: Option<Fences<'static>>) -> Self {
+    fn new(capacity: usize, fences: Option<Fences<&'static [u8]>>) -> Self {
         let mut model = Self {
             records: BTreeMap::new(),
             capacity,
@@ -329,7 +329,7 @@ impl MutationModel {
         assert_eq!(page.is_empty(), self.records.is_empty());
         assert_eq!(page.capacity(), self.capacity);
         assert_eq!(page.free_bytes(), self.gap);
-        assert_eq!(page.fences(), self.fences);
+        assert_eq!(page.fences(), self.fences.map(logical));
         let expected: Vec<_> = self
             .records
             .iter()
@@ -362,8 +362,8 @@ impl MutationModel {
                     .iter()
                     .copied()
                     .filter(|record| {
-                        start.is_none_or(|start| record.key >= start)
-                            && end.is_none_or(|end| record.key < end)
+                        start.is_none_or(|start| record.key.cmp_bytes(start).is_ge())
+                            && end.is_none_or(|end| record.key.cmp_bytes(end).is_lt())
                     })
                     .collect();
                 let iter = page.range(start, end).unwrap();
@@ -450,7 +450,7 @@ impl MutationModel {
 
 #[test]
 fn mixed_mutations_match_physical_and_logical_models() {
-    let profiles = [
+    let profiles: [Option<Fences<&[u8]>>; 7] = [
         None,
         Some(Fences {
             lower: Fence::Unbounded,
@@ -548,7 +548,7 @@ fn mixed_mutations_match_physical_and_logical_models() {
 
 #[test]
 fn fenced_compaction_preserves_counts_above_255_and_mixed_states() {
-    let fences = Fences {
+    let fences: Fences<&[u8]> = Fences {
         lower: Fence::Key(b""),
         upper: Fence::Unbounded,
     };

@@ -102,7 +102,7 @@ fn slot_lengths_exclude_all_kind_and_reference_bits() {
                 RecordKind::Phantom => RecordState::Phantom,
             };
             let expected = RecordRef {
-                key: b"k",
+                key: KeyRef::from(b"k".as_slice()),
                 state,
                 referenced,
             };
@@ -165,7 +165,11 @@ fn iterate_borrowed_records_in_key_order() {
             let actual = iter.next().unwrap();
             assert_eq!(actual, live(key, value));
             let offset = usize::from(read_u16(page.as_bytes(), 32 + index * 8));
-            assert_eq!(actual.key.as_ptr(), page.as_bytes()[offset..].as_ptr());
+            assert_eq!(actual.key.prefix(), b"");
+            assert_eq!(
+                actual.key.suffix().as_ptr(),
+                page.as_bytes()[offset..].as_ptr()
+            );
             assert_eq!(
                 actual.state.value().unwrap().as_ptr(),
                 page.get(key)
@@ -244,7 +248,7 @@ fn bounded_iteration_matches_ordered_filtering_with_and_without_fences() {
             model.insert(
                 key,
                 RecordRef {
-                    key,
+                    key: KeyRef::from(key),
                     state,
                     referenced: index % 2 == 0,
                 },
@@ -261,8 +265,8 @@ fn bounded_iteration_matches_ordered_filtering_with_and_without_fences() {
                     .values()
                     .copied()
                     .filter(|record| {
-                        start.is_none_or(|start| record.key >= start)
-                            && end.is_none_or(|end| record.key < end)
+                        start.is_none_or(|start| record.key.cmp_bytes(start).is_ge())
+                            && end.is_none_or(|end| record.key.cmp_bytes(end).is_lt())
                     })
                     .collect();
                 let mut actual = page.range(start, end).unwrap();
