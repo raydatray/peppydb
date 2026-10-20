@@ -75,6 +75,18 @@ including absence records. The iterator is exact-sized and fused. Reads never
 change page bytes or reference bits. Borrowed results keep the page borrowed;
 callers must retain its allocation and any later synchronization protection.
 
+## Typed writes and reference hints
+
+`try_insert_record` inserts any `RecordState` at a distinct nonempty key;
+`try_insert` is the `Insert` convenience. Newly inserted absence states have
+zero encoded value length. Any stored state makes a key a duplicate. Validation
+checks key emptiness, standalone record size, duplicates, then contiguous space.
+Every rejected operation preserves the entire page image.
+
+New entries have a clear reference bit. `set_referenced` changes only that bit
+under exclusive access and returns whether an entry exists. Cache policy will
+decide when to mark accesses; raw reads remain pure.
+
 ## `Page` as a base type
 
 The public `page` module uses private `layout`, `record`, `read`, and `write`
