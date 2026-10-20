@@ -735,7 +735,7 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Implement and verify diff 6: replacement/upsert.
 - [x] Implement and verify diff 7: fence ranges.
 - [x] Implement and verify diff 8: bounded iteration.
-- [ ] Implement and verify diff 9: preview-based search.
+- [x] Implement and verify diff 9: preview-based search.
 - [ ] Implement and verify diff 10: mixed-operation model.
 - [ ] Complete workspace verification and update the design note and roadmap.
 
@@ -798,13 +798,18 @@ change.
   reversed, absent, prefix, zero-byte, and cross-fence endpoints. They cover all
   states, exact lengths, fused exhaustion, byte preservation, empty pages, and
   iterators that outlive allocated query bounds.
+- Diff 9: all 30 package tests and the documentation example pass. Differential
+  comparison covers all 256 one-byte keys and selected two-/longer-byte keys,
+  collisions, prefixes, zeros, and missing queries. A local invalid-offset slot
+  fixture proves unequal previews do not access payloads. Existing point/range
+  tests run through the shared optimized comparator.
 
 ## Agent notes
 
 - **Stack:** Diff 2 mechanically reorganized
   `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
   `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** Diffs 2–8 are complete. Proceed with preview search in diff 9.
+- **Current state:** Diffs 2–9 are complete. Finish the mixed model in diff 10.
 - **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
   borrowed record iteration. Ordinary record keys remain nonempty; fence/query
   bounds may be empty and must remain distinct from unbounded bounds.
