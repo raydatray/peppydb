@@ -12,8 +12,9 @@ buffer.
 ```
 
 - The header starts the page. The slot directory follows it, with one slot per
-  record, sorted by key. Payloads grow backward from the end of the page. Free
-  space is the gap between the slots and the payloads.
+  ordinary record, sorted by key. Fenced pages place two structural slots before
+  those records. Payloads grow backward from the end; obsolete payloads can leave
+  holes. Free space is the contiguous gap between slots and the payload region.
 - A `Page` is the buffer itself, viewed in place; it owns no memory. Readers
   share `&Page`, and a writer holds `&mut Page`.
 - Capacities are multiples of 64 bytes, from 64 through 4096. The 64-byte step
@@ -21,7 +22,7 @@ buffer.
   sizes such as 448 bytes. 4096 bytes is upstream's default leaf page size.
 - Integers are little-endian, and offsets are measured from the page start. Any
   buffer alignment works.
-- A `Page` must come from `Page::init`. Stored bytes must be validated before
+- A `Page` must come from `Page::init` or `Page::init_with_fences`. Stored bytes must be validated before
   they are used as a `Page`; reopening pages is future work.
 
 ## Header
@@ -30,7 +31,7 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 
 | Bytes | Field | Meaning |
 | --- | --- | --- |
-| `0..2` | `count_and_flags` | Record count (low 12 bits) and flags (high 4 bits) |
+| `0..2` | `count_and_flags` | Total slot count (low 12 bits), including fences; flags (high 4 bits), including `HAS_FENCES = 0x8000` |
 | `2..4` | `capacity` | Page length in bytes |
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
 | `6..8` | `prefix_len` | Length of the key prefix shared by the page; zero until prefix compression |
@@ -80,7 +81,8 @@ callers must retain its allocation and any later synchronization protection.
 `try_insert_record` inserts any `RecordState` at a distinct nonempty key;
 `try_insert` is the `Insert` convenience. Newly inserted absence states have
 zero encoded value length. Any stored state makes a key a duplicate. Validation
-checks key emptiness, standalone record size, duplicates, then contiguous space.
+checks key emptiness, range membership, standalone record size including fences,
+duplicates, then contiguous space.
 Every rejected operation preserves the entire page image.
 
 New entries have a clear reference bit. `set_referenced` changes only that bit
@@ -124,9 +126,34 @@ values. The completed image replaces the source; compaction does not apply a
 pending write or choose records to discard. Capacity handling remains with the
 caller. An insertion rejected on a fragmented page leaves every byte unchanged.
 
+## Page fences
+
+`init_with_fences` reserves slots 0 and 1 for lower and upper bounds and copies
+their keys. Ordinary records follow them. The header count includes these slots;
+`len`, lookup, and iteration exclude them. Both unbounded fences still consume
+16 directory bytes. `Page::init` creates an unfenced page with no such slots.
+
+`Fence::Key(b"")` is finite and distinct from `Fence::Unbounded`. Finite fences
+use normal `Insert` slots with zero value length and reference bit. Their keys
+may be empty, with a normal offset at or below page end. Infinite fences use
+explicit offsets: `u16::MAX - 1` for lower and `u16::MAX` for upper, with all
+remaining fields zero. Decoding never infers infinity from key length. Compaction
+packs finite keys and preserves infinity tags. Prefix length remains zero.
+
+Finite bounds must satisfy `lower < upper`. The domain is `[lower, upper)`.
+Every point operation checks membership, returning `KeyOutOfRange` for incorrect
+routing and the normal miss result for an in-range miss. Empty ordinary keys
+still return `EmptyKey` first. Fence initialization checks capacity, ordering,
+then storage size; all failures preserve the supplied buffer. Writes budget
+the fences when deciding `RecordTooLarge`, before checking duplicates or space.
+
+Fences are immutable structural metadata. A split will initialize destination
+pages with new bounds and must budget their actual fence bytes. Fences alone do
+not guarantee that a page is a complete cache of its domain.
+
 ## `Page` as a base type
 
-The public `page` module uses private `layout`, `record`, `read`, `write`, and `compact`
+The public `page` module uses private `layout`, `record`, `read`, `write`, `compact`, and `fence`
 submodules. They implement the same `Page` type and keep encoding details private.
 Unit tests use independent byte decoding alongside ordered-map checks.
 
@@ -136,7 +163,7 @@ the header fields their role uses, and enforce role-specific rules:
 
 | Role (planned) | Adds to `Page` |
 | --- | --- |
-| `BasePage` | Fences (the page's key-range bounds); only `Insert` and `Delete` records; no backing leaf |
+| `BasePage` | Requires fences; only `Insert` and `Delete` records; no backing leaf |
 | `MiniPage` | A size class; any record kind; `backing_leaf` set to its base leaf; no fences |
 | Full-page cache | A whole in-memory copy of a base leaf, with `backing_leaf` set |
 

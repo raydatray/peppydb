@@ -1,7 +1,7 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::Page;
-use super::layout::{HEADER_BYTES, SLOT_BYTES};
+use super::layout::{HEADER_BYTES, LOW_INFINITY, SLOT_BYTES};
 
 impl Page {
     /// Unreachable payload bytes, excluding the contiguous free gap.
@@ -13,7 +13,11 @@ impl Page {
             .map(|slot| slot.key_range().len() + slot.value_len())
             .sum();
 
-        self.capacity() - HEADER_BYTES - self.len() * SLOT_BYTES - reachable - self.free_bytes()
+        self.capacity()
+            - HEADER_BYTES
+            - self.slot_count() * SLOT_BYTES
+            - reachable
+            - self.free_bytes()
     }
 
     /// Pack every stored payload and return the bytes recovered into the gap.
@@ -43,6 +47,11 @@ impl Page {
         let mut end = self.capacity();
 
         for (index, slot) in self.slots().iter().enumerate() {
+            if slot.offset.get() >= LOW_INFINITY {
+                destination.slots_mut()[index] = *slot;
+                continue;
+            }
+
             let start = slot.key_range().start;
             let length = slot.key_range().len() + slot.value_len();
 
@@ -58,6 +67,6 @@ impl Page {
         destination
             .header
             .remaining_size
-            .set((end - HEADER_BYTES - self.len() * SLOT_BYTES) as u16);
+            .set((end - HEADER_BYTES - self.slot_count() * SLOT_BYTES) as u16);
     }
 }
