@@ -82,7 +82,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | --- | --- | --- |
 | 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
 | 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Completed plan 0005](0005-bf-tree-page-prefix.md) delivers fence-derived prefix compression and borrowed logical keys. Milestone complete. |
-| 3. In-memory tree structure | 2 | Inner-node routing, root growth, and splits that account for variable record sizes. |
+| 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Draft plan 0006](0006-bf-tree-inner-node.md) defines the local routing-node primitive; tree composition and split propagation follow in 0007. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
 | 6. Bounded buffer pool | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. |
@@ -146,7 +146,9 @@ the completed concurrent, larger-than-memory engine.
 - [x] Draft [fence-derived prefix compression](0005-bf-tree-page-prefix.md).
 - [x] Agree on plan 0005's logical-key/fence interfaces and seven-diff stack.
 - [x] Implement and verify the prefix-compression stack, completing milestone 2.
-- [ ] Draft the in-memory tree structure plan (milestone 3).
+- [x] Draft [inner-node storage and routing](0006-bf-tree-inner-node.md), the first milestone 3 stack.
+- [ ] Agree on and implement the inner-node primitive.
+- [ ] Plan in-memory tree composition, leaf splitting, and root growth (0007).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -154,7 +156,9 @@ only when its behavior and verification are delivered. The
 Plan 0004 is complete, including independent mixed-operation models and workspace
 verification. [Plan 0005](0005-bf-tree-page-prefix.md) is complete: pages store a
 fence-derived prefix once and expose borrowed logical keys. Milestone 2 is
-complete; the next decision is the in-memory tree structure plan.
+complete. Next, review [plan 0006](0006-bf-tree-inner-node.md): its structural
+header, typed child references, and local split contract prepare the routing
+primitive for tree composition in 0007.
 
 ## Sources
 
