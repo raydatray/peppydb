@@ -1,6 +1,6 @@
 # 0005: Fence-derived page prefix compression
 
-**Status:** Agreed
+**Status:** Completed
 
 **Design references:** [Shared BF-Tree pages](../design/bf-tree-pages.md).
 
@@ -400,37 +400,66 @@ or new benchmark framework is part of this stack.
 - [x] Implement and verify diff 4: prefix-aware decoding and search.
 - [x] Implement and verify diff 5: physical mutation and compaction accounting.
 - [x] Implement and verify diff 6: compressed initialization.
-- [ ] Implement and verify diff 7: model checks and final verification.
-- [ ] Update the design note and mark milestone 2 complete after delivery.
+- [x] Implement and verify diff 7: model checks and final verification.
+- [x] Update the design note and mark milestone 2 complete after delivery.
 
 ## Agent notes and review outcomes
 
-- **Planning verification:** Reviewed the completed 0004 API, compressed byte
-  accounting, lifetime/ordering contracts, local links, and seven-diff sequencing.
-  Diff 1 is documentation-only; Rust checks remain for the implementation diffs.
-- **Implementation handoff:** The plan is agreed and implementation has not
-  started. Begin with diff 2, `page/key.rs` and its logical-key tests. The plan
-  commit is diff 1; use `[n/7][bf-page-prefix][section]` for the remaining stack.
 - **Baseline inspected:** `f6914397bdcf`, the completed ten-diff 0004 stack.
-- **Key entry points:** `page/layout.rs` currently combines full length and
-  physical range in `Slot::key_range`; `read.rs` owns logical record indexing and
-  preview search; `fence.rs` owns initialization, membership, and record capacity;
-  `write.rs` owns size preflight and payload placement; `compact.rs` copies stored
-  payloads rather than logical record values.
-- **Avoid double counting:** Current `record_capacity` sums lengths obtained
-  through `fences()`. Once those are logical key views, use physical fence bytes
-  instead. Infinity slots must be skipped before subtracting a nonzero prefix.
-- **Prefix source:** Read the prefix directly from the low fence's physical
-  allocation. Avoid a recursive dependency between prefix access and `fences()`
-  decoding of the high fence.
-- **Existing fixtures:** `tests/write.rs` currently fills `6..32` with arbitrary
-  inactive metadata. Bytes `6..8` become active; preserve valid prefixes and use
-  `8..32` for unrelated metadata tests. Adapt the physical validator and model's
-  `structural_bytes`/`packed_bytes` without reusing production encoding helpers.
-- **Documentation:** Extend `docs/design/bf-tree-pages.md` with the delivered
-  compressed format and logical-key contract. Keep detailed upstream discussion
-  in the linked explanation. Record implementation check results here as each
-  diff lands; planning review does not substitute for those checks.
+- **Delivered stack:** All seven diffs landed in the agreed order with the agreed
+  titles. Each diff was built and tested on its own before the next began.
+- **Key entry points:** `page/key.rs` owns `KeyRef`. `Page::prefix`,
+  `Page::suffix_range`, and `Page::payload_range` in `page/mod.rs` own prefix
+  access and role-aware physical ranges. `read.rs` owns prefix classification
+  and suffix search (`lower_bound`, `compare_suffix`). `fence.rs` owns prefix
+  selection, fence decoding, and `record_capacity`. `write.rs` owns physical
+  record sizing and suffix placement.
+- **Test fixtures:** `tests/prefix.rs::compressed_fixture` encodes compressed
+  pages with any stored prefix length, independently of production encoders.
+  Read and write tests use it before and after the constructor enables prefixes;
+  the worked example's constructor output matches it byte for byte.
+
+### Implementation decisions
+
+These routine decisions refine the agreed design without changing its scope:
+
+- `KeyRef::new` is crate-internal. Callers create views with `From<&[u8]>` or
+  receive them from pages. `bytes()` returns
+  `impl DoubleEndedIterator<Item = u8> + Clone` rather than a named type.
+- `Ord for KeyRef` compares slices directly when either side has an empty
+  prefix and falls back to the chained byte iterator otherwise.
+- `Slot::new` takes the number of omitted prefix bytes. The slot stores the full
+  logical length and previews the stored bytes. `Slot::key_len` and
+  `Slot::stored_key_range(omitted)` replace the former combined `key_range`.
+- `Page::payload_range(index)` is the single source of physical sizes. It
+  returns `None` for infinity tags before any prefix subtraction, uses the full
+  low fence, and uses suffixes for the high fence and records. Reclamation,
+  compaction, and `record_capacity` all use it, so no physical size is derived
+  from logical views.
+- `record_size` checks logical key and value lengths against `MAX_KEY_LEN`
+  (14 bits) and `MAX_VALUE_LEN` (15 bits) before narrowing. Fence
+  initialization applies the key-length check too, returning `FencesTooLarge`.
+  Both checks are defensive: supported capacities already bound these lengths.
+- Diff 4 kept a temporary full-key `Slot::key_range` for write and compaction
+  paths; diff 5 removed it when those paths became role-aware.
+- The test write fixture that filled bytes `6..32` now fills `8..32` and asserts
+  a zero prefix length on unfenced pages.
+
+### Verification outcomes
+
+- Diffs 2–6: `cargo test -p peppydb-bftree`, `cargo fmt --all -- --check`, and
+  `cargo clippy --workspace --all-targets -- -D warnings` passed at each diff.
+- Diff 7 (final): all required commands below passed: 48 unit tests and two
+  doctests in `peppydb-bftree`, workspace tests, formatting, Clippy with
+  `-D warnings`, and `RUSTDOCFLAGS="-D warnings" cargo doc`.
+- The mixed-operation model now covers 11 fence profiles, including four
+  compressed profiles with two- and three-byte prefixes, across 11 capacities.
+  The count-above-255 test also runs with a two-byte prefix.
+- Model sensitivity check: temporarily sizing records by full logical key length
+  made both model tests fail; the change was reverted.
+- Concrete savings: the `[acct/100, acct/200)` example leaves 45 free bytes on a
+  128-byte page instead of 30, a 15-byte saving, checked against golden bytes.
+  No throughput claim is made.
 
 ## Sources
 
