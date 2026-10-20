@@ -25,6 +25,7 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+mod compact;
 mod layout;
 mod read;
 mod record;

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 
+mod compact;
 mod layout;
 mod model;
 mod read;
