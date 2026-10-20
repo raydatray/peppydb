@@ -140,7 +140,11 @@ encoded value length. Later live writes may reuse that retained value region.
 existing value; shortening leaves a hole and reduces the encoded length. There
 is no separate allocation-capacity field.
 
-Growing replacements allocate the complete key/value payload from the gap,
+Writes size records physically: a new entry needs an eight-byte slot plus its
+stored suffix (`key.len() - prefix_len`) and value. Logical key and value lengths
+are checked against their 14-bit and 15-bit slot fields before narrowing.
+
+Growing replacements allocate the complete stored-suffix/value payload from the gap,
 redirect the existing slot, and leave the old payload as a hole. They require
 no new slot but do not credit the old payload toward available space. `PageFull`
 describes this physical path, even when only the final logical records would
@@ -164,7 +168,11 @@ reachable payloads are disjoint and lie above it, but need not start at it.
 scratch image and returns the recovered byte count. It preserves every record,
 kind, reference bit, retained tombstone value, flag, and recovery/backing-leaf
 field. It rebuilds physical slots because logical absence views hide retained
-values. The completed image replaces the source; compaction does not apply a
+values and logical keys include the shared prefix. Each slot's physical size
+depends on its role: the low fence stores its full key, the high fence and
+ordinary records store suffixes, and infinite fences have no payload. The
+stored prefix length stays unchanged. The completed image replaces the source;
+compaction does not apply a
 pending write or choose records to discard. Capacity handling remains with the
 caller. An insertion rejected on a fragmented page leaves every byte unchanged.
 

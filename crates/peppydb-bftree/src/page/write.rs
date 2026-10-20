@@ -1,6 +1,6 @@
 use zerocopy::{FromBytes, IntoBytes};
 
-use super::layout::{COUNT_MASK, HEADER_BYTES, SLOT_BYTES, Slot};
+use super::layout::{COUNT_MASK, HEADER_BYTES, MAX_KEY_LEN, MAX_VALUE_LEN, SLOT_BYTES, Slot};
 use super::{Page, PageError, RecordState};
 
 impl Page {
@@ -53,7 +53,7 @@ impl Page {
         if state != RecordState::Delete {
             let value = state.value().unwrap_or_default();
             if value.len() <= slot.value_len() {
-                let start = slot.key_range().end;
+                let start = self.suffix_range(&slot).end;
                 self.as_mut_bytes()[start..start + value.len()].copy_from_slice(value);
 
                 slot.set_value_len(value.len() as u16);
@@ -66,8 +66,10 @@ impl Page {
 
                 let end = HEADER_BYTES + self.slot_count() * SLOT_BYTES + free;
                 let offset = end - payload_len;
-                self.as_mut_bytes()[offset..offset + key.len()].copy_from_slice(key);
-                self.as_mut_bytes()[offset + key.len()..end].copy_from_slice(value);
+                let suffix = &key[self.prefix_len()..];
+                let value_start = offset + suffix.len();
+                self.as_mut_bytes()[offset..value_start].copy_from_slice(suffix);
+                self.as_mut_bytes()[value_start..end].copy_from_slice(value);
 
                 slot.offset.set(offset as u16);
                 slot.set_value_len(value.len() as u16);
@@ -81,14 +83,22 @@ impl Page {
         Ok(UpsertOutcome::Replaced)
     }
 
+    /// Bytes for a new slot, stored suffix, and value. After `check_key`, the
+    /// key starts with the prefix, so the suffix length cannot underflow.
     fn record_size(&self, key: &[u8], state: RecordState<'_>) -> Result<usize, PageError> {
         self.check_key(key)?;
 
-        key.len()
-            .checked_add(state.value().map_or(0, <[u8]>::len))
-            .and_then(|size| size.checked_add(SLOT_BYTES))
-            .filter(|&size| size <= self.record_capacity())
-            .ok_or(PageError::RecordTooLarge)
+        let value_len = state.value().map_or(0, <[u8]>::len);
+        if key.len() > MAX_KEY_LEN || value_len > MAX_VALUE_LEN {
+            return Err(PageError::RecordTooLarge);
+        }
+
+        let size = SLOT_BYTES + (key.len() - self.prefix_len()) + value_len;
+        if size > self.record_capacity() {
+            return Err(PageError::RecordTooLarge);
+        }
+
+        Ok(size)
     }
 
     fn insert_at(
@@ -111,17 +121,25 @@ impl Page {
         // to their slot bit fields, and the count to fewer than 512 records.
         let payload_start = HEADER_BYTES + count * SLOT_BYTES + free;
         let offset = payload_start - (needed - SLOT_BYTES);
-        let value_start = offset + key.len();
+        let omitted = self.prefix_len();
+        let suffix = &key[omitted..];
+        let value_start = offset + suffix.len();
 
         let bytes = self.as_mut_bytes();
-        bytes[offset..value_start].copy_from_slice(key);
+        bytes[offset..value_start].copy_from_slice(suffix);
         bytes[value_start..payload_start].copy_from_slice(value);
 
         let (slots, _): (&mut [Slot], _) =
             FromBytes::mut_from_prefix_with_elems(&mut self.data, count + 1)
                 .expect("preflight reserved space for the new slot");
         slots.copy_within(index..count, index + 1);
-        slots[index] = Slot::new(offset as u16, key, value.len() as u16, state.kind());
+        slots[index] = Slot::new(
+            offset as u16,
+            key,
+            omitted,
+            value.len() as u16,
+            state.kind(),
+        );
 
         let flags = self.header.count_and_flags.get() & !COUNT_MASK;
         self.header.count_and_flags.set(flags | (count + 1) as u16);
