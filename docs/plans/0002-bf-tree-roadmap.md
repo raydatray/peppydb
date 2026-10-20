@@ -81,7 +81,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | Milestone | Builds on | Reviewable outcome |
 | --- | --- | --- |
 | 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
-| 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Agreed plan 0004](0004-bf-tree-page-mutation.md) covers mutation, ranges, and preview search in a ten-diff stack, with prefix compression in a follow-on page stack. |
+| 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search in a ten-diff stack; prefix compression remains for the next page stack. |
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and splits that account for variable record sizes. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
@@ -142,14 +142,15 @@ the completed concurrent, larger-than-memory engine.
 - [x] Draft [page mutation and ranges](0004-bf-tree-page-mutation.md).
 - [x] Agree that prefix compression follows the mutation stack within milestone 2.
 - [x] Agree on plan 0004's page contracts, module organization, and ten-diff stack.
-- [ ] Implement and verify the page-mutation stack.
+- [x] Implement and verify the page-mutation stack.
 - [ ] Complete the remaining milestone 2 layout work, including prefix compression.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
 [shared-page design](../design/bf-tree-pages.md) records the implemented contract.
-Plan 0004 is agreed and ready for implementation handoff. Its plan is diff 1;
-start implementation with diff 2, the mechanical page-module reorganization.
+Plan 0004 is complete, including independent mixed-operation models and workspace
+verification. The next decision is plan 0005's fence-derived prefix compression
+and borrowed key representation, before starting the in-memory tree.
 
 ## Sources
 

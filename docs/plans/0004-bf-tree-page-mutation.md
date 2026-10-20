@@ -1,6 +1,6 @@
 # 0004: BF-Tree page mutation and ranges
 
-**Status:** Agreed
+**Status:** Completed
 
 **Design references:** [Shared BF-Tree pages](../design/bf-tree-pages.md),
 [project direction](../design/architecture.md).
@@ -736,14 +736,13 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Implement and verify diff 7: fence ranges.
 - [x] Implement and verify diff 8: bounded iteration.
 - [x] Implement and verify diff 9: preview-based search.
-- [ ] Implement and verify diff 10: mixed-operation model.
-- [ ] Complete workspace verification and update the design note and roadmap.
+- [x] Implement and verify diff 10: mixed-operation model.
+- [x] Complete workspace verification and update the design note and roadmap.
 
 ## Discoveries and plan changes
 
-- The current `get` and iterator do not interpret record kinds; 0003's fixture
-  tests check length masking independently of kind semantics. Adapt them with
-  the read-contract change.
+- The 0003 `get` and iterator did not interpret record kinds. Diff 3 adapted
+  their fixture tests while preserving independent checks of length masks.
 - Review settled on caller-controlled reclamation and metadata-only deletion,
   replacing automatic reclamation and zero-length tombstones. No combined
   packed-upsert API is included; replacement preserves reference bits.
@@ -758,12 +757,15 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - Diff 7 keeps fence initialization, directory accounting, point operations,
   and compaction together. It exceeds the approximate 300-line guideline, as
   anticipated, so each intermediate revision retains one consistent layout.
+- Diff 10 also exceeds that guideline to keep the independent physical-space
+  model, raw validator, and mixed-operation driver together in one test-only
+  diff. Existing insertion-model coverage remains intact.
 
 ## Verification outcomes
 
-Diff 1 is a documentation-only planning handoff. The byte examples,
+Diff 1 was a documentation-only planning handoff. The byte examples,
 space-accounting formulas, API lifetimes, upstream comparison, module boundaries,
-ten-diff numbering, and local document links were reviewed. Rust code remains at
+ten-diff numbering, and local document links were reviewed. Rust code remained at
 the completed 0003 baseline; Rust checks were not run for this documentation-only
 change.
 
@@ -803,25 +805,42 @@ change.
   collisions, prefixes, zeros, and missing queries. A local invalid-offset slot
   fixture proves unequal previews do not access payloads. Existing point/range
   tests run through the shared optimized comparator.
+- Diff 10: all 32 package tests and the documentation example pass. The mixed
+  model runs 59,136 scheduled operations (11 capacities, seven fence profiles,
+  two deterministic seeds, and 384 steps), plus final cleanup. It checks logical
+  reads/ranges and physical bytes after each operation, including retained
+  tombstone values, references, inactive metadata, gaps, holes, and nonoverlap.
+  A separate fenced case retains more than 255 records through mixed-state
+  updates, removals, and compaction. A test-only literal-unwrap lint was resolved.
+
+Final verification from the repository root:
+
+| Command or review | Outcome |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed without warnings. |
+| `cargo test --workspace` | Passed: 32 BF-Tree unit tests and one documentation test. |
+| `RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps` | Passed without warnings. |
+| Plan/design/roadmap review | Delivered APIs, layout arithmetic, guarantees, staged work, and document links agree. |
+
+No unresolved failures or blockers remain. The complete ten-diff stack includes
+the original plan commit. Prefix compression remains the agreed next page stack.
 
 ## Agent notes
 
-- **Stack:** Diff 2 mechanically reorganized
-  `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
-  `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** Diffs 2–9 are complete. Finish the mixed model in diff 10.
-- **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
-  borrowed record iteration. Ordinary record keys remain nonempty; fence/query
-  bounds may be empty and must remain distinct from unbounded bounds.
+- **Current state:** All ten diffs are complete and verified. Implementation and
+  unit tests live under `crates/peppydb-bftree/src/page/`.
+- **Public contract:** Lookup returns `Option<RecordRef>` and iteration borrows
+  every record state. Ordinary keys remain nonempty; fence/query bounds may be
+  empty and remain distinct from unbounded bounds.
 - **Capacity policy:** Page writes return `PageFull` without automatic compaction
   or retry. There is no combined packed-upsert API. Keep `compact` lossless and
   preserve tombstone allocations and reference bits.
-- **Layout fixtures:** Once fences exist, `0x8000` is an active layout flag.
-  Adapt old arbitrary-flag fixtures to use only inactive bits. Keep raw-byte
-  decoding independent of production helpers when moving tests.
-- **Documentation:** Update `docs/design/bf-tree-pages.md` as behavior lands and
-  record verification outcomes here. Keep prefix compression for the next page
-  stack; the module move and this stack leave `prefix_len` inactive.
+- **Layout fixtures:** `0x8000` is an active fence flag. Arbitrary-flag fixtures
+  use inactive bits. Raw-byte decoding stays independent of production helpers.
+- **Next work:** Draft plan 0005 for prefix compression within milestone 2. The
+  current design is recorded in `docs/design/bf-tree-pages.md`; `prefix_len`
+  remains inactive.
 
 ## Sources and entry points
 
@@ -831,6 +850,6 @@ change.
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: see the
   [upstream page explanation and source links](../explanations/bf-tree-upstream-pages.md#sources).
-- Current implementation: `crates/peppydb-bftree/src/page.rs`; public exports in
-  `crates/peppydb-bftree/src/lib.rs`. Diff 2 moves the page implementation and
-  tests into `crates/peppydb-bftree/src/page/` using the module organization above.
+- Current implementation: `crates/peppydb-bftree/src/page/`; public exports in
+  `crates/peppydb-bftree/src/lib.rs`. Tests live in the page's `tests/` directory
+  using the module organization above.

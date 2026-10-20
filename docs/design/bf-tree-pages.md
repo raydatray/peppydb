@@ -22,8 +22,8 @@ buffer.
   sizes such as 448 bytes. 4096 bytes is upstream's default leaf page size.
 - Integers are little-endian, and offsets are measured from the page start. Any
   buffer alignment works.
-- A `Page` must come from `Page::init` or `Page::init_with_fences`. Stored bytes must be validated before
-  they are used as a `Page`; reopening pages is future work.
+- A `Page` must come from `Page::init` or `Page::init_with_fences`. Stored bytes
+  must be validated before they are used as a `Page`; reopening pages is future work.
 
 ## Header
 
@@ -55,8 +55,8 @@ Each slot uses 8 bytes:
 | `4..6` | Reference bit (high bit) and value length (low 15 bits) |
 | `6..8` | First two key bytes (preview), zero-padded |
 
-- Slots are sorted by full key bytes. Each payload holds the key followed by the
-  value.
+- Ordinary slots are sorted by full key bytes. Each payload holds the key
+  followed by its encoded value allocation, even when a tombstone hides it.
 - Record kinds follow upstream: `Insert` (live value), `Delete` (tombstone),
   `Cache` (clean cached value), and `Phantom` (clean cached absence).
 - Keys must be nonempty, as upstream requires. Values may be empty: an empty
@@ -101,8 +101,8 @@ This is a search fast path; no throughput claim is made without a workload.
 `try_insert` is the `Insert` convenience. Newly inserted absence states have
 zero encoded value length. Any stored state makes a key a duplicate. Validation
 checks key emptiness, range membership, standalone record size including fences,
-duplicates, then contiguous space.
-Every rejected operation preserves the entire page image.
+duplicates, then contiguous space. Every rejected operation preserves the entire
+page image.
 
 New entries have a clear reference bit. `set_referenced` changes only that bit
 under exclusive access and returns whether an entry exists. Cache policy will
@@ -172,9 +172,13 @@ not guarantee that a page is a complete cache of its domain.
 
 ## `Page` as a base type
 
-The public `page` module uses private `layout`, `record`, `read`, `write`, `compact`, and `fence`
-submodules. They implement the same `Page` type and keep encoding details private.
-Unit tests use independent byte decoding alongside ordered-map checks.
+The public `page` module uses private `layout`, `record`, `read`, `write`,
+`compact`, and `fence` submodules. They implement the same `Page` type and keep
+encoding details private. Unit tests use independent byte decoding alongside
+ordered-map checks. The mixed-operation model owns retained physical values and
+tracks the contiguous gap from operation history. It checks errors, logical
+states, ranges, references, payload overlap, and full byte accounting after each
+operation, across representative capacities and fence profiles.
 
 `Page` holds what every leaf-level page shares: the header, the slot directory,
 and the record operations. Later stacks add role types that wrap `Page`, expose
@@ -189,6 +193,21 @@ the header fields their role uses, and enforce role-specific rules:
 All roles share one format, so records and whole pages move between roles
 without format conversion. Inner nodes use a separate format, which the tree
 structure design will define.
+
+## Staged integration
+
+[Plan 0004](../plans/0004-bf-tree-page-mutation.md) delivers the mutable, fenced,
+range-aware page. The next page stack, 0005, will add fence-derived prefix
+compression and a borrowed prefix/suffix key view. Current keys are complete
+contiguous slices and `prefix_len` stays zero.
+
+The page primitive makes no base/mini/cache role decisions. Growth, merging,
+splitting, and selection of records during rebuild belong to later components.
+All mutations require exclusive access. Page operations do not log, advance
+the LSN, or change the snapshot version. Future concurrency must protect borrowed
+results and relocation; explicit reference updates are not synchronization points.
+The current unaligned byte representation does not establish a shared-reader
+reference-bit update protocol.
 
 ## References
 
