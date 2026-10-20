@@ -74,7 +74,6 @@ pub enum PageError {
 #[repr(C)]
 pub struct Page {
     header: Header,
-    /// The slot directory, free space, and payloads.
     data: [u8],
 }
 
@@ -99,7 +98,7 @@ impl Page {
         Ok(page)
     }
 
-    /// Number of ordinary stored records, including absence states, but not fences.
+    /// Number of records, including tombstones and phantoms but not fences.
     pub fn len(&self) -> usize {
         self.slot_count() - self.record_start()
     }
@@ -119,7 +118,6 @@ impl Page {
         usize::from(self.header.remaining_size.get())
     }
 
-    /// The sorted slot directory at the start of the record area.
     fn slots(&self) -> &[Slot] {
         let (slots, _): (&[Slot], _) =
             FromBytes::ref_from_prefix_with_elems(&self.data, self.slot_count())
