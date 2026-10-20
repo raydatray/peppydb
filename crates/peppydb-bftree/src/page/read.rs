@@ -30,6 +30,26 @@ impl Page {
         }
     }
 
+    /// Borrow records in `[start, end)` using two lower-bound searches.
+    ///
+    /// `None` is unbounded; an empty byte slice is a finite bound. Equal bounds
+    /// yield an empty iterator; reversed bounds return [`PageError::InvalidRange`].
+    /// Bounds may extend beyond page fences. The result borrows only the page,
+    /// includes every record state, and takes `O(log n + output)` comparisons.
+    pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Result<Iter<'_>, PageError> {
+        if let (Some(start), Some(end)) = (start, end)
+            && start > end
+        {
+            return Err(PageError::InvalidRange);
+        }
+        let start = start.map_or(0, |key| self.lower_bound(key));
+        let end = end.map_or(self.len(), |key| self.lower_bound(key));
+        Ok(Iter {
+            page: self,
+            indices: start..end,
+        })
+    }
+
     /// Borrow the key addressed by slot `index` without decoding its value.
     pub(super) fn key_at(&self, index: usize) -> &[u8] {
         &self.as_bytes()[self.record_slots()[index].key_range()]
@@ -74,7 +94,7 @@ impl<'p> IntoIterator for &'p Page {
 
 /// Borrowed records of a [`Page`] in lexicographic key order, including absence.
 ///
-/// Created by [`Page::iter`] or by iterating over `&Page`.
+/// Created by [`Page::iter`], [`Page::range`], or by iterating over `&Page`.
 #[derive(Clone, Debug)]
 pub struct Iter<'p> {
     page: &'p Page,

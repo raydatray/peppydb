@@ -76,6 +76,16 @@ including absence records. The iterator is exact-sized and fused. Reads never
 change page bytes or reference bits. Borrowed results keep the page borrowed;
 callers must retain its allocation and any later synchronization protection.
 
+### Bounded iteration
+
+`range(start, end)` returns ordinary records in `[start, end)`, including absence
+states. `None` is unbounded, while an empty slice is finite. Equal bounds yield
+an empty iterator and reversed bounds return `InvalidRange`. Query bounds may
+extend outside the page's fences: only stored records in the intersection are
+returned. Two lower-bound searches choose an index interval; the iterator borrows
+only the page and retains no query slices. It is exact-sized, fused, and uses
+`O(log n + output)` comparisons without allocation.
+
 ## Typed writes and reference hints
 
 `try_insert_record` inserts any `RecordState` at a distinct nonempty key;
