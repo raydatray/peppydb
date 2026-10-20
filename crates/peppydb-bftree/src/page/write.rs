@@ -81,4 +81,26 @@ impl Page {
         self.slots_mut()[index].set_referenced(referenced);
         Ok(true)
     }
+
+    /// Physically forget a stored entry of any kind; return whether it existed.
+    ///
+    /// This is not a logical deletion: callers must retain unapplied tombstones.
+    /// Its slot becomes free immediately; its payload becomes reclaimable space.
+    pub fn remove(&mut self, key: &[u8]) -> Result<bool, PageError> {
+        if key.is_empty() {
+            return Err(PageError::EmptyKey);
+        }
+        let index = self.lower_bound(key);
+        let count = self.len();
+        if index == count || self.key_at(index) != key {
+            return Ok(false);
+        }
+        self.slots_mut().copy_within(index + 1..count, index);
+        let flags = self.header.count_and_flags.get() & !COUNT_MASK;
+        self.header.count_and_flags.set(flags | (count - 1) as u16);
+        self.header
+            .remaining_size
+            .set((self.free_bytes() + SLOT_BYTES) as u16);
+        Ok(true)
+    }
 }
