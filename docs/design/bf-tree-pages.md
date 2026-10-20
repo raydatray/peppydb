@@ -197,9 +197,9 @@ structure design will define.
 ## Staged integration
 
 [Plan 0004](../plans/0004-bf-tree-page-mutation.md) delivers the mutable, fenced,
-range-aware page. The next page stack, 0005, will add fence-derived prefix
-compression and a borrowed prefix/suffix key view. Current keys are complete
-contiguous slices and `prefix_len` stays zero.
+range-aware page. [Agreed plan 0005](../plans/0005-bf-tree-page-prefix.md) specifies
+fence-derived prefix compression and a borrowed prefix/suffix key view. Current
+keys are complete contiguous slices and `prefix_len` stays zero.
 
 The page primitive makes no base/mini/cache role decisions. Growth, merging,
 splitting, and selection of records during rebuild belong to later components.
