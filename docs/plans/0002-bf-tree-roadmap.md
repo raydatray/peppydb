@@ -81,7 +81,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | Milestone | Builds on | Reviewable outcome |
 | --- | --- | --- |
 | 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
-| 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Agreed plan 0005](0005-bf-tree-page-prefix.md) covers fence-derived prefix compression and borrowed logical keys. |
+| 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Completed plan 0005](0005-bf-tree-page-prefix.md) delivers fence-derived prefix compression and borrowed logical keys. Milestone complete. |
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and splits that account for variable record sizes. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
@@ -145,15 +145,16 @@ the completed concurrent, larger-than-memory engine.
 - [x] Implement and verify the page-mutation stack.
 - [x] Draft [fence-derived prefix compression](0005-bf-tree-page-prefix.md).
 - [x] Agree on plan 0005's logical-key/fence interfaces and seven-diff stack.
-- [ ] Complete the remaining milestone 2 layout work, including prefix compression.
+- [x] Implement and verify the prefix-compression stack, completing milestone 2.
+- [ ] Draft the in-memory tree structure plan (milestone 3).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
 [shared-page design](../design/bf-tree-pages.md) records the implemented contract.
 Plan 0004 is complete, including independent mixed-operation models and workspace
-verification. [Plan 0005](0005-bf-tree-page-prefix.md) is agreed and ready for
-implementation handoff. Begin with diff 2, borrowed logical key views, then
-complete prefix compression before starting the in-memory tree.
+verification. [Plan 0005](0005-bf-tree-page-prefix.md) is complete: pages store a
+fence-derived prefix once and expose borrowed logical keys. Milestone 2 is
+complete; the next decision is the in-memory tree structure plan.
 
 ## Sources
 

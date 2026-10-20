@@ -147,8 +147,10 @@ fn deterministic_sequences_match_ordered_map() {
     }
 }
 
-// This model owns physical values, including bytes hidden by a tombstone. Its
-// gap comes from operation history, not from page headers or layout helpers.
+// This model owns full logical keys and physical values, including bytes
+// hidden by a tombstone. It derives the fence prefix and physical suffix
+// lengths itself. Its gap comes from operation history, not from page headers
+// or layout helpers.
 struct ModelRecord {
     kind: u16,
     stored: Vec<u8>,
@@ -189,32 +191,51 @@ struct MutationModel {
     records: BTreeMap<Vec<u8>, ModelRecord>,
     capacity: usize,
     fences: Option<Fences<&'static [u8]>>,
+    /// Longest common prefix of two finite fences; otherwise zero.
+    prefix_len: usize,
     gap: usize,
 }
 
 impl MutationModel {
     fn new(capacity: usize, fences: Option<Fences<&'static [u8]>>) -> Self {
+        let prefix_len = match fences {
+            Some(Fences {
+                lower: Fence::Key(lower),
+                upper: Fence::Key(upper),
+            }) => {
+                let mut length = 0;
+                while length < lower.len().min(upper.len()) && lower[length] == upper[length] {
+                    length += 1;
+                }
+                length
+            }
+            _ => 0,
+        };
         let mut model = Self {
             records: BTreeMap::new(),
             capacity,
             fences,
+            prefix_len,
             gap: 0,
         };
         model.gap = capacity - model.structural_bytes();
         model
     }
 
+    /// The header, fence slots, full low fence, and high-fence suffix.
     fn structural_bytes(&self) -> usize {
         32 + self.fences.map_or(0, |fences| {
-            let payload: usize = [fences.lower, fences.upper]
-                .iter()
-                .map(|fence| match fence {
-                    Fence::Key(key) => key.len(),
-                    Fence::Unbounded => 0,
-                })
-                .sum();
-            16 + payload
+            let stored = |fence, omitted| match fence {
+                Fence::Key(key) => <[u8]>::len(key) - omitted,
+                Fence::Unbounded => 0,
+            };
+            16 + stored(fences.lower, 0) + stored(fences.upper, self.prefix_len)
         })
+    }
+
+    /// Physical bytes of an in-range record's slot, suffix, and value.
+    fn record_bytes(&self, key: &[u8], stored_value: usize) -> usize {
+        8 + key.len() - self.prefix_len + stored_value
     }
 
     fn key_error(&self, key: &[u8]) -> Option<PageError> {
@@ -235,7 +256,7 @@ impl MutationModel {
         let records: usize = self
             .records
             .iter()
-            .map(|(key, record)| 8 + key.len() + record.stored.len())
+            .map(|(key, record)| self.record_bytes(key, record.stored.len()))
             .sum();
         self.structural_bytes() + records
     }
@@ -243,7 +264,13 @@ impl MutationModel {
     fn write(&mut self, page: &mut Page, key: &[u8], state: RecordState<'_>, distinct: bool) {
         let mut incoming = ModelRecord::new(state);
         let old = self.records.get(key);
-        let required = 8 + key.len() + incoming.stored.len();
+        let key_error = self.key_error(key);
+        // Size matters only for in-range keys, which all share the prefix.
+        let required = if key_error.is_none() {
+            self.record_bytes(key, incoming.stored.len())
+        } else {
+            0
+        };
         let allocation = old.map_or(required, |old| {
             if incoming.kind != 1 && incoming.stored.len() > old.stored.len() {
                 required - 8
@@ -251,7 +278,7 @@ impl MutationModel {
                 0
             }
         });
-        let expected = if let Some(error) = self.key_error(key) {
+        let expected = if let Some(error) = key_error {
             Err(error)
         } else if required > self.capacity - self.structural_bytes() {
             Err(PageError::RecordTooLarge)
@@ -337,10 +364,25 @@ impl MutationModel {
             .collect();
         let actual: Vec<_> = page.iter().collect();
         assert_eq!(actual, expected);
+        // Logical key views match owned full keys, whatever their split.
+        let keys: Vec<_> = page.iter().map(|record| record.key.to_vec()).collect();
+        assert!(keys.iter().eq(self.records.keys()));
         for (key, record) in &self.records {
             assert_eq!(page.get(key), Ok(Some(record.borrow(key))));
         }
-        for key in [b"".as_slice(), b"\0", b"a", b"ab", b"m", b"z", b"\xff\xff"] {
+        for key in [
+            b"".as_slice(),
+            b"\0",
+            b"a",
+            b"ab",
+            b"abb",
+            b"abc",
+            b"abcd\0",
+            b"abd",
+            b"m",
+            b"z",
+            b"\xff\xff",
+        ] {
             let expected = self.key_error(key).map_or_else(
                 || Ok(self.records.get(key).map(|record| record.borrow(key))),
                 Err,
@@ -354,6 +396,10 @@ impl MutationModel {
             (Some(b"ab".as_slice()), None),
             (Some(b"a".as_slice()), Some(b"z".as_slice())),
             (Some(b"z".as_slice()), Some(b"a".as_slice())),
+            (Some(b"ab".as_slice()), Some(b"abc".as_slice())),
+            (Some(b"abc".as_slice()), Some(b"abcz".as_slice())),
+            (Some(b"a".as_slice()), Some(b"abc\0".as_slice())),
+            (Some(b"abcd".as_slice()), Some(b"b".as_slice())),
         ] {
             if start.zip(end).is_some_and(|(start, end)| start > end) {
                 assert_eq!(page.range(start, end).err(), Some(PageError::InvalidRange));
@@ -373,22 +419,25 @@ impl MutationModel {
             }
         }
 
-        // Independent raw-byte validation of structural slots, physical values,
-        // previews, disjoint payloads, and holes above the modeled boundary.
+        // Independent raw-byte validation of the prefix length, structural
+        // slots, full logical key lengths, stored suffixes, suffix previews,
+        // physical values, disjoint payloads, and holes above the boundary.
+        // Prefix bytes are marked once, as part of the low-fence payload.
         let count = self.records.len() + if self.fences.is_some() { 2 } else { 0 };
         let flags = 0x2000 | if self.fences.is_some() { 0x8000 } else { 0 };
         assert_eq!(read_u16(&bytes, 0), flags | count as u16);
         assert_eq!(usize::from(read_u16(&bytes, 2)), self.capacity);
         assert_eq!(usize::from(read_u16(&bytes, 4)), self.gap);
-        assert_eq!(&bytes[6..8], &[0; 2]);
+        assert_eq!(usize::from(read_u16(&bytes, 6)), self.prefix_len);
         assert_eq!(&bytes[8..32], &[0xa5; 24]);
         let slots_end = 32 + 8 * count;
         let boundary = slots_end + self.gap;
         assert!(boundary <= self.capacity);
         let mut occupied = vec![false; self.capacity];
         occupied[..slots_end].fill(true);
-        let mut check_slot = |index: usize, key: &[u8], record: &ModelRecord| {
+        let mut check_slot = |index: usize, key: &[u8], omitted: usize, record: &ModelRecord| {
             let slot = 32 + index * 8;
+            let stored_key = &key[omitted..];
             let offset = usize::from(read_u16(&bytes, slot));
             let key_word = read_u16(&bytes, slot + 2);
             let value_word = read_u16(&bytes, slot + 4);
@@ -399,26 +448,31 @@ impl MutationModel {
             if record.kind == 3 {
                 assert!(record.stored.is_empty());
             }
-            let end = offset + key.len() + record.stored.len();
+            let value_start = offset + stored_key.len();
+            let end = value_start + record.stored.len();
             assert!(offset >= boundary && end <= self.capacity);
-            assert_eq!(&bytes[offset..offset + key.len()], key);
-            assert_eq!(&bytes[offset + key.len()..end], record.stored);
+            assert_eq!(&bytes[offset..value_start], stored_key);
+            assert_eq!(&bytes[value_start..end], record.stored);
             assert_eq!(
                 &bytes[slot + 6..slot + 8],
                 &[
-                    key.first().copied().unwrap_or(0),
-                    key.get(1).copied().unwrap_or(0)
+                    stored_key.first().copied().unwrap_or(0),
+                    stored_key.get(1).copied().unwrap_or(0)
                 ]
             );
             assert!(occupied[offset..end].iter().all(|&used| !used));
             occupied[offset..end].fill(true);
         };
         if let Some(fences) = self.fences {
-            for (index, fence) in [fences.lower, fences.upper].into_iter().enumerate() {
+            let fence_slots = [(fences.lower, 0), (fences.upper, self.prefix_len)];
+            for (index, (fence, omitted)) in fence_slots.into_iter().enumerate() {
                 match fence {
-                    Fence::Key(key) => {
-                        check_slot(index, key, &ModelRecord::new(RecordState::Insert(b"")))
-                    }
+                    Fence::Key(key) => check_slot(
+                        index,
+                        key,
+                        omitted,
+                        &ModelRecord::new(RecordState::Insert(b"")),
+                    ),
                     Fence::Unbounded => {
                         let slot = 32 + index * 8;
                         assert_eq!(read_u16(&bytes, slot), u16::MAX - 1 + index as u16);
@@ -433,6 +487,7 @@ impl MutationModel {
             check_slot(
                 index + if self.fences.is_some() { 2 } else { 0 },
                 key,
+                self.prefix_len,
                 record,
             );
         }
@@ -450,7 +505,7 @@ impl MutationModel {
 
 #[test]
 fn mixed_mutations_match_physical_and_logical_models() {
-    let profiles: [Option<Fences<&[u8]>>; 7] = [
+    let profiles: [Option<Fences<&[u8]>>; 11] = [
         None,
         Some(Fences {
             lower: Fence::Unbounded,
@@ -476,6 +531,24 @@ fn mixed_mutations_match_physical_and_logical_models() {
             lower: Fence::Key(b"a"),
             upper: Fence::Key(b"z"),
         }),
+        // Compressed profiles: two- and three-byte prefixes, including a low
+        // fence equal to the prefix and an upper fence extending the lower.
+        Some(Fences {
+            lower: Fence::Key(b"ab"),
+            upper: Fence::Key(b"abd"),
+        }),
+        Some(Fences {
+            lower: Fence::Key(b"abc"),
+            upper: Fence::Key(b"abd"),
+        }),
+        Some(Fences {
+            lower: Fence::Key(b"abc"),
+            upper: Fence::Key(b"abcz"),
+        }),
+        Some(Fences {
+            lower: Fence::Key(b"abc"),
+            upper: Fence::Key(b"abcd"),
+        }),
     ];
     let mut keys: Vec<_> = (0..16).map(|byte| vec![byte]).collect();
     keys.extend([
@@ -484,6 +557,12 @@ fn mixed_mutations_match_physical_and_logical_models() {
         b"ab".to_vec(),
         b"abc".to_vec(),
         b"abd".to_vec(),
+        b"ab\0".to_vec(),
+        b"abc\0".to_vec(),
+        b"abc\xff".to_vec(),
+        b"abcd".to_vec(),
+        b"abcd\0".to_vec(),
+        b"abcz".to_vec(),
         b"b".to_vec(),
         b"m".to_vec(),
         b"y".to_vec(),
@@ -548,39 +627,55 @@ fn mixed_mutations_match_physical_and_logical_models() {
 
 #[test]
 fn fenced_compaction_preserves_counts_above_255_and_mixed_states() {
-    let fences: Fences<&[u8]> = Fences {
-        lower: Fence::Key(b""),
-        upper: Fence::Unbounded,
-    };
-    let mut storage = [0; 4096];
-    let page = Page::init_with_fences(&mut storage, fences).unwrap();
-    page.header
-        .count_and_flags
-        .set(page.header.count_and_flags.get() | 0x2000);
-    page.as_mut_bytes()[8..32].fill(0xa5);
-    let mut model = MutationModel::new(4096, Some(fences));
-    for index in 0_u16..280 {
-        let key = index.to_be_bytes();
-        let state = [
-            RecordState::Insert(b"v"),
-            RecordState::Delete,
-            RecordState::Cache(b"v"),
-            RecordState::Phantom,
-        ][usize::from(index) % 4];
-        model.write(page, &key, state, true);
-        model.remove_or_reference(page, &key, Some(true));
-        model.check(page);
-    }
-    assert_eq!(page.len(), 280);
-    for index in 0_u16..280 {
-        if index.is_multiple_of(20) {
-            model.remove_or_reference(page, &index.to_be_bytes(), None);
-        } else if index.is_multiple_of(4) {
-            model.write(page, &index.to_be_bytes(), RecordState::Delete, false);
+    let profiles: [(Fences<&[u8]>, &[u8]); 2] = [
+        (
+            Fences {
+                lower: Fence::Key(b""),
+                upper: Fence::Unbounded,
+            },
+            b"",
+        ),
+        // A two-byte prefix saves two bytes per record.
+        (
+            Fences {
+                lower: Fence::Key(b"k/"),
+                upper: Fence::Key(b"k/\x02"),
+            },
+            b"k/",
+        ),
+    ];
+    for (fences, key_prefix) in profiles {
+        let key = |index: u16| [key_prefix, &index.to_be_bytes()].concat();
+        let mut storage = [0; 4096];
+        let page = Page::init_with_fences(&mut storage, fences).unwrap();
+        page.header
+            .count_and_flags
+            .set(page.header.count_and_flags.get() | 0x2000);
+        page.as_mut_bytes()[8..32].fill(0xa5);
+        let mut model = MutationModel::new(4096, Some(fences));
+        assert_eq!(model.prefix_len, key_prefix.len());
+        for index in 0_u16..280 {
+            let state = [
+                RecordState::Insert(b"v"),
+                RecordState::Delete,
+                RecordState::Cache(b"v"),
+                RecordState::Phantom,
+            ][usize::from(index) % 4];
+            model.write(page, &key(index), state, true);
+            model.remove_or_reference(page, &key(index), Some(true));
+            model.check(page);
         }
+        assert_eq!(page.len(), 280);
+        for index in 0_u16..280 {
+            if index.is_multiple_of(20) {
+                model.remove_or_reference(page, &key(index), None);
+            } else if index.is_multiple_of(4) {
+                model.write(page, &key(index), RecordState::Delete, false);
+            }
+            model.check(page);
+        }
+        model.compact(page);
         model.check(page);
+        assert!(page.len() > 255);
     }
-    model.compact(page);
-    model.check(page);
-    assert!(page.len() > 255);
 }
