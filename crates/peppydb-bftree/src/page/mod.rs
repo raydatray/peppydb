@@ -26,12 +26,14 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 mod compact;
+mod fence;
 mod layout;
 mod read;
 mod record;
 mod write;
 
-use layout::{COUNT_MASK, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
+pub use fence::{Fence, Fences};
+use layout::{COUNT_MASK, HAS_FENCES, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
 pub use write::UpsertOutcome;
@@ -47,9 +49,15 @@ pub enum PageError {
     RecordTooLarge,
     #[error("key already exists in the page")]
     DuplicateKey,
-    /// The record fits an empty page, but not the remaining free space.
+    /// The current physical path needs more contiguous space than is available.
     #[error("page has insufficient free space for the record")]
     PageFull,
+    #[error("finite page fences must satisfy lower < upper")]
+    InvalidFences,
+    #[error("fence slots and keys do not fit in the page")]
+    FencesTooLarge,
+    #[error("key is outside the page fence range")]
+    KeyOutOfRange,
 }
 
 /// A leaf-level page viewed in place over caller-owned bytes: the header
@@ -57,8 +65,9 @@ pub enum PageError {
 /// for base leaf pages, full-page caches, and mini-pages. Any buffer alignment
 /// works.
 ///
-/// Methods assume the bytes came from [`Page::init`]; viewing other bytes as a
-/// `Page` through the public `zerocopy` traits can make them panic.
+/// Methods assume the bytes came from [`Page::init`] or [`Page::init_with_fences`].
+/// Viewing other bytes as a `Page` through the public `zerocopy` traits can make
+/// them panic.
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub struct Page {
@@ -73,9 +82,7 @@ impl Page {
     /// Invalid capacities leave the supplied buffer unchanged.
     pub fn init(bytes: &mut [u8]) -> Result<&mut Self, PageError> {
         let capacity = bytes.len();
-        if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
-            return Err(PageError::InvalidCapacity);
-        }
+        Self::check_capacity(capacity)?;
 
         bytes.fill(0);
 
@@ -90,9 +97,9 @@ impl Page {
         Ok(page)
     }
 
-    /// Number of records.
+    /// Number of ordinary stored records, including absence states, but not fences.
     pub fn len(&self) -> usize {
-        usize::from(self.header.count_and_flags.get() & COUNT_MASK)
+        self.slot_count() - self.record_start()
     }
 
     /// Whether the page contains no records.
@@ -113,19 +120,43 @@ impl Page {
     /// The sorted slot directory at the start of the record area.
     fn slots(&self) -> &[Slot] {
         let (slots, _): (&[Slot], _) =
-            FromBytes::ref_from_prefix_with_elems(&self.data, self.len())
+            FromBytes::ref_from_prefix_with_elems(&self.data, self.slot_count())
                 .expect("slot directory fits the page");
 
         slots
     }
 
     fn slots_mut(&mut self) -> &mut [Slot] {
-        let count = self.len();
+        let count = self.slot_count();
         let (slots, _): (&mut [Slot], _) =
             FromBytes::mut_from_prefix_with_elems(&mut self.data, count)
                 .expect("slot directory fits the page");
 
         slots
+    }
+
+    fn slot_count(&self) -> usize {
+        usize::from(self.header.count_and_flags.get() & COUNT_MASK)
+    }
+
+    fn record_start(&self) -> usize {
+        if self.header.count_and_flags.get() & HAS_FENCES != 0 {
+            return 2;
+        }
+
+        0
+    }
+
+    fn record_slots(&self) -> &[Slot] {
+        &self.slots()[self.record_start()..]
+    }
+
+    fn check_capacity(capacity: usize) -> Result<(), PageError> {
+        if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
+            return Err(PageError::InvalidCapacity);
+        }
+
+        Ok(())
     }
 }
 

@@ -11,9 +11,7 @@ impl Page {
     /// Tombstones and phantoms return `Some` with their explicit absence state.
     /// Reads leave all bytes, including reference bits, unchanged.
     pub fn get(&self, key: &[u8]) -> Result<Option<RecordRef<'_>>, PageError> {
-        if key.is_empty() {
-            return Err(PageError::EmptyKey);
-        }
+        self.check_key(key)?;
 
         let index = self.lower_bound(key);
         if index == self.len() {
@@ -34,11 +32,11 @@ impl Page {
 
     /// Borrow the key addressed by slot `index` without decoding its value.
     pub(super) fn key_at(&self, index: usize) -> &[u8] {
-        &self.as_bytes()[self.slots()[index].key_range()]
+        &self.as_bytes()[self.record_slots()[index].key_range()]
     }
 
     pub(super) fn record_at(&self, index: usize) -> RecordRef<'_> {
-        let slot = self.slots()[index];
+        let slot = self.record_slots()[index];
         let key = slot.key_range();
         let value = key.end..key.end + slot.value_len();
         let bytes = self.as_bytes();
@@ -61,7 +59,7 @@ impl Page {
     pub(super) fn lower_bound(&self, key: &[u8]) -> usize {
         let bytes = self.as_bytes();
 
-        self.slots()
+        self.record_slots()
             .partition_point(|slot| &bytes[slot.key_range()] < key)
     }
 }
