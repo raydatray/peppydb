@@ -63,6 +63,18 @@ Each slot uses 8 bytes:
   asserts that values are nonempty; peppydb allows empty values for
   presence-only records.
 
+## Borrowed reads
+
+`get` returns `Option<RecordRef>`: a miss is `None`, while known absence is a
+stored `Delete` or `Phantom` state. `Insert` and `Cache` borrow their logical value,
+including an empty value. `RecordState::kind()` and `value()` expose these two
+views. `RecordRef` also borrows the key and reports the reference bit.
+
+`iter()` and iteration over `&Page` yield every stored record in key order,
+including absence records. The iterator is exact-sized and fused. Reads never
+change page bytes or reference bits. Borrowed results keep the page borrowed;
+callers must retain its allocation and any later synchronization protection.
+
 ## `Page` as a base type
 
 The public `page` module uses private `layout`, `record`, `read`, and `write`

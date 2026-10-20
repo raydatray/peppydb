@@ -2,4 +2,4 @@
 
 pub mod page;
 
-pub use page::{Page, PageError, RecordKind};
+pub use page::{Page, PageError, RecordKind, RecordRef, RecordState};

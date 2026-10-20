@@ -30,7 +30,7 @@ fn insert_worked_example_matches_golden_bytes() {
     );
     assert_eq!(&page.as_bytes()[113..], b"20owl10dog30cat");
     for (key, value) in [(b"10", b"dog"), (b"20", b"owl"), (b"30", b"cat")] {
-        assert_eq!(page.get(key), Ok(Some(value.as_slice())));
+        assert_eq!(page.get(key), Ok(Some(live(key, value))));
     }
     assert_eq!(page.get(b"25"), Ok(None));
 }
@@ -43,10 +43,10 @@ fn insert_prefixes_zero_bytes_and_empty_values() {
     let page = Page::init(&mut storage).unwrap();
     for key in keys {
         page.try_insert(key, b"").unwrap();
-        assert_eq!(page.get(key), Ok(Some(b"".as_slice())));
+        assert_eq!(page.get(key), Ok(Some(live(key, b""))));
     }
     for (index, key) in sorted.into_iter().enumerate() {
-        assert_eq!(page.record_at(index), (key, b"".as_slice()));
+        assert_eq!(page.record_at(index), live(key, b""));
         let slot = 32 + index * 8;
         assert_eq!(read_u16(page.as_bytes(), slot + 2), key.len() as u16);
         assert_eq!(read_u16(page.as_bytes(), slot + 4), 0);
@@ -72,7 +72,7 @@ fn exact_fits_and_error_precedence_preserve_bytes() {
     page.try_insert(b"k", &value).unwrap();
     assert_eq!(page.free_bytes(), 0);
     assert_eq!(page.len(), 1);
-    assert_eq!(page.get(b"k"), Ok(Some(value.as_slice())));
+    assert_eq!(page.get(b"k"), Ok(Some(live(b"k", &value))));
     assert_rejected(page, b"", &too_large, PageError::EmptyKey);
     assert_rejected(page, b"k", &too_large, PageError::RecordTooLarge);
     assert_rejected(page, b"k", b"", PageError::DuplicateKey);

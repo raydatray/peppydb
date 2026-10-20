@@ -14,13 +14,10 @@ fn assert_model(page: &Page, model: &BTreeMap<Vec<u8>, Vec<u8>>) {
     assert_eq!(page.capacity(), capacity);
     assert_eq!(page.free_bytes(), payload_start - slots_end);
     let actual: Vec<_> = page.iter().collect();
-    let expected: Vec<_> = model
-        .iter()
-        .map(|(key, value)| (key.as_slice(), value.as_slice()))
-        .collect();
+    let expected: Vec<_> = model.iter().map(|(key, value)| live(key, value)).collect();
     assert_eq!(actual, expected);
     for (key, value) in model {
-        assert_eq!(page.get(key), Ok(Some(value.as_slice())));
+        assert_eq!(page.get(key), Ok(Some(live(key, value))));
     }
     assert_eq!(page.get(b""), Err(PageError::EmptyKey));
     assert_eq!(page.get(b"not-present"), Ok(None));
@@ -86,7 +83,10 @@ fn model_insert(page: &mut Page, model: &mut BTreeMap<Vec<u8>, Vec<u8>>, key: &[
         assert_eq!(page.as_bytes(), before);
     }
     if !key.is_empty() {
-        assert_eq!(page.get(key), Ok(model.get(key).map(Vec::as_slice)));
+        assert_eq!(
+            page.get(key),
+            Ok(model.get(key).map(|value| live(key, value)))
+        );
     }
     assert_model(page, model);
 }

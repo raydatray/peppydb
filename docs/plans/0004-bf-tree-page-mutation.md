@@ -729,7 +729,7 @@ performance benchmarks belong with a specified workload and assembled mechanisms
 - [x] Agree on the read API, module organization, and ten-diff stack.
 - [x] Finalize diff 1: approved plan for implementation handoff.
 - [x] Implement and verify diff 2: mechanical module reorganization.
-- [ ] Implement and verify diff 3: state-aware borrowed reads.
+- [x] Implement and verify diff 3: state-aware borrowed reads.
 - [ ] Implement and verify diff 4: typed insertion and reference updates.
 - [ ] Implement and verify diff 5: physical removal and reclamation.
 - [ ] Implement and verify diff 6: replacement/upsert.
@@ -768,13 +768,16 @@ change.
   submodules. Workspace tests (including the documentation example), workspace
   Clippy with denied warnings, and formatting passed. Public paths, algorithms,
   and byte fixtures are unchanged.
+- Diff 3: all 14 package tests and the updated documentation example pass.
+  Raw fixtures cover all four states and both reference bits, independently
+  check encoded length masks, and verify exact/fused iteration and pure reads.
 
 ## Agent notes
 
 - **Stack:** Diff 2 mechanically reorganized
   `crates/peppydb-bftree/src/page.rs`. The plan commit is diff 1; preserve the
   `[n/10][bf-page-mutation][section]` numbering when implementing the stack.
-- **Current state:** Diff 2 is complete. Proceed with state-aware reads in diff 3.
+- **Current state:** Diffs 2–3 are complete. Proceed with typed writes in diff 4.
 - **Public contract:** Implement the recorded `Option<RecordRef>` lookup and
   borrowed record iteration. Ordinary record keys remain nonempty; fence/query
   bounds may be empty and must remain distinct from unbounded bounds.
