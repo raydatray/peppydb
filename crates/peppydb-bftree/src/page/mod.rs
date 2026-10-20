@@ -27,12 +27,14 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 mod compact;
 mod fence;
+mod key;
 mod layout;
 mod read;
 mod record;
 mod write;
 
 pub use fence::{Fence, Fences};
+pub use key::KeyRef;
 use layout::{COUNT_MASK, HAS_FENCES, HEADER_BYTES, Header, NO_BACKING_LEAF, Slot};
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
