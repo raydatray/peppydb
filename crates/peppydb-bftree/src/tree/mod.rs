@@ -38,8 +38,6 @@ use crate::{ChildRef, Fence, Fences, InnerId, LeafId, Page, PageError};
 #[cfg(test)]
 mod invariants;
 mod leaf_map;
-// `Tree::open` arrives in the next diff of this stack.
-#[cfg_attr(not(test), allow(dead_code))]
 mod open;
 mod read;
 mod scan;
