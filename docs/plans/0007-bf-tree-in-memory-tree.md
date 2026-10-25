@@ -485,7 +485,7 @@ baseline for later comparison with upstream; it is informational, not a gate.
 - [x] Diff 3: configuration and store.
 - [x] Diff 4: locate and get.
 - [x] Diff 5: write path.
-- [ ] Diff 6: scan.
+- [x] Diff 6: scan.
 - [ ] Diff 7: model tests and documentation.
 - [ ] Update `docs/design/bf-tree-pages.md`, `bf-tree-inner-nodes.md`, and add
   `docs/design/bf-tree-structure.md`; tick the roadmap.
@@ -505,6 +505,7 @@ baseline for later comparison with upstream; it is informational, not a gate.
   `Page::record_size` became crate-visible so the tree uses the page's own
   physical sizing. `PageError::CapacityMismatch` was added to mirror the inner
   split's validation.
+- `Tree::iter` was added as the unbounded `range(None, None)`.
 
 ## Agent notes
 

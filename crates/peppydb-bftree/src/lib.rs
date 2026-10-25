@@ -10,4 +10,4 @@ pub use page::{
     Fence, Fences, KeyRef, LeafSplit, Page, PageError, RecordKind, RecordRef, RecordState,
     UpsertOutcome,
 };
-pub use tree::{Tree, TreeConfig, TreeError};
+pub use tree::{Scan, Tree, TreeConfig, TreeError};
