@@ -83,7 +83,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
 | 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Completed plan 0005](0005-bf-tree-page-prefix.md) delivers fence-derived prefix compression and borrowed logical keys. Milestone complete. |
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Completed plan 0006](0006-bf-tree-inner-node.md) delivers the local routing-node primitive; [completed plan 0007](0007-bf-tree-in-memory-tree.md) composes a single-threaded tree with leaf splits, propagation, and scans. Milestone complete. |
-| 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
+| 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. [Plan 0008](0008-bf-tree-leaf-store.md) (agreed, in progress) adds the mapping table, page store, stored-page validation, and reopen from leaves. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
 | 6. Bounded buffer pool | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. |
 | 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. |
@@ -153,6 +153,9 @@ the completed concurrent, larger-than-memory engine.
   leaf splitting, split propagation, root growth, and range scans.
 - [x] Agree on plan 0007's leaf split, admission rule, and operations.
 - [x] Implement and verify the tree stack, completing milestone 3.
+- [x] Draft [leaf mapping table and page store](0008-bf-tree-leaf-store.md).
+- [x] Agree on plan 0008's store boundary, validation, and open path.
+- [ ] Implement and verify the leaf-store stack, completing milestone 4.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -166,7 +169,9 @@ composition. [Plan 0007](0007-bf-tree-in-memory-tree.md) is complete: a
 single-threaded tree with exact leaf splits, a derived admission rule,
 bottom-up propagation, and fence-hopping scans, recorded in the
 [tree structure design](../design/bf-tree-structure.md). Milestone 3 is
-complete. Next, plan milestone 4: stable leaf IDs and the page-store boundary.
+complete. Next, review [plan 0008](0008-bf-tree-leaf-store.md): a page-store
+boundary with memory and file backends, a leaf mapping table with
+load-on-access, and reopen by rebuilding inner nodes from leaf fences.
 
 ## Sources
 
