@@ -100,7 +100,10 @@ impl<'t> Checker<'t> {
             return Err(InvariantError::UnevenDepth(id));
         }
 
-        let page = self.tree.leaf(id);
+        let page = self
+            .tree
+            .leaf(id)
+            .map_err(|_| InvariantError::Dangling(ChildRef::Leaf(id)))?;
         if page.fences() != Some(interval) {
             return Err(InvariantError::FenceMismatch(id));
         }

@@ -28,11 +28,11 @@ impl NodeId for LeafId {
     }
 }
 
-// TODO: Replace the leaf store with a page-store boundary behind `LeafId`.
 /// Fixed-capacity, zero-initialized byte buffers addressed by a typed ID.
 ///
-/// IDs are dense indices and are never reused, because this single-threaded
-/// store never frees a node.
+/// Inner nodes live here. IDs are dense indices and are never reused, because
+/// this single-threaded store never frees a node. Leaves live in the
+/// [`LeafMap`](super::leaf_map::LeafMap) instead.
 #[derive(Debug)]
 pub(super) struct Store<Id> {
     capacity: usize,
