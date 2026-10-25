@@ -484,7 +484,7 @@ baseline for later comparison with upstream; it is informational, not a gate.
 - [x] Diff 2: page split.
 - [x] Diff 3: configuration and store.
 - [x] Diff 4: locate and get.
-- [ ] Diff 5: write path.
+- [x] Diff 5: write path.
 - [ ] Diff 6: scan.
 - [ ] Diff 7: model tests and documentation.
 - [ ] Update `docs/design/bf-tree-pages.md`, `bf-tree-inner-nodes.md`, and add
@@ -499,6 +499,12 @@ baseline for later comparison with upstream; it is informational, not a gate.
   optimistic concurrency, not for speed. The write path is layered so that
   variant can be added later.
 - `put` returns `UpsertOutcome` instead of `bool`.
+- Implementation: the slow write path removes any old version of the key
+  first, then compacts if the holes cover the record, and splits otherwise.
+  This is equivalent to the planned order but reasons about one space check.
+  `Page::record_size` became crate-visible so the tree uses the page's own
+  physical sizing. `PageError::CapacityMismatch` was added to mirror the inner
+  split's validation.
 
 ## Agent notes
 

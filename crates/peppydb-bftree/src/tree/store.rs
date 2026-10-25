@@ -40,7 +40,6 @@ pub(super) struct Store<Id> {
     _id: PhantomData<Id>,
 }
 
-#[allow(dead_code, reason = "the read and write paths arrive in later diffs")]
 impl<Id> Store<Id>
 where
     Id: NodeId,

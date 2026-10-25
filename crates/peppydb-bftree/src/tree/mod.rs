@@ -3,6 +3,20 @@
 //! The tree routes through [`InnerNode`]s to fenced leaf [`Page`]s. It starts
 //! as one unbounded leaf; the first leaf split creates the first inner node.
 //! Every leaf is at the same depth.
+//!
+//! ```
+//! use peppydb_bftree::{Tree, TreeConfig, UpsertOutcome};
+//!
+//! let mut tree = Tree::new(TreeConfig::default()).unwrap();
+//! for i in 0..1000u32 {
+//!     tree.put(&i.to_be_bytes(), b"value").unwrap();
+//! }
+//! assert_eq!(tree.put(&7u32.to_be_bytes(), b"new"), Ok(UpsertOutcome::Replaced));
+//! assert_eq!(tree.get(&7u32.to_be_bytes()), Ok(Some(b"new".as_slice())));
+//! assert_eq!(tree.remove(&8u32.to_be_bytes()), Ok(true));
+//! assert_eq!(tree.get(&8u32.to_be_bytes()), Ok(None));
+//! assert!(tree.height() > 1);
+//! ```
 
 use zerocopy::FromBytes;
 
@@ -13,6 +27,7 @@ use crate::{ChildRef, Fence, Fences, InnerId, LeafId, Page, PageError};
 mod invariants;
 mod read;
 mod store;
+mod write;
 
 #[cfg(test)]
 pub use invariants::InvariantError;
@@ -159,8 +174,16 @@ impl Tree {
         Page::ref_from_bytes(self.leaves.get(id)).expect("leaf buffers hold a page header")
     }
 
+    fn leaf_mut(&mut self, id: LeafId) -> &mut Page {
+        Page::mut_from_bytes(self.leaves.get_mut(id)).expect("leaf buffers hold a page header")
+    }
+
     fn inner(&self, id: InnerId) -> &InnerNode {
         InnerNode::ref_from_bytes(self.inner.get(id)).expect("inner buffers hold a node header")
+    }
+
+    fn inner_mut(&mut self, id: InnerId) -> &mut InnerNode {
+        InnerNode::mut_from_bytes(self.inner.get_mut(id)).expect("inner buffers hold a node header")
     }
 }
 
