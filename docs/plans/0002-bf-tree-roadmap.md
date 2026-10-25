@@ -82,7 +82,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | --- | --- | --- |
 | 1. Shared packed page | Existing crate | Bounded record storage, distinct-key insertion, lookup, and ordered iteration. [Plan 0003](0003-bf-tree-page.md). |
 | 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Completed plan 0005](0005-bf-tree-page-prefix.md) delivers fence-derived prefix compression and borrowed logical keys. Milestone complete. |
-| 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Completed plan 0006](0006-bf-tree-inner-node.md) delivers the local routing-node primitive; tree composition and split propagation follow in 0007. |
+| 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Completed plan 0006](0006-bf-tree-inner-node.md) delivers the local routing-node primitive; [agreed plan 0007](0007-bf-tree-in-memory-tree.md) composes a single-threaded tree with leaf splits, propagation, and scans. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
 | 6. Bounded buffer pool | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. |
@@ -149,7 +149,10 @@ the completed concurrent, larger-than-memory engine.
 - [x] Draft [inner-node storage and routing](0006-bf-tree-inner-node.md), the first milestone 3 stack.
 - [x] Agree on plan 0006's header, typed child references, and split contract.
 - [x] Implement and verify the inner-node primitive.
-- [ ] Plan in-memory tree composition, leaf splitting, and root growth (0007).
+- [x] Draft [single-threaded tree composition](0007-bf-tree-in-memory-tree.md):
+  leaf splitting, split propagation, root growth, and range scans.
+- [x] Agree on plan 0007's leaf split, admission rule, and operations.
+- [ ] Implement and verify the tree stack, completing milestone 3.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -159,7 +162,9 @@ verification. [Plan 0005](0005-bf-tree-page-prefix.md) is complete: pages store 
 fence-derived prefix once and expose borrowed logical keys. Milestone 2 is
 complete. [Plan 0006](0006-bf-tree-inner-node.md) is complete: packed inner nodes with
 typed child references, total reads, and byte-aware splits are ready for tree
-composition. Next, plan 0007.
+composition. [Plan 0007](0007-bf-tree-in-memory-tree.md) is agreed: its leaf
+split primitive, derived admission rule, and bottom-up propagation complete
+milestone 3. Next, implement it.
 
 ## Sources
 
