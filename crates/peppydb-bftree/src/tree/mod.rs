@@ -155,6 +155,10 @@ pub enum TreeError {
     /// The page store failed.
     #[error("page store error: {0}")]
     Store(#[from] StoreError),
+    /// The store cannot hold this tree: its superblock or contents disagree
+    /// with the requested operation.
+    #[error("invalid store: {0}")]
+    InvalidStore(&'static str),
     /// A leaf reached by routing is not an allocated, live slot. This
     /// indicates a tree bug or an inconsistent store.
     #[error("leaf {} is not allocated", .0.raw())]
@@ -195,28 +199,33 @@ impl Tree {
         Self::with_store(config, Box::new(store))
     }
 
-    /// Build an empty tree on an empty store that already describes `config`.
-    fn with_store(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
-        let mut leaves = LeafMap::new(store, []);
-        let root = leaves.alloc()?;
-        let unbounded = Fences {
-            lower: Fence::Unbounded,
-            upper: Fence::Unbounded,
-        };
+    /// Validate `config` and create an empty tree on an empty `store` whose
+    /// superblock was built from the same configuration.
+    ///
+    /// The first leaf is dirty until [`Tree::flush`] writes it.
+    pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
+        config.validate()?;
+        if *store.superblock() != Superblock::from_config(&config) {
+            return Err(TreeError::InvalidStore(
+                "store superblock differs from the configuration",
+            ));
+        }
+        if store.slots() != 0 {
+            return Err(TreeError::InvalidStore("store already holds pages"));
+        }
 
-        Page::init_with_fences(leaves.bytes_mut(root)?, unbounded)?;
-
-        Ok(Self {
-            config,
-            root: ChildRef::Leaf(root),
-            inner: Store::new(config.inner_capacity),
-            leaves,
-        })
+        Self::with_store(config, store)
     }
 
-    /// The validated configuration.
-    pub fn config(&self) -> &TreeConfig {
-        &self.config
+    /// Write every modified leaf to the store and sync it.
+    ///
+    /// Data is durable only after `flush` returns. Dropping a tree does not
+    /// flush; unflushed changes are lost. There is no per-operation atomicity:
+    /// if the process stops during `flush`, the store may hold some but not
+    /// all of the modified leaves, which [`Tree::open`] detects as an
+    /// inconsistent leaf set.
+    pub fn flush(&mut self) -> Result<(), TreeError> {
+        self.leaves.flush()
     }
 
     /// Number of leaf slots in the store, live or freed.
@@ -244,6 +253,30 @@ impl Tree {
     /// to keep them.
     pub fn into_store(self) -> Box<dyn PageStore> {
         self.leaves.into_store()
+    }
+
+    /// Build an empty tree on an empty store that already describes `config`.
+    fn with_store(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
+        let mut leaves = LeafMap::new(store, []);
+        let root = leaves.alloc()?;
+        let unbounded = Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Unbounded,
+        };
+
+        Page::init_with_fences(leaves.bytes_mut(root)?, unbounded)?;
+
+        Ok(Self {
+            config,
+            root: ChildRef::Leaf(root),
+            inner: Store::new(config.inner_capacity),
+            leaves,
+        })
+    }
+
+    /// The validated configuration.
+    pub fn config(&self) -> &TreeConfig {
+        &self.config
     }
 
     /// Reject keys outside the configured limits.
