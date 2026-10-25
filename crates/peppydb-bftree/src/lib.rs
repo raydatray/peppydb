@@ -6,5 +6,6 @@ pub mod page;
 
 pub use node_id::{ChildRef, InnerId, LeafId};
 pub use page::{
-    Fence, Fences, KeyRef, Page, PageError, RecordKind, RecordRef, RecordState, UpsertOutcome,
+    Fence, Fences, KeyRef, LeafSplit, Page, PageError, RecordKind, RecordRef, RecordState,
+    UpsertOutcome,
 };

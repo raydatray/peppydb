@@ -203,9 +203,61 @@ still return `EmptyKey` first. Fence initialization checks capacity, ordering,
 then storage size; all failures preserve the supplied buffer. Writes budget
 the fences when deciding `RecordTooLarge`, before checking duplicates or space.
 
-Fences are immutable structural metadata. A split will initialize destination
-pages with new bounds and must budget their actual fence bytes. Fences alone do
-not guarantee that a page is a complete cache of its domain.
+Fences are immutable structural metadata. A split initializes destination
+pages with new bounds and budgets their actual fence bytes; see
+[Splitting](#splitting). Fences alone do not guarantee that a page is a
+complete cache of its domain.
+
+## Splitting
+
+`split_with_insert(right_storage, key, state)` splits a fenced page together
+with one pending record and returns `LeafSplit { separator, right }`. `self`
+becomes the left output with fences `[lower, separator)`; `right_storage`
+becomes the right output with fences `[separator, upper)`. The contract
+mirrors [`InnerNode::split_with_insert`](bf-tree-inner-nodes.md#splitting-with-a-pending-separator),
+so the tree treats both levels the same way.
+
+The separator is the full key of the right output's first record. It is
+therefore the right output's lower fence, the left output's upper fence, and
+the parent's new separator. Routing agrees by construction: inner nodes route
+`key >= separator` right, and fences are lower-inclusive.
+
+Selection works over a *virtual sequence*: the stored records merged in key
+order with a sorted batch of pending records. A pending record replaces a
+stored record with the same key. `split_with_insert` passes a batch of one;
+the mini-page merge of milestone 5 can pass a larger batch to the same
+selector. For `m` virtual records and candidates `j` in `1..m`:
+
+```text
+prefix_left  = implied prefix of [lower, key_j)
+prefix_right = implied prefix of [key_j, upper)
+left_used    = 32 + fence_bytes(lower, key_j)  + sum(8 + key_len - prefix_left  + value_len), i < j
+right_used   = 32 + fence_bytes(key_j, upper)  + sum(8 + key_len - prefix_right + value_len), i >= j
+score        = (max(left_used, right_used), |left_used - right_used|, j)
+```
+
+`value_len` is the logical value length, so absence states count zero bytes.
+Candidates whose outputs exceed the capacity are discarded; the rest minimize
+the score. One pass computes the totals and a second evaluates each candidate.
+Every key already shares the source page's stored prefix with both fences, so
+each prefix comparison starts after it. The computed sizes are exact: each
+output's `capacity - free_bytes()` equals its score component.
+
+Both outputs are built in 4096-byte stack scratch images with
+`init_with_fences` and `try_insert_record`, then copied. Each output therefore
+gets the prefix its own fences imply, even if the source stored a shorter
+one. Record kinds and reference bits are preserved. Tombstones lose retained
+value bytes, as in any rebuild. Both outputs inherit the source's backing-leaf,
+LSN, and snapshot-version fields; other header flags are not copied.
+
+Validation checks the right buffer's capacity (`InvalidCapacity`), that it
+equals the source capacity (`CapacityMismatch`), that the source is fenced
+(`InvalidFences`), the pending record's key and size as in `try_insert_record`,
+duplicates (`DuplicateKey`), and finally `CannotSplit` when fewer than two
+virtual records exist or no candidate fits. Every error preserves both
+buffers. The page does not allocate a leaf ID or update a parent. The
+admission rule that makes `CannotSplit` unreachable in the tree is derived in
+[plan 0007](../plans/0007-bf-tree-in-memory-tree.md#admission-rule).
 
 ## Prefix compression
 
@@ -290,8 +342,9 @@ without format conversion. Inner nodes use a separate format; see
 range-aware page. [Plan 0005](../plans/0005-bf-tree-page-prefix.md) delivers
 fence-derived prefix compression and borrowed logical keys.
 
-The page primitive makes no base/mini/cache role decisions. Growth, merging,
-splitting, and selection of records during rebuild belong to later components.
+The page primitive makes no base/mini/cache role decisions. It can split itself
+once asked, but deciding when to split, growth, merging, and selection of
+records during rebuild belong to later components.
 All mutations require exclusive access. Page operations do not log, advance
 the LSN, or change the snapshot version. Future concurrency must protect borrowed
 results and relocation; explicit reference updates are not synchronization points.
