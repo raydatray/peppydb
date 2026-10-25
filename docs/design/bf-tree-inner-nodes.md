@@ -305,14 +305,12 @@ that leaf fences match parent separators, and that each ID refers to a live
 node. [BF-Tree structure](bf-tree-structure.md) describes the current owner,
 `Tree`.
 
-## Staged integration
+## Boundaries
 
-[Plan 0006](../plans/0006-bf-tree-inner-node.md) delivers the node primitive.
-[Plan 0007](../plans/0007-bf-tree-in-memory-tree.md) composes the tree: leaf
-splits, parent propagation, root growth, and the key admission limit. Later
-milestones add stable frames for node ownership, a concurrency protocol, and
-persistence. Plan 0006's agent notes record the intended frame arena and the
-options for reader synchronization.
+The node is a primitive: it stores and routes, and `Tree` decides when to
+split, propagate, and grow the root. Node ownership through stable frames,
+a reader synchronization protocol, and persistence of inner nodes belong to
+the components that add them and are not part of this format.
 
 ## References
 

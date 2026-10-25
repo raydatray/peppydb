@@ -1,6 +1,6 @@
 # 0008: Leaf mapping table and page store
 
-**Status:** Agreed, in progress
+**Status:** Completed
 
 **Design references:** [Project direction](../design/architecture.md),
 [shared pages](../design/bf-tree-pages.md),
@@ -376,28 +376,93 @@ None.
 | Validation | Fuzz valid pages with byte flips and truncation | No panic; corrupt bytes rejected; valid bytes accepted |
 | Behavior | 0007 model suite over both backends, with `flush`/reopen interleaved | `BTreeMap` agreement, invariants hold |
 | Recovery | Corrupted-file fixtures | `InconsistentLeaves` or `Corrupt`, never a panic |
-| Baseline | `FileStore` cold `get` after reopen versus warm | Informational: expected ~100 µs cold on NVMe, in-memory speed warm |
+| Baseline | `FileStore` cold `get` after reopen versus warm; a 96 GiB larger-than-memory run | Informational: measured ~85 µs per first-touch get on the internal SSD, in-memory speed warm |
 | Workspace | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps` | Clean |
+
+### Outcomes
+
+- Store contract: `store::tests::contract` runs seven scenarios against
+  `MemStore` and `FileStore`; `store::tests::file` covers create, reopen
+  with free-list recovery, extension, short and ragged files, and foreign
+  superblocks.
+- Validation: every model page validates and stays valid under mutation;
+  about 14,000 corrupted images (bit flips, byte overwrites, header-focused
+  overwrites, truncation) never panic, and every accepted image survives the
+  trusted operations. Each check has a targeted fixture.
+- Behavior: the 0007 model suite passes unchanged on `Tree::in_memory`, and
+  `flush_and_reopen_on_{memory,file}_matches_the_oracle` interleave flush
+  and reopen every ~117 steps across small, medium, and default
+  configurations.
+- Recovery: gap, duplicate, torn, flipped-header, unfenced, empty-store,
+  bad-configuration, oversized-record, and oversized-fence fixtures return
+  `InconsistentLeaves`, `CorruptLeaf`, or `InvalidConfig`.
+- Baseline (release, 1 M keys, page cache warm): flush ~35 ms, open ~35 ms,
+  cold get ~2.3 M ops/s, warm get ~2.5 M ops/s; in-memory `Tree::in_memory` put
+  and get unchanged at ~2.1 M and ~2.0 M ops/s.
+- Larger-than-memory baseline (96 GiB file, 48 GiB RAM): `Tree::open` 21 s
+  at 4.6 GiB/s; first-touch get and put ~14 k ops/s at p50 85 µs (one random
+  4 KiB read each); scans of 100 records 415 µs; flush of 100 k dirty leaves
+  3.2 s. Both baselines are recorded in the
+  [leaf storage design](../design/bf-tree-leaf-store.md#baselines).
+- Workspace: fmt, clippy, tests (161 unit plus 2 ignored baselines, 6 doc),
+  and rustdoc all clean.
 
 ## Progress
 
 - [x] Agree on the design and commit stack with the user. The open questions
   were resolved into the decisions above: eager validation on open, no leaf
   count in the superblock, and `MemStore` public behind `Tree::in_memory`.
-- [ ] Diff 2: trait and memory backend.
-- [ ] Diff 3: file backend.
-- [ ] Diff 4: stored-page validation.
-- [ ] Diff 5: leaf map.
-- [ ] Diff 6: create and flush.
-- [ ] Diff 7: bulk build and tiling check.
-- [ ] Diff 8: open.
-- [ ] Diff 9: end-to-end tests and documentation.
-- [ ] Add `docs/design/bf-tree-leaf-store.md`; update `bf-tree-pages.md`
+- [x] Diff 2: trait and memory backend.
+- [x] Diff 3: file backend.
+- [x] Diff 4: stored-page validation.
+- [x] Diff 5: leaf map.
+- [x] Diff 6: create and flush.
+- [x] Diff 7: bulk build and tiling check.
+- [x] Diff 8: open.
+- [x] Diff 9: end-to-end tests and documentation.
+- [x] Add `docs/design/bf-tree-leaf-store.md`; update `bf-tree-pages.md`
   (validation boundary) and `bf-tree-structure.md` (ownership); tick the roadmap.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Scans yield `Result`s.** `Scan::next` may load the next leaf from the
+  store, which can fail after `open`. The item type became
+  `Result<RecordRef, TreeError>` instead of panicking inside an iterator.
+  Callers that only use `Tree::in_memory` can `unwrap`.
+- **Validation runs on every load, not only on open.** `LeafMap::page` calls
+  `Page::validate` when it loads a slot. It is cheap next to a read and keeps
+  the trust boundary in one place. `open` still validates eagerly, because
+  the tiling check needs every fence.
+- **`Page::validate` accepts unfenced pages.** The plan said "`HAS_FENCES` is
+  set"; validation is structural and page-level, so the tree checks for
+  fences and for the configured key and value limits itself in `open`.
+  A planned "prefix shared by both fences" check was dropped as tautological:
+  the high fence decodes as the low fence's prefix plus its own suffix.
+- **The bulk build needs a borrow rule.** Greedy filling can leave a trailing
+  node with one child and no separator, which invariant 4 forbids (5 leaves
+  with four children per node). `build_inner` plans the groups first and
+  moves the last entry of the left neighbour into such a node; the admission
+  rule guarantees the neighbour keeps a separator.
+- **Freed slots exist in this stack after all.** Leaves allocated after the
+  last `flush` are zero on reopen. `open` treats them as free, returns them
+  to the store with `free` (tolerating `FreedSlot` from a backend that
+  rescanned), and the invariant checker skips them. The plan's statement that
+  `freed` is never true in this stack's tree was wrong.
+- **A reopened tree can be shorter.** Bulk-built levels are packed, so
+  heights after `open` are at most the heights before it. Tests compare the
+  oracle and invariants rather than exact heights.
+- **`Superblock::from_config`/`to_config`** live in the tree module, which
+  owns `TreeConfig`; the store module knows nothing about trees.
+- **`FileStore::open` must not probe every slot.** The first
+  larger-than-memory run spent 184 s in 25 M four-byte reads rebuilding the
+  free list. The scan was removed: a reopened store treats every slot as
+  live, and `Tree::open`, which reads every slot anyway, frees the all-zero
+  ones. `FileStore::open` now costs microseconds.
+- **No eviction means no larger-than-memory build.** Every touched leaf
+  stays resident, so the disk benchmark writes the file directly in the
+  on-disk format and measures from `open` onward.
+- Diffs 2 through 4 exceed the 300-line guideline because each carries its
+  contract or fixture tests; the implementation portions are small.
 
 ## Agent notes
 

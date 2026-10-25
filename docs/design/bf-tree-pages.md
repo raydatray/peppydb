@@ -22,8 +22,9 @@ buffer.
   sizes such as 448 bytes. 4096 bytes is upstream's default leaf page size.
 - Integers are little-endian, and offsets are measured from the page start. Any
   buffer alignment works.
-- A `Page` must come from `Page::init` or `Page::init_with_fences`. Stored bytes
-  must be validated before they are used as a `Page`; reopening pages is future work.
+- A `Page` must come from `Page::init` or `Page::init_with_fences`, or from
+  `Page::validate` for bytes of unknown provenance; see
+  [Stored-page validation](#stored-page-validation).
 
 ## Header
 
@@ -225,7 +226,7 @@ the parent's new separator. Routing agrees by construction: inner nodes route
 Selection works over a *virtual sequence*: the stored records merged in key
 order with a sorted batch of pending records. A pending record replaces a
 stored record with the same key. `split_with_insert` passes a batch of one;
-the mini-page merge of milestone 5 can pass a larger batch to the same
+the mini-page merge can pass a larger batch to the same
 selector. For `m` virtual records and candidates `j` in `1..m`:
 
 ```text
@@ -308,6 +309,40 @@ Search classifies a query against the prefix once and then compares suffixes;
 see [Preview-first search](#preview-first-search). Reads return borrowed
 `KeyRef` views whose prefix borrows the low-fence payload; no read allocates.
 
+## Stored-page validation
+
+Every `Page` method except `validate` trusts its bytes: the methods assume an
+image that this crate's operations produced, and they may panic on anything
+else. `Page::validate(bytes) -> Result<&Page, PageError>` is the single entry
+point for bytes that cross a trust boundary, such as pages read from a
+[page store](bf-tree-leaf-store.md). It never panics or reads outside the
+buffer, and it accepts exactly the images the trusted operations produce,
+fenced or not. It rejects any image where:
+
+- the buffer length is not a legal capacity or differs from the header's
+  `capacity` field;
+- an unknown header flag is set, or the slot directory or the free gap does
+  not fit;
+- a payload starts before the end of the free gap or ends past the buffer, or
+  two payloads overlap;
+- a fence slot carries a value, an unbounded fence has a key length, or the
+  prefix length is nonzero without a finite low fence long enough to hold it;
+- a record key is empty or shorter than the prefix, or a slot preview differs
+  from the stored key bytes;
+- finite fences are not ordered, or a prefix is stored with an unbounded fence;
+- record keys are not strictly increasing or lie outside the fences.
+
+The error is `PageError::Corrupt(reason)`, naming the first failed check.
+Validation costs one pass over the slot directory plus a sort of the payload
+ranges. After it succeeds, the page keeps the trusted contract: the tests
+confirm that a validated page survives `get`, `iter`, `range`, `compact`,
+`try_upsert`, and `remove` without panicking and stays valid afterwards, over
+model pages mutated with random bit flips, byte overwrites, and truncation.
+
+Validation is structural. It does not know the tree configuration, so the
+tree checks key and value lengths against its limits separately when it
+opens a store.
+
 ## `Page` as a base type
 
 The public `page` module uses private `layout`, `key`, `record`, `read`, `write`,
@@ -323,7 +358,7 @@ accounting after each operation, across representative capacities and fence
 profiles, including compressed ones.
 
 `Page` holds what every leaf-level page shares: the header, the slot directory,
-and the record operations. Later stacks add role types that wrap `Page`, expose
+and the record operations. Role types will wrap `Page`, expose
 the header fields their role uses, and enforce role-specific rules:
 
 | Role (planned) | Adds to `Page` |
@@ -336,12 +371,7 @@ All roles share one format, so records and whole pages move between roles
 without format conversion. Inner nodes use a separate format; see
 [BF-Tree inner nodes](bf-tree-inner-nodes.md).
 
-## Staged integration
-
-[Plan 0004](../plans/0004-bf-tree-page-mutation.md) delivers the mutable, fenced,
-range-aware page. [Plan 0005](../plans/0005-bf-tree-page-prefix.md) delivers
-fence-derived prefix compression and borrowed logical keys.
-[Plan 0007](../plans/0007-bf-tree-in-memory-tree.md) adds the leaf split.
+## Boundaries
 
 The page primitive makes no base/mini/cache role decisions. It can split itself
 once asked, but deciding when to split, growth, merging, and selection of
