@@ -281,8 +281,8 @@ the header fields their role uses, and enforce role-specific rules:
 | Full-page cache | A whole in-memory copy of a base leaf, with `backing_leaf` set |
 
 All roles share one format, so records and whole pages move between roles
-without format conversion. Inner nodes use a separate format, which the tree
-structure design will define.
+without format conversion. Inner nodes use a separate format; see
+[BF-Tree inner nodes](bf-tree-inner-nodes.md).
 
 ## Staged integration
 
