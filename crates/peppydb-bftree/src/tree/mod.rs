@@ -4,11 +4,18 @@
 //! as one unbounded leaf; the first leaf split creates the first inner node.
 //! Every leaf is at the same depth.
 
+use zerocopy::FromBytes;
+
 use crate::inner::{self, InnerError, InnerNode};
 use crate::{ChildRef, Fence, Fences, InnerId, LeafId, Page, PageError};
 
+#[cfg(test)]
+mod invariants;
+mod read;
 mod store;
 
+#[cfg(test)]
+pub use invariants::InvariantError;
 use store::Store;
 
 /// Node capacities and the key and value limits they must support.
@@ -102,7 +109,6 @@ pub enum TreeError {
 
 /// An ordered map from nonempty byte keys to byte values.
 #[derive(Debug)]
-#[allow(dead_code, reason = "the read and write paths arrive in later diffs")]
 pub struct Tree {
     config: TreeConfig,
     root: ChildRef,
@@ -135,6 +141,26 @@ impl Tree {
     /// The validated configuration.
     pub fn config(&self) -> &TreeConfig {
         &self.config
+    }
+
+    /// Reject keys outside the configured limits.
+    fn check_key(&self, key: &[u8]) -> Result<(), TreeError> {
+        if key.is_empty() {
+            return Err(TreeError::EmptyKey);
+        }
+        if key.len() > self.config.max_key_len {
+            return Err(TreeError::KeyTooLarge);
+        }
+
+        Ok(())
+    }
+
+    fn leaf(&self, id: LeafId) -> &Page {
+        Page::ref_from_bytes(self.leaves.get(id)).expect("leaf buffers hold a page header")
+    }
+
+    fn inner(&self, id: InnerId) -> &InnerNode {
+        InnerNode::ref_from_bytes(self.inner.get(id)).expect("inner buffers hold a node header")
     }
 }
 

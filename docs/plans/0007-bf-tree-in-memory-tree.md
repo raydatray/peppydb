@@ -483,7 +483,7 @@ baseline for later comparison with upstream; it is informational, not a gate.
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: page split.
 - [x] Diff 3: configuration and store.
-- [ ] Diff 4: locate and get.
+- [x] Diff 4: locate and get.
 - [ ] Diff 5: write path.
 - [ ] Diff 6: scan.
 - [ ] Diff 7: model tests and documentation.
