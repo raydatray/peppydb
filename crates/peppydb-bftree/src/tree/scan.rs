@@ -39,7 +39,7 @@ impl Tree {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> Result<(Iter<'_>, Option<Vec<u8>>), TreeError> {
-        let page = self.leaf(self.find_leaf(key));
+        let page = self.leaf(self.find_leaf(key))?;
         let records = page.range(start, end)?;
         let next = match page.fences().expect("tree leaves are fenced").upper {
             Fence::Key(upper) if end.is_none_or(|end| upper.cmp_bytes(end).is_lt()) => {
@@ -54,7 +54,9 @@ impl Tree {
 
 /// Records of a [`Tree`] in key order, borrowed from its leaves.
 ///
-/// Created by [`Tree::range`] or [`Tree::iter`].
+/// Created by [`Tree::range`] or [`Tree::iter`]. Moving to the next leaf may
+/// load it from the page store, so items are `Result`s; after an error the
+/// scan ends.
 #[derive(Clone, Debug)]
 pub struct Scan<'t> {
     tree: &'t Tree,
@@ -65,19 +67,19 @@ pub struct Scan<'t> {
 }
 
 impl<'t> Iterator for Scan<'t> {
-    type Item = RecordRef<'t>;
+    type Item = Result<RecordRef<'t>, TreeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(record) = self.records.next() {
-                return Some(record);
+                return Some(Ok(record));
             }
 
             let next = self.next.take()?;
-            (self.records, self.next) = self
-                .tree
-                .scan_leaf(&next, None, self.end.as_deref())
-                .expect("an unbounded start is valid with any end");
+            match self.tree.scan_leaf(&next, None, self.end.as_deref()) {
+                Ok((records, next)) => (self.records, self.next) = (records, next),
+                Err(error) => return Some(Err(error)),
+            }
         }
     }
 }

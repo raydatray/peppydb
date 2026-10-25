@@ -1,10 +1,7 @@
 use super::*;
 
 fn scanned(tree: &Tree, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Vec<u8>, Vec<u8>)> {
-    tree.range(start, end)
-        .unwrap()
-        .map(|record| (record.key.to_vec(), record.state.value().unwrap().to_vec()))
-        .collect()
+    collect(tree.range(start, end).unwrap())
 }
 
 /// The records of a sorted vector in `[start, end)`.
@@ -23,10 +20,11 @@ fn expected(
 
 /// Every finite leaf fence in the tree: the leaf boundaries.
 fn boundaries(tree: &Tree) -> Vec<Vec<u8>> {
-    let mut fences: Vec<_> = (0..tree.leaves.len())
+    let mut fences: Vec<_> = (0..tree.leaf_count())
         .filter_map(|index| {
             match tree
                 .leaf(LeafId::new(index as u64).unwrap())
+                .unwrap()
                 .fences()?
                 .lower
             {
@@ -81,7 +79,7 @@ fn hand_built_tree_scans_across_leaf_boundaries() {
 
 #[test]
 fn grown_tree_scans_match_a_sorted_vector() {
-    let mut tree = Tree::new(config(256, 128, 8, 16)).unwrap();
+    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     let mut all = Vec::new();
     for i in (0..900u32).map(|i| (i * 7) % 900) {
         let key = (i * 2).to_be_bytes();
@@ -121,7 +119,7 @@ fn grown_tree_scans_match_a_sorted_vector() {
 
 #[test]
 fn scans_skip_empty_leaves() {
-    let mut tree = Tree::new(config(256, 128, 8, 16)).unwrap();
+    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..400u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
@@ -131,8 +129,12 @@ fn scans_skip_empty_leaves() {
         tree.remove(&i.to_be_bytes()).unwrap();
     }
     assert_eq!(tree.check_invariants(), Ok(()));
-    let empty = (0..tree.leaves.len())
-        .filter(|&index| tree.leaf(LeafId::new(index as u64).unwrap()).is_empty())
+    let empty = (0..tree.leaf_count())
+        .filter(|&index| {
+            tree.leaf(LeafId::new(index as u64).unwrap())
+                .unwrap()
+                .is_empty()
+        })
         .count();
     assert!(empty >= 3, "{empty} empty leaves");
 
@@ -155,12 +157,15 @@ fn scans_skip_empty_leaves() {
 
 #[test]
 fn scans_are_fused_and_empty_trees_scan_nothing() {
-    let tree = Tree::new(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     assert_eq!(tree.iter().count(), 0);
 
     let tree = two_level();
     let mut scan = tree.range(Some(b"h"), None).unwrap();
-    let keys: Vec<_> = scan.by_ref().map(|record| record.key.to_vec()).collect();
+    let keys: Vec<_> = scan
+        .by_ref()
+        .map(|record| record.unwrap().key.to_vec())
+        .collect();
     assert_eq!(
         keys,
         [b"h".to_vec(), b"m".to_vec(), b"q".to_vec(), b"z".to_vec()]

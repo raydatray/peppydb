@@ -1,5 +1,3 @@
-use zerocopy::FromBytes;
-
 use super::*;
 use crate::tree::invariants::InvariantError;
 
@@ -13,15 +11,12 @@ fn inner(raw: u64) -> InnerId {
 
 #[test]
 fn single_leaf_tree_serves_lookups() {
-    let mut tree = Tree::new(config(256, 128, 8, 16)).unwrap();
+    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     assert_eq!(tree.height(), 1);
     assert_eq!(tree.get(b"a"), Ok(None));
     assert_eq!(tree.locate(b"a"), (leaf(0), vec![]));
     let root = tree.find_leaf(b"");
-    Page::mut_from_bytes(tree.leaves.get_mut(root))
-        .unwrap()
-        .try_insert(b"a", b"1")
-        .unwrap();
+    tree.leaf_mut(root).unwrap().try_insert(b"a", b"1").unwrap();
     assert_eq!(tree.get(b"a"), Ok(Some(b"1".as_slice())));
     assert_eq!(tree.check_invariants(), Ok(()));
 }
@@ -105,8 +100,8 @@ fn checker_catches_a_mismatched_fence() {
 
     // An unfenced leaf never matches its interval.
     let mut tree = empty_tree();
-    let id = tree.leaves.alloc();
-    Page::init(tree.leaves.get_mut(id)).unwrap();
+    let id = tree.leaves.alloc().unwrap();
+    Page::init(tree.leaves.bytes_mut(id).unwrap()).unwrap();
     tree.root = ChildRef::Leaf(id);
     assert_eq!(
         tree.check_invariants(),
@@ -138,7 +133,7 @@ fn checker_catches_uneven_depth() {
 #[test]
 fn checker_catches_unreachable_duplicate_and_dangling_nodes() {
     let mut tree = two_level();
-    tree.leaves.alloc();
+    tree.leaves.alloc().unwrap();
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::Unreachable(ChildRef::Leaf(leaf(3))))
@@ -186,7 +181,7 @@ fn checker_catches_empty_inner_nodes_and_stray_records() {
     let l1 = add_leaf(&mut tree, Some(b"a"), Some(b"z"), &[b"y"]);
     let l2 = add_leaf(&mut tree, Some(b"x"), None, &[]);
     tree.root = add_inner(&mut tree, l0, &[(b"a", l1), (b"x", l2)]);
-    let bytes = tree.leaves.get_mut(leaf(1));
+    let bytes = tree.leaves.bytes_mut(leaf(1)).unwrap();
     let offset = usize::from(u16::from_le_bytes([bytes[40], bytes[41]]));
     assert_eq!(bytes[offset], b'z');
     bytes[offset] = b'x';

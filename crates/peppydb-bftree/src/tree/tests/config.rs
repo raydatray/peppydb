@@ -1,7 +1,5 @@
-use zerocopy::FromBytes;
-
 use super::*;
-use crate::tree::store::Store;
+use crate::tree::store::InnerStore;
 
 #[test]
 fn defaults_validate() {
@@ -68,11 +66,11 @@ fn inner_rule_is_tight_on_both_sides() {
 
 #[test]
 fn new_tree_is_one_unbounded_leaf() {
-    let tree = Tree::new(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     let ChildRef::Leaf(root) = tree.root else {
         panic!("root must be a leaf");
     };
-    let page = Page::ref_from_bytes(tree.leaves.get(root)).unwrap();
+    let page = tree.leaf(root).unwrap();
     assert_eq!(page.capacity(), 256);
     assert!(page.is_empty());
     assert_eq!(
@@ -82,19 +80,19 @@ fn new_tree_is_one_unbounded_leaf() {
             upper: Fence::Unbounded
         })
     );
-    assert_eq!(tree.leaves.len(), 1);
-    assert_eq!(tree.inner.len(), 0);
+    assert_eq!(tree.leaf_count(), 1);
+    assert_eq!(tree.inner_count(), 0);
     assert_eq!(tree.config(), &config(256, 128, 8, 16));
 
     assert!(matches!(
-        Tree::new(config(64, 64, 1, 0)),
+        Tree::in_memory(config(64, 64, 1, 0)),
         Err(TreeError::InvalidConfig(_))
     ));
 }
 
 #[test]
 fn store_allocates_distinct_zeroed_disjoint_buffers() {
-    let mut store: Store<LeafId> = Store::new(64);
+    let mut store = InnerStore::new(64);
     let ids: Vec<_> = (0..4).map(|_| store.alloc()).collect();
     let indices: Vec<_> = ids.iter().map(|id| id.index()).collect();
     assert_eq!(indices, [0, 1, 2, 3]);
@@ -109,13 +107,13 @@ fn store_allocates_distinct_zeroed_disjoint_buffers() {
     assert_eq!(store.get(ids[0]), [0; 64]);
     assert_eq!(store.get(ids[1]), [2; 64]);
     assert_eq!(store.get(ids[3]), [3; 64]);
-    assert_eq!(LeafId::from_index(5).raw(), 5);
+    assert_eq!(InnerId::from_index(5).raw(), 5);
 }
 
 #[test]
 #[should_panic(expected = "distinct allocated IDs")]
 fn store_pair_rejects_aliasing() {
-    let mut store: Store<InnerId> = Store::new(64);
+    let mut store = InnerStore::new(64);
     let id = store.alloc();
     store.pair_mut(id, id);
 }

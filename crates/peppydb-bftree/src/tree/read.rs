@@ -13,7 +13,7 @@ impl Tree {
     pub fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, TreeError> {
         self.check_key(key)?;
 
-        let record = self.leaf(self.find_leaf(key)).get(key)?;
+        let record = self.leaf(self.find_leaf(key))?.get(key)?;
         Ok(record.and_then(|record| match record.state {
             RecordState::Insert(value) => Some(value),
             _ => None,
