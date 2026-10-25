@@ -29,7 +29,8 @@ impl Tree {
     /// 2. Every leaf's fences equal the routing interval its path implies.
     /// 3. Every record lies within its leaf's fences, and the leaf finds it.
     /// 4. Every inner node has strictly increasing separators, at least one.
-    /// 5. Every allocated node is reachable exactly once.
+    /// 5. Every allocated node is reachable exactly once. Freed leaf slots
+    ///    are neither reachable nor referenced.
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
         let mut checker = Checker {
             tree: self,
@@ -51,8 +52,10 @@ impl Tree {
         let unreached_leaf = checker
             .seen_leaves
             .iter()
-            .position(|seen| !seen)
-            .map(|index| ChildRef::Leaf(LeafId::from_index(index)));
+            .enumerate()
+            .map(|(index, &seen)| (LeafId::from_index(index), seen))
+            .find(|&(id, seen)| !seen && self.leaves.is_live(id))
+            .map(|(id, _)| ChildRef::Leaf(id));
         match unreached_inner.or(unreached_leaf) {
             Some(child) => Err(InvariantError::Unreachable(child)),
             None => Ok(()),
@@ -76,6 +79,11 @@ impl<'t> Checker<'t> {
     ) -> Result<(), InvariantError> {
         let seen = match child {
             ChildRef::Inner(id) => self.seen_inner.get_mut(id.index()),
+            ChildRef::Leaf(id)
+                if id.index() < self.tree.leaves.len() && !self.tree.leaves.is_live(id) =>
+            {
+                None
+            }
             ChildRef::Leaf(id) => self.seen_leaves.get_mut(id.index()),
         };
         let seen = seen.ok_or(InvariantError::Dangling(child))?;
