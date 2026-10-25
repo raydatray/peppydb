@@ -1,6 +1,7 @@
 use super::*;
 
 mod contract;
+mod file;
 mod superblock;
 
 /// A small configuration shared by the store tests.
