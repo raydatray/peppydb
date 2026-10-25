@@ -2,6 +2,7 @@ use super::*;
 
 mod config;
 mod read;
+mod scan;
 mod write;
 
 fn config(

@@ -16,6 +16,14 @@
 //! assert_eq!(tree.remove(&8u32.to_be_bytes()), Ok(true));
 //! assert_eq!(tree.get(&8u32.to_be_bytes()), Ok(None));
 //! assert!(tree.height() > 1);
+//!
+//! let keys: Vec<_> = tree
+//!     .range(Some(&5u32.to_be_bytes()), Some(&10u32.to_be_bytes()))
+//!     .unwrap()
+//!     .map(|record| record.key.to_vec())
+//!     .collect();
+//! assert_eq!(keys.len(), 4);
+//! assert_eq!(tree.iter().count(), 999);
 //! ```
 
 use zerocopy::FromBytes;
@@ -26,11 +34,13 @@ use crate::{ChildRef, Fence, Fences, InnerId, LeafId, Page, PageError};
 #[cfg(test)]
 mod invariants;
 mod read;
+mod scan;
 mod store;
 mod write;
 
 #[cfg(test)]
 pub use invariants::InvariantError;
+pub use scan::Scan;
 use store::Store;
 
 /// Node capacities and the key and value limits they must support.
