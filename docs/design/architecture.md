@@ -13,3 +13,5 @@ replicated, sharded key-value database with a storage engine built on our own
 
 The embedded engine starts with [shared BF-Tree pages](bf-tree-pages.md), the
 packed record-storage primitive for base leaves and mini-pages.
+Routing uses [packed inner nodes](bf-tree-inner-nodes.md), a separate format
+with variable-length separators and typed child references.

@@ -1,5 +1,6 @@
 //! Building blocks for the BF-Tree storage engine.
 
+pub mod inner;
 pub mod node_id;
 pub mod page;
 

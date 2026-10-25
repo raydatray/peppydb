@@ -477,7 +477,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps
 - [x] Agree on the open design decisions (header, IDs, split contract).
 - [x] Finalize diff 1 as the plan commit.
 - [x] Implement and verify diff 2: typed IDs.
-- [ ] Implement and verify diff 3: layout and initialization.
+- [x] Implement and verify diff 3: layout and initialization.
 - [ ] Implement and verify diff 4: routing and borrowed reads.
 - [ ] Implement and verify diff 5: insertion and child replacement.
 - [ ] Implement and verify diff 6: split with insertion.
