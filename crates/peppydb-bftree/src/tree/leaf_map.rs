@@ -159,6 +159,23 @@ impl LeafMap {
         Ok((a.resident_mut(), b.resident_mut()))
     }
 
+    /// Write every dirty leaf to the store, then sync. A failed write leaves
+    /// that leaf and every later dirty leaf still dirty.
+    pub(super) fn flush(&mut self) -> Result<(), TreeError> {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !entry.dirty.get() {
+                continue;
+            }
+
+            let bytes = entry.resident.get().expect("dirty leaves are resident");
+            self.store.write(LeafId::from_index(index), bytes)?;
+            entry.dirty.set(false);
+        }
+        self.store.sync()?;
+
+        Ok(())
+    }
+
     /// The resident bytes of `id`, loaded through `&self` on first access.
     fn bytes(&self, id: LeafId) -> Result<&[u8], TreeError> {
         if !self.is_live(id) {
