@@ -38,6 +38,9 @@ use crate::{ChildRef, Fence, Fences, InnerId, LeafId, Page, PageError};
 #[cfg(test)]
 mod invariants;
 mod leaf_map;
+// `Tree::open` arrives in the next diff of this stack.
+#[cfg_attr(not(test), allow(dead_code))]
+mod open;
 mod read;
 mod scan;
 mod store;
@@ -166,6 +169,10 @@ pub enum TreeError {
     /// Stored leaf bytes failed validation when loaded.
     #[error("leaf {} is corrupt: {reason}", id.raw())]
     CorruptLeaf { id: LeafId, reason: &'static str },
+    /// The stored leaves do not tile the key space or exceed the stored
+    /// configuration, so no tree can be rebuilt from them.
+    #[error("inconsistent leaves: {0}")]
+    InconsistentLeaves(&'static str),
     /// A leaf operation failed unexpectedly. This indicates a tree bug.
     #[error("internal leaf error: {0}")]
     Page(#[from] PageError),

@@ -52,6 +52,10 @@ where
         }
     }
 
+    pub(super) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub(super) fn alloc(&mut self) -> Id {
         let id = Id::from_index(self.nodes.len());
         self.nodes.push(vec![0; self.capacity].into_boxed_slice());
