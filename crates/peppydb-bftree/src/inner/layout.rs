@@ -5,7 +5,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::{ChildRef, InnerId, KeyRef, LeafId};
 
-pub(super) const HEADER_BYTES: usize = 16;
+pub(crate) const HEADER_BYTES: usize = 16;
 pub(super) const SLOT_BYTES: usize = 8;
 pub(super) const INLINE_KEY_BYTES: usize = 4;
 pub(super) const CHILD_BYTES: usize = 8;
@@ -85,7 +85,7 @@ pub(super) fn tail_len(key_len: usize) -> usize {
 }
 
 /// Slot, key tail, and right-child bytes for one separator.
-pub(super) fn entry_size(key_len: usize) -> usize {
+pub(crate) fn entry_size(key_len: usize) -> usize {
     SLOT_BYTES + tail_len(key_len) + CHILD_BYTES
 }
 

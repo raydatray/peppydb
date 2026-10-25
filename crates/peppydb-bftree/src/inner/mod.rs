@@ -35,7 +35,8 @@ mod read;
 mod split;
 mod write;
 
-use layout::{HEADER_BYTES, Header, SLOT_BYTES, encode_kind};
+pub(crate) use layout::{HEADER_BYTES, entry_size};
+use layout::{Header, SLOT_BYTES, encode_kind};
 pub use read::{Iter, Route, SeparatorRef};
 pub use split::InnerSplit;
 
@@ -121,7 +122,7 @@ impl InnerNode {
         usize::from(self.header.remaining_size.get())
     }
 
-    fn check_capacity(capacity: usize) -> Result<(), InnerError> {
+    pub(crate) fn check_capacity(capacity: usize) -> Result<(), InnerError> {
         if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
             return Err(InnerError::InvalidCapacity);
         }
