@@ -6,10 +6,10 @@ byte values. This document records the tree-level guarantees: how routing and
 fences agree, when nodes split, which keys and values the tree admits, and how
 scans move between leaves.
 
-[Plan 0007](../plans/0007-bf-tree-in-memory-tree.md) delivers the current
-single-threaded, in-memory tree. It has base leaves only: mini-pages, the
-mapping table, the buffer pool, concurrency, and persistence are later
-milestones of the [roadmap](../plans/0002-bf-tree-roadmap.md).
+The tree is single-threaded, with leaves behind a
+[page store](bf-tree-leaf-store.md). It has base leaves only: mini-pages, the
+buffer pool, concurrency, and logging are separate components that do not
+exist yet.
 
 ## Shape
 
@@ -29,11 +29,15 @@ flowchart TD
 - Every leaf is a fenced `Page`. Every leaf is at the same depth.
 - Inner nodes store no interval. Leaf fences are the only place the key-space
   partition is stored a second time, so they make the structure self-checking.
-- Nodes live in a `Store<Id>`: fixed-capacity, zeroed `Box<[u8]>` buffers
-  addressed by dense `InnerId` or `LeafId` values. IDs are never reused,
-  because nothing is freed. The store is scaffolding: milestone 4 replaces the
-  leaf store with a page-store boundary, and milestone 8 replaces both with
-  frames suited to optimistic latching.
+- Inner nodes live in an `InnerStore`: fixed-capacity, zeroed `Box<[u8]>`
+  buffers addressed by dense IDs that are never reused. They are derived,
+  in-memory data: nothing persists them, and `Tree::open` rebuilds them from
+  leaf fences. Concurrency will replace the store with frames suited to
+  optimistic latching.
+- Leaves live in a `PageStore` behind the `LeafMap`, described in
+  [leaf storage](bf-tree-leaf-store.md). A `LeafId` is a stable slot in the
+  store. The tree loads a leaf on first access and keeps it resident; writes
+  mark it dirty, and `Tree::flush` writes dirty leaves back.
 
 ## Routing and fences
 
@@ -82,8 +86,8 @@ owned separators move between levels.
 
 Splitting is *reactive*: a node splits only after a write into it fails. This
 is exact on one thread, because nothing changes between the failed write and
-the parent update. Under optimistic latching that gap is real, so the
-concurrency milestone is expected to add upstream's split-on-descent variant:
+the parent update. Under optimistic latching that gap is real, so
+concurrency is expected to add upstream's split-on-descent variant:
 a retry that splits every node that cannot accept a maximum-size entry while
 holding parent and child, so the final insert is local. Whether a node is
 "full" is derived from its free space and the admission limits; node images
@@ -120,8 +124,8 @@ Defaults are `L = I = 4096`, `K = 64`, and `V = 1024`
 (`448 + 3072 = 3520 <= 4024`). The leaf rule dominates at these capacities.
 It is conservative: it assumes maximum-size records on the heavier side. At
 `K = 16` it admits records of about 1.3 KiB, where upstream's size-class
-condition C3 admits about 1.95 KiB. Milestone 5 re-derives the rule together
-with mini-page size classes.
+condition C3 admits about 1.95 KiB. Mini-pages re-derive the rule together
+with their size classes.
 
 Byte-aware leaf split selection chooses the candidate that minimizes the
 larger output, so if any candidate fits under the bound, the split finds one.
@@ -134,7 +138,10 @@ iterator, and the leaf's upper fence. When the leaf is exhausted, the scan
 re-descends with that fence, which is exactly the next leaf's lower bound. No
 record is skipped or repeated, and no sibling pointers exist to maintain. The
 scan stops when the upper fence is unbounded or at or beyond `end`. Empty
-leaves cost one descent each. Items are `RecordRef` values borrowing the tree.
+leaves cost one descent each. Items are `Result<RecordRef, TreeError>` values
+borrowing the tree: moving to the next leaf may load it from the store, and
+a load failure ends the scan with that error rather than panicking inside an
+iterator or silently truncating the result.
 
 ## Invariants
 
@@ -147,7 +154,8 @@ node and record, so it is too slow for normal operations.
 3. Every record lies within its leaf's fences, and the leaf's search finds it.
 4. Every inner node has at least one separator, in strictly increasing order.
 5. Every allocated node is reachable exactly once, and every reference
-   resolves to an allocated node.
+   resolves to an allocated node. Freed leaf slots, which a reopened store
+   can hold, are neither reachable nor referenced.
 
 ## References
 
