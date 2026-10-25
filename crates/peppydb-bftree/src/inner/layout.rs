@@ -1,7 +1,9 @@
+use std::ops::Range;
+
 use zerocopy::little_endian::{U16, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::ChildRef;
+use crate::{ChildRef, InnerId, LeafId};
 
 pub(super) const HEADER_BYTES: usize = 16;
 pub(super) const SLOT_BYTES: usize = 8;
@@ -39,9 +41,48 @@ pub(super) struct Slot {
 
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
+impl Slot {
+    pub(super) fn key_len(&self) -> usize {
+        usize::from(self.key_len.get())
+    }
+
+    /// Meaningful inline key bytes, excluding zero padding.
+    pub(super) fn inline(&self) -> &[u8] {
+        &self.inline_key[..self.key_len().min(INLINE_KEY_BYTES)]
+    }
+
+    /// Node-relative range of the key tail, clamped to a buffer of `len` bytes.
+    pub(super) fn tail_range(&self, len: usize) -> Range<usize> {
+        let start = usize::from(self.offset.get());
+        let end = start + tail_len(self.key_len());
+
+        start.min(len)..end.min(len)
+    }
+
+    pub(super) fn child_offset(&self) -> usize {
+        usize::from(self.offset.get()) + tail_len(self.key_len())
+    }
+}
+
+pub(super) fn tail_len(key_len: usize) -> usize {
+    key_len.saturating_sub(INLINE_KEY_BYTES)
+}
+
 pub(super) fn encode_kind(child: ChildRef) -> u16 {
     match child {
         ChildRef::Inner(_) => INNER_CHILDREN,
         ChildRef::Leaf(_) => LEAF_CHILDREN,
+    }
+}
+
+/// Decode a stored child. Any nonzero kind decodes as inner, and the reserved
+/// raw value decodes as `u64::MAX - 1`, so decoding is total over any bytes.
+/// Valid nodes never store either case.
+pub(super) fn decode_child(kind: u16, raw: u64) -> ChildRef {
+    let raw = raw.min(u64::MAX - 1);
+
+    match kind {
+        LEAF_CHILDREN => ChildRef::Leaf(LeafId::new(raw).expect("raw ID is not reserved")),
+        _ => ChildRef::Inner(InnerId::new(raw).expect("raw ID is not reserved")),
     }
 }

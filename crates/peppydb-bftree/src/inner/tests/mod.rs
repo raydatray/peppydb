@@ -2,6 +2,7 @@ use super::*;
 use crate::{InnerId, LeafId};
 
 mod layout;
+mod read;
 
 // Tests decode raw byte offsets rather than `Header` and `Slot`, so they
 // check the structs against the documented format independently.

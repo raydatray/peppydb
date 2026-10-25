@@ -58,6 +58,72 @@ upstream's 32-byte header and dummy leftmost entry.
 writes a node with one child and no separators. The first child fixes the node's
 child kind. An invalid capacity leaves the buffer unchanged.
 
+### Separator slots
+
+Each slot uses 8 bytes, following upstream's inner slot:
+
+| Bytes | Meaning |
+| --- | --- |
+| `0..2` | Node-relative offset of the key tail |
+| `2..4` | Full logical key length |
+| `4..8` | First `min(key_len, 4)` key bytes, zero-padded |
+
+Only the tail (`key_len - 4` bytes, or none) is stored in the payload, followed
+by the eight-byte right child ID. Short separators still have an eight-byte
+child payload. For capacity `C` and separator length `k`:
+
+```text
+entry_size(k) = 8 + max(k - 4, 0) + 8
+free          = C - 16 - sum(entry_size(separator.len()))
+payload_start = 16 + 8 * count + free
+```
+
+The node stays densely packed: separator keys are immutable after insertion,
+and child replacement has a fixed width. There is no compaction or separator
+removal.
+
+## Routing
+
+For `n` strictly increasing separators `S[0..n]`, the node stores `n + 1`
+children:
+
+```text
+first_child = C0
+entries     = [(S0, C1), (S1, C2), ..., (S[n-1], Cn)]
+
+Separators:        m                 t
+Children:    C0          C1                  C2
+Ranges:    key < m    m <= key < t         t <= key
+```
+
+`route(key)` returns `Route { index, child }`, where `index` is the number of
+separators less than or equal to `key`, in `0..=len()`. Equality routes to the
+matching separator's right child, which matches the leaf pages'
+lower-inclusive fence convention. Every byte slice is a valid query, including
+an empty one. A node without separators routes to its first child; no dummy
+key represents that child. A routing index can change after mutation; it is not
+a stable handle.
+
+The node guarantees only this local partition. The owning tree must ensure that
+child ranges, heights, identities, and parent separators agree. Inner nodes do
+not store their own fence interval.
+
+Each binary-search probe compares the meaningful inline bytes first and loads
+the tail only on a tie. This is `KeyRef::cmp_bytes` over the separator's inline
+and tail parts, so queries shorter than four bytes need no special case.
+
+### Borrowed reads
+
+- `first_child()` and `child_at(index)` return copied `ChildRef` values.
+  `child_at` returns `None` for `index >= child_count()`.
+- `iter()`, and iteration over `&InnerNode`, yield `SeparatorRef { key,
+  right_child }` in key order. The iterator is exact-sized and fused and
+  excludes the first child.
+- `SeparatorRef::key` is a `KeyRef` whose prefix borrows the inline bytes from
+  the slot directory and whose suffix borrows the payload tail. Here the
+  `KeyRef` prefix is a per-key leading slice, not a shared page prefix.
+  Reads do not allocate.
+
 ## Total reads
 
 Methods that take `&self` must not panic or read outside the buffer for any
