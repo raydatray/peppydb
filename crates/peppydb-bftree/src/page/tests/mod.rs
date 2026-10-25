@@ -10,6 +10,7 @@ mod model;
 mod prefix;
 mod read;
 mod split;
+mod validate;
 mod write;
 
 // Tests decode raw byte offsets rather than `Header` and `Slot`, so they
