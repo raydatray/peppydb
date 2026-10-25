@@ -85,7 +85,11 @@ impl Page {
 
     /// Bytes for a new slot, stored suffix, and value. After `check_key`, the
     /// key starts with the prefix, so the suffix length cannot underflow.
-    fn record_size(&self, key: &[u8], state: RecordState<'_>) -> Result<usize, PageError> {
+    pub(crate) fn record_size(
+        &self,
+        key: &[u8],
+        state: RecordState<'_>,
+    ) -> Result<usize, PageError> {
         self.check_key(key)?;
 
         let value_len = state.value().map_or(0, <[u8]>::len);

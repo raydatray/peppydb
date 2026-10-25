@@ -39,6 +39,7 @@ mod key;
 mod layout;
 mod read;
 mod record;
+mod split;
 mod write;
 
 pub use fence::{Fence, Fences};
@@ -49,6 +50,7 @@ use layout::{
 };
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
+pub use split::LeafSplit;
 pub use write::UpsertOutcome;
 
 /// An operation rejected before changing any page bytes.
@@ -73,6 +75,10 @@ pub enum PageError {
     KeyOutOfRange,
     #[error("range start must not exceed its end")]
     InvalidRange,
+    #[error("split destination capacity must equal the source capacity")]
+    CapacityMismatch,
+    #[error("records cannot form two fenced pages that fit and each keep a record")]
+    CannotSplit,
 }
 
 /// A leaf-level page viewed in place over caller-owned bytes: the header
