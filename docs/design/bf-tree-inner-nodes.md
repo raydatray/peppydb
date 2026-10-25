@@ -147,6 +147,76 @@ the kind. Only the selected eight bytes change, so it succeeds on a full node.
 Every returned error preserves all node bytes. All fallible checks precede
 mutation. Mutations require `&mut InnerNode`.
 
+## Splitting with a pending separator
+
+The node never splits on its own. After `try_insert` returns `NodeFull`, or
+earlier if the caller chooses, the owner calls
+`split_with_insert(right_storage, key, right_child)`. It returns
+`InnerSplit { separator, right }`: the owned promoted key and a view of the right
+output in `right_storage`. `self` becomes the left output. The node does not
+allocate a sibling ID or update a parent; the owner inserts the promoted key
+into the parent with the right node's new ID as its right child.
+
+The split merges the pending entry into the sorted sequence virtually, without
+first inserting it. For `m` resulting separators `S[0..m]` with children
+`C[0..=m]`, promoting index `p` produces:
+
+```text
+promote: S[p]
+left:    first C0,     entries S[0..p]     with right children C[1..p+1]
+right:   first C[p+1], entries S[p+1..m]   with right children C[p+2..m+1]
+```
+
+```mermaid
+flowchart TD
+    Parent[Parent receives promoted key S_p] --> Left[Left node: first child C0]
+    Parent --> Right[Right node: first child C_p+1]
+    Left --> Before[Separators before S_p]
+    Right --> After[Separators after S_p]
+```
+
+The promoted separator is absent from both outputs; its right child becomes the
+right output's first child. Children are conserved: the outputs together hold
+all `m + 1` children. Candidates are `1..m-1`, so each output keeps at least
+one separator and two children.
+
+Selection is byte-aware. One prefix-sum pass computes `left_used = 16 +
+sum(entry_size(S[i]), i < p)` and `right_used = 16 + sum(entry_size(S[i]), i > p)`.
+Candidates whose outputs exceed the capacity are discarded. The rest minimize
+`(max(left_used, right_used), |left_used - right_used|, p)`. A count midpoint
+can leave one output nearly full when key lengths differ: on a 128-byte node
+with entry sizes `[64, 16, 16, 16, 16]`, promoting index 1 leaves 80 and 64 used
+bytes, while the midpoint leaves 96 and 48.
+
+Validation checks the right buffer's capacity (`InvalidCapacity`), then that it
+equals the source capacity (`CapacityMismatch`), then insertion's key, kind,
+size, and duplicate checks. It returns `CannotSplit` if fewer than three
+separators result or no candidate fits. Every error preserves both buffers.
+
+After validation, the split builds both outputs in two 4096-byte stack scratch
+images from borrowed key parts, then copies them to `self` and `right_storage`.
+Only the promoted key is heap-allocated, because it must survive rewriting its
+source. This is an exclusive-access, in-memory guarantee, not a crash-atomic
+tree update.
+
+### Admission limit
+
+The node accepts any separator that fits in an empty node, but that does not
+guarantee a split. On a 64-byte node one 36-byte key fills the node, and adding
+a second separator yields only two, so the split returns `CannotSplit`.
+
+A sufficient inner-only admission rule is:
+
+```text
+entry_size(key) <= floor((capacity - 16) / 2)
+```
+
+Under this rule, insertion cannot fail on space with fewer than two separators,
+and a same-capacity split of a node with at least two separators plus one
+pending entry always has a legal candidate. The tree (plan 0007) must choose a
+separator admission limit at least this strict so that `CannotSplit` is
+unreachable, and must also settle leaf-split and database-wide key limits.
+
 ## Total reads
 
 Methods that take `&self` must not panic or read outside the buffer for any

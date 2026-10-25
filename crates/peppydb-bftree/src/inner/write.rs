@@ -11,7 +11,8 @@ impl InnerNode {
     /// Insert a distinct, nonempty separator and the child to its right.
     ///
     /// The child left of the new separator, and every other entry, stay
-    /// unchanged. Every error leaves all bytes unchanged.
+    /// unchanged. Every error leaves all bytes unchanged; on
+    /// [`InnerError::NodeFull`], see [`InnerNode::split_with_insert`].
     pub fn try_insert(&mut self, key: &[u8], right: ChildRef) -> Result<(), InnerError> {
         let needed = self.check_separator(key, right)?;
         let index = self
