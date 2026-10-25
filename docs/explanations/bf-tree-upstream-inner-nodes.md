@@ -3,8 +3,9 @@
 This walkthrough describes Microsoft revision
 [`f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`][upstream]. It complements the
 [leaf-page walkthrough](bf-tree-upstream-pages.md) and the
-[BF-Tree overview](bf-tree.md). peppydb's proposed inner-node contract belongs
-in [plan 0006](../plans/0006-bf-tree-inner-node.md).
+[BF-Tree overview](bf-tree.md). peppydb's inner-node design is in
+[BF-Tree inner nodes](../design/bf-tree-inner-nodes.md), and
+[plan 0006](../plans/0006-bf-tree-inner-node.md) records how it was built.
 
 ## A separate representation for routing
 

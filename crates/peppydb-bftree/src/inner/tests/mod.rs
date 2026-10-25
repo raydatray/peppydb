@@ -2,6 +2,7 @@ use super::*;
 use crate::{InnerId, LeafId};
 
 mod layout;
+mod model;
 mod read;
 mod split;
 mod write;

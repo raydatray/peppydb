@@ -1,9 +1,10 @@
 # 0006: Packed inner-node storage and routing
 
-**Status:** Agreed; implementation in progress
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
-[shared pages and logical keys](../design/bf-tree-pages.md).
+[shared pages and logical keys](../design/bf-tree-pages.md),
+[inner nodes](../design/bf-tree-inner-nodes.md).
 
 **Parent roadmap:** [BF-Tree implementation](0002-bf-tree-roadmap.md), milestone 3.
 
@@ -481,7 +482,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps
 - [x] Implement and verify diff 4: routing and borrowed reads.
 - [x] Implement and verify diff 5: insertion and child replacement.
 - [x] Implement and verify diff 6: split with insertion.
-- [ ] Implement and verify diff 7: model checks and documentation.
+- [x] Implement and verify diff 7: model checks and documentation.
 
 Planning checked the split feasibility argument and the worked example with a
 bounded combinatorial calculation: 37,164 cases across payload budgets 48, 112,
@@ -489,13 +490,55 @@ and 240, existing counts 2–5, representative entry sizes, and every incoming
 position. All had a feasible promotion; the example selected 80/64-byte outputs.
 This is evidence for the draft algorithm, not verification of a Rust implementation.
 
+### Implementation outcomes
+
+- The implementation follows the agreed design; no scope change was needed.
+  The [inner-node design document](../design/bf-tree-inner-nodes.md) records
+  the delivered contract.
+- IDs expose `raw()` as their accessor, and `ChildRef` adds `raw()`, `is_leaf()`,
+  and `From` conversions from both ID types.
+- To keep reads total, a stored kind other than `0` decodes as inner, a stored
+  reserved raw ID decodes as `u64::MAX - 1`, and a truncated child ID decodes as
+  raw zero. Valid nodes never contain these cases.
+- Separator comparison is `KeyRef::cmp_bytes` over the inline and tail parts;
+  this gives preview-first comparison without a separate code path.
+- Splitting reuses the private `insert_at` packing step for both outputs.
+  The candidate chooser is a pure function over entry sizes, so the
+  no-feasible-candidate case is unit-tested directly. With equal capacities and
+  a valid source node, that case does not appear to be reachable; only the
+  fewer-than-three-separators case occurs through the public API.
+- The model runs 400–1,500 random operations at capacities 64, 128, 512, and
+  4096 for leaf and inner child kinds. They perform 76–184 successful splits per
+  capacity, each compared with the exhaustive oracle. A 4096-byte node holds
+  exactly 255 two-byte separators.
+
+### Verification results
+
+Every commit from diff 2 through diff 7 passes all the commands below:
+`cargo fmt --check`, workspace clippy with `-D warnings`, workspace tests, and
+`cargo doc` with `-D warnings`. On the completed stack, `peppydb-bftree` has 81
+unit tests and 4 doc tests.
+
+A post-implementation review found that diff 5 failed `cargo doc`: its
+`try_insert` documentation linked to `split_with_insert`, which diff 6 adds.
+The link now lands with diff 6. The same review trimmed redundant comments, and
+it moved each checklist item above into the diff that completes it. Originally,
+diff 7 recorded all of them and rustdoc ran only on the completed stack.
+
+The review also rewrote the [design document](../design/bf-tree-inner-nodes.md)
+as a description of the component, like the shared-page design. It now records
+the reasoning and upstream differences that were previously only in this plan's
+agent notes, groups the invariants, and cites its sources.
+
 ## Agent notes
 
-- **Baseline inspected:** `d74d8da6882f`, completed 0005; implementation is under
-  user review. This stack's code has not started.
-- **Shared key view:** `page/key.rs::KeyRef::new` is currently `pub(super)`, so
-  sibling `inner` code needs the planned crate-visible constructor. Borrow inline
-  bytes from the node directory to preserve the returned view's lifetime.
+- **Baseline inspected:** `d74d8da6882f`, completed 0005.
+- **Entry points:** `src/inner/mod.rs` (view, errors, init), `read.rs`,
+  `write.rs::insert_at` (shared by insertion and split packing), and
+  `split.rs::choose_promotion`. The oracle is `src/inner/tests/model.rs`.
+- **Shared key view:** diff 4 widened `page/key.rs::KeyRef::new` to `pub(crate)`
+  for the `inner` module. Borrow inline bytes from the node directory, not a
+  copied `Slot`, to preserve the returned view's lifetime.
 - **Future tree obligation:** 0007 must establish compatible inner/leaf admission
   limits before promising that every valid write can split and complete. A
   `SeparatorTooLarge` check against an empty node alone does not establish that.
