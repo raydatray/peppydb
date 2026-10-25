@@ -3,11 +3,12 @@ use std::ops::Range;
 use zerocopy::little_endian::{U16, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::{ChildRef, InnerId, LeafId};
+use crate::{ChildRef, InnerId, KeyRef, LeafId};
 
 pub(super) const HEADER_BYTES: usize = 16;
 pub(super) const SLOT_BYTES: usize = 8;
 pub(super) const INLINE_KEY_BYTES: usize = 4;
+pub(super) const CHILD_BYTES: usize = 8;
 
 const LEAF_CHILDREN: u16 = 0;
 const INNER_CHILDREN: u16 = 1;
@@ -42,6 +43,21 @@ pub(super) struct Slot {
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
 impl Slot {
+    /// Encode a separator whose key prefix holds exactly its inline bytes.
+    /// Preflight must bound the offset and key length.
+    pub(super) fn new(offset: u16, key: KeyRef<'_>) -> Self {
+        let inline = key.prefix();
+        debug_assert_eq!(inline.len(), key.len().min(INLINE_KEY_BYTES));
+        let mut inline_key = [0; INLINE_KEY_BYTES];
+        inline_key[..inline.len()].copy_from_slice(inline);
+
+        Self {
+            offset: U16::new(offset),
+            key_len: U16::new(key.len() as u16),
+            inline_key,
+        }
+    }
+
     pub(super) fn key_len(&self) -> usize {
         usize::from(self.key_len.get())
     }
@@ -66,6 +82,18 @@ impl Slot {
 
 pub(super) fn tail_len(key_len: usize) -> usize {
     key_len.saturating_sub(INLINE_KEY_BYTES)
+}
+
+/// Slot, key tail, and right-child bytes for one separator.
+pub(super) fn entry_size(key_len: usize) -> usize {
+    SLOT_BYTES + tail_len(key_len) + CHILD_BYTES
+}
+
+/// View a contiguous key split into its inline bytes and tail, as stored.
+pub(super) fn stored_parts(key: &[u8]) -> KeyRef<'_> {
+    let (inline, tail) = key.split_at(key.len().min(INLINE_KEY_BYTES));
+
+    KeyRef::new(inline, tail)
 }
 
 pub(super) fn encode_kind(child: ChildRef) -> u16 {

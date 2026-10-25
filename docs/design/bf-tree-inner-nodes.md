@@ -124,6 +124,29 @@ and tail parts, so queries shorter than four bytes need no special case.
   `KeyRef` prefix is a per-key leading slice, not a shared page prefix.
   Reads do not allocate.
 
+## Insertion and child replacement
+
+`try_insert(key, right)` inserts a distinct, nonempty separator and the child to
+its right. The child left of the new separator and all other entries stay
+unchanged. Validation checks, in order:
+
+1. `EmptyKey`: separator keys must be nonempty.
+2. `ChildKindMismatch`: the child must have the node's child kind.
+3. `SeparatorTooLarge`: the entry must fit in an empty node of this capacity.
+4. `DuplicateSeparator`: a duplicate is a tree bug, not an implicit update.
+5. `NodeFull`: the entry must fit in the contiguous free gap.
+
+Insertion shifts later slots by one and copies one tail and child payload into
+the gap. It never rebuilds or splits the node. On `NodeFull`, the caller chooses
+whether to split.
+
+`replace_child(index, child)` replaces one existing reference, including index
+zero, and returns the old one. It checks the index (`InvalidChildIndex`), then
+the kind. Only the selected eight bytes change, so it succeeds on a full node.
+
+Every returned error preserves all node bytes. All fallible checks precede
+mutation. Mutations require `&mut InnerNode`.
+
 ## Total reads
 
 Methods that take `&self` must not panic or read outside the buffer for any
