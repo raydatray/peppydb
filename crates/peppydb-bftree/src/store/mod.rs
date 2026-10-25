@@ -34,8 +34,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::{LeafId, Page};
 
+mod file;
 mod mem;
 
+pub use file::FileStore;
 pub use mem::MemStore;
 
 /// Magic bytes at the start of every store.
