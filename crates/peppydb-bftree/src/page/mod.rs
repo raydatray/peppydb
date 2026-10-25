@@ -40,6 +40,7 @@ mod layout;
 mod read;
 mod record;
 mod split;
+mod validate;
 mod write;
 
 pub use fence::{Fence, Fences};
@@ -79,6 +80,10 @@ pub enum PageError {
     CapacityMismatch,
     #[error("records cannot form two fenced pages that fit and each keep a record")]
     CannotSplit,
+    /// Stored bytes failed [`Page::validate`]; the reason names the first
+    /// check that failed.
+    #[error("corrupt page: {0}")]
+    Corrupt(&'static str),
 }
 
 /// A leaf-level page viewed in place over caller-owned bytes: the header
@@ -86,9 +91,9 @@ pub enum PageError {
 /// for base leaf pages, full-page caches, and mini-pages. Any buffer alignment
 /// works.
 ///
-/// Methods assume the bytes came from [`Page::init`] or [`Page::init_with_fences`].
-/// Viewing other bytes as a `Page` through the public `zerocopy` traits can make
-/// them panic.
+/// Methods assume the bytes came from [`Page::init`] or [`Page::init_with_fences`],
+/// or passed [`Page::validate`]. Viewing other bytes as a `Page` through the
+/// public `zerocopy` traits can make them panic.
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub struct Page {
