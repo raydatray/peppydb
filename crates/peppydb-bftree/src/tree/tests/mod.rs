@@ -2,6 +2,7 @@ use super::*;
 
 mod config;
 mod model;
+mod open;
 mod read;
 mod scan;
 mod store;
