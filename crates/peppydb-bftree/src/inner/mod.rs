@@ -12,8 +12,18 @@
 //!
 //! let mut storage = [0; 128];
 //! let node = InnerNode::init(&mut storage, leaf(0)).unwrap();
-//! assert_eq!(node.len(), 0);
-//! assert_eq!(node.child_count(), 1);
+//! node.try_insert(b"t", leaf(2)).unwrap();
+//! node.try_insert(b"m", leaf(1)).unwrap();
+//!
+//! // Keys below "m" route to the first child; equality routes right.
+//! let node: &InnerNode = node;
+//! assert_eq!(node.child_count(), 3);
+//! assert_eq!(node.route(b"a").child, leaf(0));
+//! assert_eq!(node.route(b"m").child, leaf(1));
+//! assert_eq!(node.route(b"zebra").index, 2);
+//!
+//! let separators: Vec<_> = node.iter().map(|entry| entry.key.to_vec()).collect();
+//! assert_eq!(separators, [b"m".to_vec(), b"t".to_vec()]);
 //! ```
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -22,6 +32,7 @@ use crate::ChildRef;
 
 mod layout;
 mod read;
+mod write;
 
 use layout::{HEADER_BYTES, Header, SLOT_BYTES, encode_kind};
 pub use read::{Iter, Route, SeparatorRef};
