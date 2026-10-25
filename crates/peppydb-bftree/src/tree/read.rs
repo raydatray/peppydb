@@ -4,10 +4,6 @@ use crate::{ChildRef, InnerId, LeafId, RecordState};
 /// Inner nodes visited from the root to a leaf, each with the child index
 /// that the descent took. The path holds IDs, never node references, so a
 /// writer can borrow each parent mutably in turn.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the write path arrives in the next diff")
-)]
 pub(super) type Path = Vec<(InnerId, usize)>;
 
 impl Tree {
@@ -43,10 +39,6 @@ impl Tree {
     }
 
     /// Descend to the leaf whose fences contain `key` and record the path.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the write path arrives in the next diff")
-    )]
     pub(super) fn locate(&self, key: &[u8]) -> (LeafId, Path) {
         let mut path = Vec::new();
         let leaf = self.descend(key, |step| path.push(step));
