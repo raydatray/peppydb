@@ -4,6 +4,7 @@ mod config;
 mod model;
 mod read;
 mod scan;
+mod store;
 mod write;
 
 fn config(
@@ -28,12 +29,22 @@ fn value_of(key: &[u8]) -> Vec<u8> {
 /// A tree with no nodes; fixtures allocate nodes and set the root.
 fn empty_tree() -> Tree {
     let config = config(256, 128, 8, 16);
+    let store = MemStore::new(Superblock::from_config(&config)).unwrap();
     Tree {
         config,
         root: ChildRef::Leaf(LeafId::new(0).unwrap()),
-        inner: Store::new(config.inner_capacity),
-        leaves: Store::new(config.leaf_capacity),
+        inner: InnerStore::new(config.inner_capacity),
+        leaves: LeafMap::new(Box::new(store), []),
     }
+}
+
+/// Collect a scan's records as owned key/value pairs; any error panics.
+fn collect(scan: Scan<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    scan.map(|record| {
+        let record = record.unwrap();
+        (record.key.to_vec(), record.state.value().unwrap().to_vec())
+    })
+    .collect()
 }
 
 fn add_leaf(
@@ -42,12 +53,12 @@ fn add_leaf(
     upper: Option<&[u8]>,
     keys: &[&[u8]],
 ) -> ChildRef {
-    let id = tree.leaves.alloc();
+    let id = tree.leaves.alloc().unwrap();
     let fences = Fences {
         lower: lower.map_or(Fence::Unbounded, Fence::Key),
         upper: upper.map_or(Fence::Unbounded, Fence::Key),
     };
-    let page = Page::init_with_fences(tree.leaves.get_mut(id), fences).unwrap();
+    let page = Page::init_with_fences(tree.leaves.bytes_mut(id).unwrap(), fences).unwrap();
     for key in keys {
         page.try_insert(key, &value_of(key)).unwrap();
     }

@@ -56,7 +56,7 @@ fn generate_key(rng: &mut Rng, keys: Keys, max_len: usize) -> Vec<u8> {
 /// results and invariants after every step.
 fn run(config: TreeConfig, keys: Keys, seed: u64, steps: usize, min_height: usize) {
     let mut rng = Rng(seed);
-    let mut tree = Tree::new(config).unwrap();
+    let mut tree = Tree::in_memory(config).unwrap();
     let mut model = Model::new();
     let max_key = config.max_key_len;
     let mut max_height = 1;
@@ -92,11 +92,7 @@ fn run(config: TreeConfig, keys: Keys, seed: u64, steps: usize, min_height: usiz
                     _ if key <= other => (Some(key), Some(other)),
                     _ => (Some(other), Some(key)),
                 };
-                let actual: Vec<_> = tree
-                    .range(start.as_deref(), end.as_deref())
-                    .unwrap()
-                    .map(|record| (record.key.to_vec(), record.state.value().unwrap().to_vec()))
-                    .collect();
+                let actual = collect(tree.range(start.as_deref(), end.as_deref()).unwrap());
                 let bounds = (
                     start.as_deref().map_or(Bound::Unbounded, Bound::Included),
                     end.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
@@ -118,10 +114,7 @@ fn run(config: TreeConfig, keys: Keys, seed: u64, steps: usize, min_height: usiz
     );
 
     // Final full comparison.
-    let all: Vec<_> = tree
-        .iter()
-        .map(|record| (record.key.to_vec(), record.state.value().unwrap().to_vec()))
-        .collect();
+    let all = collect(tree.iter());
     let expected: Vec<_> = model.into_iter().collect();
     assert_eq!(all, expected);
 }
@@ -160,7 +153,7 @@ fn default_nodes_match_the_oracle() {
 
 #[test]
 fn reversed_ranges_are_rejected() {
-    let tree = Tree::new(TreeConfig::default()).unwrap();
+    let tree = Tree::in_memory(TreeConfig::default()).unwrap();
     assert_eq!(
         tree.range(Some(b"b"), Some(b"a")).err(),
         Some(TreeError::InvalidRange)
@@ -174,7 +167,7 @@ fn reversed_ranges_are_rejected() {
 #[ignore = "informational benchmark"]
 fn baseline_throughput() {
     const COUNT: u64 = 1_000_000;
-    let mut tree = Tree::new(TreeConfig::default()).unwrap();
+    let mut tree = Tree::in_memory(TreeConfig::default()).unwrap();
     let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes();
     let value = [7; 16];
 
@@ -200,8 +193,8 @@ fn baseline_throughput() {
     println!(
         "{COUNT} random 8-byte keys, 16-byte values, height {}, {} leaves, {} inner nodes",
         tree.height(),
-        tree.leaves.len(),
-        tree.inner.len()
+        tree.leaf_count(),
+        tree.inner_count()
     );
     println!("put:  {:.2} M ops/s", rate(put));
     println!("get:  {:.2} M ops/s", rate(get));
