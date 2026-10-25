@@ -256,8 +256,8 @@ equals the source capacity (`CapacityMismatch`), that the source is fenced
 duplicates (`DuplicateKey`), and finally `CannotSplit` when fewer than two
 virtual records exist or no candidate fits. Every error preserves both
 buffers. The page does not allocate a leaf ID or update a parent. The
-admission rule that makes `CannotSplit` unreachable in the tree is derived in
-[plan 0007](../plans/0007-bf-tree-in-memory-tree.md#admission-rule).
+admission rule that makes `CannotSplit` unreachable in the tree is described in
+[BF-Tree structure](bf-tree-structure.md#admission-rule).
 
 ## Prefix compression
 
@@ -341,6 +341,7 @@ without format conversion. Inner nodes use a separate format; see
 [Plan 0004](../plans/0004-bf-tree-page-mutation.md) delivers the mutable, fenced,
 range-aware page. [Plan 0005](../plans/0005-bf-tree-page-prefix.md) delivers
 fence-derived prefix compression and borrowed logical keys.
+[Plan 0007](../plans/0007-bf-tree-in-memory-tree.md) adds the leaf split.
 
 The page primitive makes no base/mini/cache role decisions. It can split itself
 once asked, but deciding when to split, growth, merging, and selection of

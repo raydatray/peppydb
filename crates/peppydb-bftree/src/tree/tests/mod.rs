@@ -1,6 +1,7 @@
 use super::*;
 
 mod config;
+mod model;
 mod read;
 mod scan;
 mod write;

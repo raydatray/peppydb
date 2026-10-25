@@ -1,10 +1,11 @@
 # 0007: Single-threaded in-memory tree composition
 
-**Status:** Agreed
+**Status:** Completed
 
 **Design references:** [Project direction](../design/architecture.md),
 [shared pages and logical keys](../design/bf-tree-pages.md),
-[inner nodes](../design/bf-tree-inner-nodes.md).
+[inner nodes](../design/bf-tree-inner-nodes.md),
+[tree structure](../design/bf-tree-structure.md).
 
 **Parent roadmap:** [BF-Tree implementation](0002-bf-tree-roadmap.md), milestone 3.
 
@@ -183,8 +184,9 @@ so stored sizes do not grow. The larger output fits when:
 
 **Inner.** From 0006: `entry_size(K) = 16 + max(K - 4, 0) <= (I - 16) / 2`.
 
-`TreeConfig::new` validates both. For `L = I = 4096` the leaf condition is
-`7K + 3V <= 4024` and it dominates the inner one (which allows `K <= 2028`).
+`TreeConfig::validate`, called by `Tree::new`, checks both. For `L = I = 4096`
+the leaf condition is `7K + 3V <= 4024` and it dominates the inner one (which
+allows `K <= 2028`).
 Defaults: `K = 64`, `V = 1024` (`448 + 3072 = 3520`), a record of about
 1.1 KiB. Sixty-four bytes covers fixed-width keys (integers, UUIDs, digests)
 with room for a short prefix; upstream's default `max_key_len` is 16 with a
@@ -340,12 +342,12 @@ src/page/tests/split.rs
 src/tree/
     mod.rs               # Tree, TreeConfig, TreeError, exports
     store.rs             # Store<Id>, NodeId trait for InnerId/LeafId
-    locate.rs            # descent, Path
+    read.rs              # descent, Path, get, height
     write.rs             # put/remove, split propagation, root growth
     scan.rs              # Scan iterator
-    invariants.rs        # check_invariants, InvariantError
+    invariants.rs        # check_invariants, InvariantError (test-only)
     tests/
-        mod.rs  config.rs  locate.rs  write.rs  scan.rs  model.rs
+        mod.rs  config.rs  read.rs  write.rs  scan.rs  model.rs
 ```
 
 Export `Tree`, `TreeConfig`, `TreeError`, and `Scan` from `lib.rs`.
@@ -486,9 +488,34 @@ baseline for later comparison with upstream; it is informational, not a gate.
 - [x] Diff 4: locate and get.
 - [x] Diff 5: write path.
 - [x] Diff 6: scan.
-- [ ] Diff 7: model tests and documentation.
-- [ ] Update `docs/design/bf-tree-pages.md`, `bf-tree-inner-nodes.md`, and add
+- [x] Diff 7: model tests and documentation.
+- [x] Update `docs/design/bf-tree-pages.md`, `bf-tree-inner-nodes.md`, and add
   `docs/design/bf-tree-structure.md`; tick the roadmap.
+
+### Verification outcomes
+
+- Leaf split sizes: `page/tests/split.rs` checks 800 random full pages across
+  four capacities and five fence profiles against an independent calculator.
+  Both outputs' used bytes equal the calculator's, and the chosen split point
+  is the exhaustive minimum.
+- Admission rule: write tests fill trees with maximum-size keys and values at
+  five boundary configurations; the config tests check both sides of each
+  inequality. No `CannotSplit`, `NodeFull`, `RecordTooLarge`, or
+  `SeparatorTooLarge` surfaced.
+- Structure and behavior: the model test runs 27 deterministic sequences
+  (700–1200 steps each) over five configurations and four key profiles,
+  comparing get, put outcomes, remove, and range with a `BTreeMap` and checking
+  invariants after every step. Every run reaches height 3 on small and medium
+  nodes, and at least 2 on default nodes.
+- Workspace: `cargo fmt --all -- --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, and
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p peppydb-bftree --no-deps` are clean.
+- Baseline (informational, `cargo test --release -p peppydb-bftree --
+  --ignored --nocapture baseline`, Apple M4 Pro): one million random 8-byte
+  keys with 16-byte values and default configuration give a height-3 tree of
+  8,692 leaves and 65 inner nodes; put 2.35 M ops/s, get 2.28 M ops/s, full
+  scan 134 M records/s. The store's `Vec<Box<[u8]>>` scaffolding and owned
+  key materialization during splits are known costs.
 
 ## Discoveries and plan changes
 
@@ -506,6 +533,16 @@ baseline for later comparison with upstream; it is informational, not a gate.
   physical sizing. `PageError::CapacityMismatch` was added to mirror the inner
   split's validation.
 - `Tree::iter` was added as the unbounded `range(None, None)`.
+- Leaf split outputs inherit the source's backing-leaf, LSN, and
+  snapshot-version fields and preserve reference bits. Tombstones lose
+  retained value bytes, as in any rebuild.
+- `put_splitting_on_descent` was not added, as agreed; the two-layer write path
+  (`try_upsert_in_leaf`, `split_and_propagate`) leaves room for it.
+- Review made `check_invariants` and `InvariantError` test-only
+  (`#[cfg(test)]`) instead of public API. Every caller is a unit test. A Cargo
+  feature can expose them later if integration tests or fuzzing need them.
+- Review renamed `tree/locate.rs` to `tree/read.rs`, matching `page/read.rs`
+  and `inner/read.rs`, which also hold lookups that the write path uses.
 
 ## Agent notes
 

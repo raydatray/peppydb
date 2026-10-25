@@ -245,7 +245,9 @@ Under this rule, insertion cannot run out of space with fewer than two
 separators. A full node with at least two separators plus one pending entry then
 always has a candidate: promote the pending key if it falls inside the
 sequence, or else the adjacent existing endpoint. The rule covers inner nodes
-only; leaf splits impose their own limit.
+only; leaf splits impose their own limit. The tree's `TreeConfig::validate`
+enforces both for the configured key limit; see
+[BF-Tree structure](bf-tree-structure.md#admission-rule).
 
 ## Invariants
 
@@ -300,15 +302,17 @@ The node provides local operations; its owner composes them:
 The owner holds node buffers, resolves IDs to them, and enforces the admission
 limit. Only the owner can check that the parts agree: that child heights match,
 that leaf fences match parent separators, and that each ID refers to a live
-node.
+node. [BF-Tree structure](bf-tree-structure.md) describes the current owner,
+`Tree`.
 
 ## Staged integration
 
 [Plan 0006](../plans/0006-bf-tree-inner-node.md) delivers the node primitive.
-Tree composition, leaf splitting, and root growth come next. Later milestones
-add stable frames for node ownership, a concurrency protocol, and persistence.
-Plan 0006's agent notes record the intended frame arena and the options for
-reader synchronization.
+[Plan 0007](../plans/0007-bf-tree-in-memory-tree.md) composes the tree: leaf
+splits, parent propagation, root growth, and the key admission limit. Later
+milestones add stable frames for node ownership, a concurrency protocol, and
+persistence. Plan 0006's agent notes record the intended frame arena and the
+options for reader synchronization.
 
 ## References
 
