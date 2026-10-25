@@ -1,7 +1,7 @@
 use zerocopy::FromBytes;
 
 use super::*;
-use crate::tree::store::{NodeId, Store};
+use crate::tree::store::Store;
 
 #[test]
 fn defaults_validate() {

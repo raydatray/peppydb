@@ -1,5 +1,4 @@
 use super::Tree;
-use super::store::NodeId;
 use crate::{ChildRef, Fence, Fences, InnerId, KeyRef, LeafId};
 
 /// A structural invariant violation found by [`Tree::check_invariants`].

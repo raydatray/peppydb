@@ -10,21 +10,21 @@ pub(super) trait NodeId: Copy {
 
 impl NodeId for InnerId {
     fn from_index(index: usize) -> Self {
-        Self::new(index as u64).expect("store indices stay below the reserved ID")
+        Self::from_index(index)
     }
 
     fn index(self) -> usize {
-        usize::try_from(self.raw()).expect("store IDs index a Vec")
+        self.index()
     }
 }
 
 impl NodeId for LeafId {
     fn from_index(index: usize) -> Self {
-        Self::new(index as u64).expect("store indices stay below the reserved ID")
+        Self::from_index(index)
     }
 
     fn index(self) -> usize {
-        usize::try_from(self.raw()).expect("store IDs index a Vec")
+        self.index()
     }
 }
 

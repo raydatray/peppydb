@@ -35,6 +35,17 @@ impl InnerId {
     pub const fn raw(self) -> u64 {
         self.0
     }
+
+    /// The ID for a dense table or slot index. Indices never reach the
+    /// reserved value, so this cannot fail for any real index.
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self::new(index as u64).expect("indices stay below the reserved ID")
+    }
+
+    /// The dense index this ID addresses.
+    pub(crate) fn index(self) -> usize {
+        usize::try_from(self.0).expect("IDs index in-memory tables")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +64,17 @@ impl LeafId {
 
     pub const fn raw(self) -> u64 {
         self.0
+    }
+
+    /// The ID for a dense table or slot index. Indices never reach the
+    /// reserved value, so this cannot fail for any real index.
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self::new(index as u64).expect("indices stay below the reserved ID")
+    }
+
+    /// The dense index this ID addresses.
+    pub(crate) fn index(self) -> usize {
+        usize::try_from(self.0).expect("IDs index in-memory tables")
     }
 }
 
