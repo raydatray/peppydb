@@ -3,6 +3,7 @@ use crate::{InnerId, LeafId};
 
 mod layout;
 mod read;
+mod split;
 mod write;
 
 // Tests decode raw byte offsets rather than `Header` and `Slot`, so they
