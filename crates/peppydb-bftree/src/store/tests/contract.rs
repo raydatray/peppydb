@@ -11,8 +11,48 @@ fn mem() -> Box<dyn PageStore> {
     Box::new(MemStore::new(superblock(PAGE)).unwrap())
 }
 
+/// The temporary directory lives as long as the store; the store never
+/// touches the path again after `create`.
+fn file() -> Box<dyn PageStore> {
+    struct Owned {
+        store: FileStore,
+        _dir: tempfile::TempDir,
+    }
+
+    impl PageStore for Owned {
+        fn page_size(&self) -> usize {
+            self.store.page_size()
+        }
+        fn slots(&self) -> u64 {
+            self.store.slots()
+        }
+        fn alloc(&mut self) -> Result<LeafId, StoreError> {
+            self.store.alloc()
+        }
+        fn free(&mut self, id: LeafId) -> Result<(), StoreError> {
+            self.store.free(id)
+        }
+        fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
+            self.store.read(id, buf)
+        }
+        fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+            self.store.write(id, buf)
+        }
+        fn sync(&mut self) -> Result<(), StoreError> {
+            self.store.sync()
+        }
+        fn superblock(&self) -> &Superblock {
+            self.store.superblock()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::create(dir.path().join("store.bf"), superblock(PAGE)).unwrap();
+    Box::new(Owned { store, _dir: dir })
+}
+
 fn backends() -> Vec<(&'static str, Factory)> {
-    vec![("mem", mem as Factory)]
+    vec![("mem", mem as Factory), ("file", file as Factory)]
 }
 
 fn for_each_backend(scenario: impl Fn(&mut dyn PageStore)) {
