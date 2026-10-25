@@ -1,81 +1,48 @@
-use std::marker::PhantomData;
+use crate::InnerId;
 
-use crate::{InnerId, LeafId};
-
-/// A typed node ID that indexes a [`Store`].
-pub(super) trait NodeId: Copy {
-    fn from_index(index: usize) -> Self;
-    fn index(self) -> usize;
-}
-
-impl NodeId for InnerId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
-}
-
-impl NodeId for LeafId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
-}
-
-// TODO: Replace the leaf store with a page-store boundary behind `LeafId`.
-/// Fixed-capacity, zero-initialized byte buffers addressed by a typed ID.
+/// Fixed-capacity, zero-initialized inner-node buffers addressed by
+/// [`InnerId`].
 ///
 /// IDs are dense indices and are never reused, because this single-threaded
-/// store never frees a node.
+/// store never frees a node. Leaves live in the
+/// [`LeafMap`](super::leaf_map::LeafMap) instead.
 #[derive(Debug)]
-pub(super) struct Store<Id> {
+pub(super) struct InnerStore {
     capacity: usize,
     nodes: Vec<Box<[u8]>>,
-    _id: PhantomData<Id>,
 }
 
-impl<Id> Store<Id>
-where
-    Id: NodeId,
-{
+impl InnerStore {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
             capacity,
             nodes: Vec::new(),
-            _id: PhantomData,
         }
     }
 
-    pub(super) fn alloc(&mut self) -> Id {
-        let id = Id::from_index(self.nodes.len());
+    pub(super) fn alloc(&mut self) -> InnerId {
+        let id = InnerId::from_index(self.nodes.len());
         self.nodes.push(vec![0; self.capacity].into_boxed_slice());
 
         id
     }
 
     /// Number of allocated nodes; IDs are `0..len()`.
-    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Borrow an allocated buffer. Panics on an ID this store did not allocate.
-    pub(super) fn get(&self, id: Id) -> &[u8] {
+    pub(super) fn get(&self, id: InnerId) -> &[u8] {
         &self.nodes[id.index()]
     }
 
-    pub(super) fn get_mut(&mut self, id: Id) -> &mut [u8] {
+    pub(super) fn get_mut(&mut self, id: InnerId) -> &mut [u8] {
         &mut self.nodes[id.index()]
     }
 
     /// Borrow two allocated buffers mutably at once. Panics if the IDs are equal.
-    pub(super) fn pair_mut(&mut self, a: Id, b: Id) -> (&mut [u8], &mut [u8]) {
+    pub(super) fn pair_mut(&mut self, a: InnerId, b: InnerId) -> (&mut [u8], &mut [u8]) {
         let [a, b] = self
             .nodes
             .get_disjoint_mut([a.index(), b.index()])

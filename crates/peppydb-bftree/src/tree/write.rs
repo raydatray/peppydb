@@ -42,7 +42,7 @@ impl Tree {
         self.check_key(key)?;
 
         let leaf = self.find_leaf(key);
-        Ok(self.leaf_mut(leaf).remove(key)?)
+        Ok(self.leaf_mut(leaf)?.remove(key)?)
     }
 
     /// Write `key` into `leaf` without splitting, compacting if its holes make
@@ -54,7 +54,7 @@ impl Tree {
         key: &[u8],
         state: RecordState<'_>,
     ) -> Result<LeafWrite, TreeError> {
-        let page = self.leaf_mut(leaf);
+        let page = self.leaf_mut(leaf)?;
         match page.try_upsert(key, state) {
             Err(PageError::PageFull) => {}
             result => return Ok(LeafWrite::Done(result?)),
@@ -91,8 +91,8 @@ impl Tree {
         key: &[u8],
         state: RecordState<'_>,
     ) -> Result<(), TreeError> {
-        let right = self.leaves.alloc();
-        let (left_bytes, right_bytes) = self.leaves.pair_mut(leaf, right);
+        let right = self.leaves.alloc()?;
+        let (left_bytes, right_bytes) = self.leaves.pair_mut(leaf, right)?;
         let page = Page::mut_from_bytes(left_bytes).expect("leaf buffers hold a page header");
         let mut separator = page.split_with_insert(right_bytes, key, state)?.separator;
         let mut child = ChildRef::Leaf(right);
