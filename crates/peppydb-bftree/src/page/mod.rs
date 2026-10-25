@@ -207,7 +207,7 @@ impl Page {
         Some(key.start..key.end + slot.value_len())
     }
 
-    fn check_capacity(capacity: usize) -> Result<(), PageError> {
+    pub(crate) fn check_capacity(capacity: usize) -> Result<(), PageError> {
         if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
             return Err(PageError::InvalidCapacity);
         }
