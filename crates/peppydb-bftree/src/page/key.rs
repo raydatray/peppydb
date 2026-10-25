@@ -1,11 +1,13 @@
 use std::cmp::Ordering;
 
-/// A borrowed logical key stored as a shared prefix followed by a suffix.
+/// A borrowed logical key stored as a leading prefix slice followed by a suffix.
 ///
-/// The two parts may borrow disjoint regions of a page. Equality and ordering
-/// use the logical concatenated bytes, so the split point never affects a
-/// comparison: `"ab" + "c"` equals `"a" + "bc"`. Accessors return slices with
-/// the borrowed lifetime `'p`, not the lifetime of the view value.
+/// The parts may borrow disjoint regions: a compressed page's shared prefix and
+/// a record's suffix, or an inner separator's inline bytes and its tail.
+/// Equality and ordering use the logical concatenated bytes, so the split point
+/// never affects a comparison: `"ab" + "c"` equals `"a" + "bc"`. Accessors
+/// return slices with the borrowed lifetime `'p`, not the lifetime of the view
+/// value.
 ///
 /// ```
 /// use peppydb_bftree::KeyRef;
@@ -22,7 +24,7 @@ pub struct KeyRef<'p> {
 }
 
 impl<'p> KeyRef<'p> {
-    pub(super) fn new(prefix: &'p [u8], suffix: &'p [u8]) -> Self {
+    pub(crate) fn new(prefix: &'p [u8], suffix: &'p [u8]) -> Self {
         Self { prefix, suffix }
     }
 
