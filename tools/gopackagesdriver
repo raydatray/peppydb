@@ -1,0 +1,17 @@
+#!/bin/sh
+# Optional gopls packages driver that follows the Buck2 graph instead of
+# go/go.mod. gopls works without it, because go/ is a real module.
+#
+# Use: GOPACKAGESDRIVER=<repo>/tools/gopackagesdriver gopls ...
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+OUT="$ROOT/buck-out/gopackagesdriver"
+if [ ! -x "$OUT" ]; then
+    "$ROOT/tools/buck2" build prelude//go/tools/gopackagesdriver:gopackagesdriver \
+        --out "$OUT" >/dev/null 2>&1
+fi
+# The driver runs `buck2` from PATH; make that the pinned tools/buck2.
+export PATH="$ROOT/tools:$PATH"
+export GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS="${GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS:-root//go/...}"
+cd "$ROOT"
+exec "$OUT" "$@"

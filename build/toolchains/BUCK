@@ -1,6 +1,6 @@
-# Toolchains used by the build. Compilers come from PATH: rustc, clippy-driver,
-# and rustdoc through rustup (pinned by rust-toolchain.toml), and the system C
-# compiler, which rustc uses as its linker.
+# Toolchains used by the build. rustc, clippy-driver, and rustdoc come from
+# PATH through rustup, which pins them with rust-toolchain.toml. The C compiler,
+# which rustc uses as its linker, comes from PATH. Go is a pinned download.
 
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
@@ -8,6 +8,9 @@ load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "remote_python_toolchain", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//toolchains:rust.bzl", "system_rust_toolchain")
+load("@prelude//toolchains/go:go_bootstrap_toolchain.bzl", "go_bootstrap_distr", "go_bootstrap_toolchain")
+load("@prelude//toolchains/go:go_toolchain.bzl", "go_distr", "go_toolchain")
+load(":host.bzl", "by_host")
 
 # Cargo's default release profile. Applies to every crate, third-party included.
 RELEASE_FLAGS = [
@@ -66,5 +69,62 @@ remote_test_execution_toolchain(
 
 noop_test_toolchain(
     name = "test",
+    visibility = ["PUBLIC"],
+)
+
+# Go: the official release for the host, downloaded and checked by sha256.
+# GO_VERSION must match go/go.mod; tools/check-tools checks it.
+GO_VERSION = "1.27.0"
+
+GO_RELEASES = {
+    # name: (GOOS, GOARCH, sha256)
+    "darwin-arm64": ("darwin", "arm64", "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"),
+    "linux-amd64": ("linux", "amd64", "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"),
+    "linux-arm64": ("linux", "arm64", "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"),
+}
+
+[
+    http_archive(
+        name = "go-" + name,
+        urls = ["https://go.dev/dl/go{}.{}.tar.gz".format(GO_VERSION, name)],
+        sha256 = sha256,
+        strip_prefix = "go",
+    )
+    for name, (_, _, sha256) in GO_RELEASES.items()
+]
+
+GO_ROOT = by_host({name: ":go-" + name for name in GO_RELEASES})
+GO_OS = by_host({name: goos for name, (goos, _, _) in GO_RELEASES.items()})
+GO_ARCH = by_host({name: goarch for name, (_, goarch, _) in GO_RELEASES.items()})
+
+go_distr(
+    name = "go-distr",
+    go_os_arch = by_host({name: (goos, goarch) for name, (goos, goarch, _) in GO_RELEASES.items()}),
+    go_root = GO_ROOT,
+    # The prelude passes `-std` to the assembler for the standard library only
+    # when it knows the Go version is 1.27 or later.
+    version = GO_VERSION,
+)
+
+go_toolchain(
+    name = "go",
+    env_go_arch = GO_ARCH,
+    env_go_os = GO_OS,
+    go_distr = ":go-distr",
+    visibility = ["PUBLIC"],
+)
+
+# Builds the prelude's own Go helper tools, with the same Go.
+go_bootstrap_distr(
+    name = "go-bootstrap-distr",
+    go_os_arch = by_host({name: (goos, goarch) for name, (goos, goarch, _) in GO_RELEASES.items()}),
+    go_root = GO_ROOT,
+)
+
+go_bootstrap_toolchain(
+    name = "go_bootstrap",
+    env_go_arch = GO_ARCH,
+    env_go_os = GO_OS,
+    go_bootstrap_distr = ":go-bootstrap-distr",
     visibility = ["PUBLIC"],
 )

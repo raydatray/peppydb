@@ -1,6 +1,7 @@
 #!/bin/sh
-# Fail if compilers on PATH differ from their pins. Buck2 takes rustc and go
-# from PATH, so a mismatch would silently change build output.
+# Fail if tool versions differ from their pins. Buck2 takes rustc from PATH,
+# so a mismatch would silently change build output. Buck2 downloads Go itself;
+# its pin must match go/go.mod, and so must any go on PATH.
 set -eu
 cd "$(dirname "$0")/.."
 status=0
@@ -14,10 +15,19 @@ fi
 
 if [ -f go/go.mod ]; then
     want=$(sed -n 's/^go \([0-9.]*\)$/\1/p' go/go.mod)
-    have=$(go env GOVERSION | sed 's/^go//')
-    if [ "$have" != "$want" ]; then
-        echo "check-tools: go is $have, go/go.mod pins $want" >&2
+    # Buck2 downloads the Go release named in build/toolchains/BUCK.
+    buck=$(sed -n 's/^GO_VERSION = "\(.*\)"$/\1/p' build/toolchains/BUCK)
+    if [ "$buck" != "$want" ]; then
+        echo "check-tools: build/toolchains/BUCK pins Go $buck, go/go.mod pins $want" >&2
         status=1
+    fi
+    # The go command (go test, gopls) uses go from PATH, if there is one.
+    if command -v go >/dev/null; then
+        have=$(go env GOVERSION | sed 's/^go//')
+        if [ "$have" != "$want" ]; then
+            echo "check-tools: go on PATH is $have, go/go.mod pins $want" >&2
+            status=1
+        fi
     fi
 fi
 
