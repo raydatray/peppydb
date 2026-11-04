@@ -1,0 +1,5 @@
+go_binary(
+    name = "hello",
+    srcs = glob(["*.go"]),
+    deps = ["//go/internal/greet:greet"],
+)
