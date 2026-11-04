@@ -118,9 +118,12 @@ impl TreeConfig {
     }
 }
 
-impl Superblock {
-    /// The superblock a store must carry to hold leaves of this configuration.
-    pub fn from_config(config: &TreeConfig) -> Self {
+/// The superblock a store must carry to hold leaves of this configuration.
+///
+/// These are `From` conversions, not inherent methods on `Superblock`, so that
+/// they can live with `TreeConfig` when the store has its own crate.
+impl From<&TreeConfig> for Superblock {
+    fn from(config: &TreeConfig) -> Self {
         Self {
             page_size: config.leaf_capacity,
             inner_capacity: config.inner_capacity,
@@ -128,14 +131,16 @@ impl Superblock {
             max_value_len: config.max_value_len,
         }
     }
+}
 
-    /// The configuration recorded in a superblock.
-    pub fn to_config(&self) -> TreeConfig {
-        TreeConfig {
-            leaf_capacity: self.page_size,
-            inner_capacity: self.inner_capacity,
-            max_key_len: self.max_key_len,
-            max_value_len: self.max_value_len,
+/// The configuration recorded in a superblock.
+impl From<&Superblock> for TreeConfig {
+    fn from(superblock: &Superblock) -> Self {
+        Self {
+            leaf_capacity: superblock.page_size,
+            inner_capacity: superblock.inner_capacity,
+            max_key_len: superblock.max_key_len,
+            max_value_len: superblock.max_value_len,
         }
     }
 }
@@ -200,7 +205,7 @@ impl Tree {
     pub fn in_memory(config: TreeConfig) -> Result<Self, TreeError> {
         config.validate()?;
 
-        let store = MemStore::new(Superblock::from_config(&config))?;
+        let store = MemStore::new(Superblock::from(&config))?;
         Self::with_store(config, Box::new(store))
     }
 
@@ -210,7 +215,7 @@ impl Tree {
     /// The first leaf is dirty until [`Tree::flush`] writes it.
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         config.validate()?;
-        if *store.superblock() != Superblock::from_config(&config) {
+        if *store.superblock() != Superblock::from(&config) {
             return Err(TreeError::InvalidStore(
                 "store superblock differs from the configuration",
             ));

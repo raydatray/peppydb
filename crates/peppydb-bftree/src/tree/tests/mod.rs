@@ -31,7 +31,7 @@ fn value_of(key: &[u8]) -> Vec<u8> {
 /// A tree with no nodes; fixtures allocate nodes and set the root.
 fn empty_tree() -> Tree {
     let config = config(256, 128, 8, 16);
-    let store = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
     Tree {
         config,
         root: ChildRef::Leaf(LeafId::new(0).unwrap()),
