@@ -18,3 +18,16 @@ with variable-length separators and typed child references. The
 [tree structure](bf-tree-structure.md) composes them, and
 [leaf storage](bf-tree-leaf-store.md) gives leaves a durable home behind a
 page-store boundary.
+
+## Code layout
+
+The repository is one [Buck2](build-system.md) build for Rust and Go.
+
+| Component | Crates | Role |
+| --- | --- | --- |
+| BF-Tree | `bf-tree` (entry), `bf-tree-node-id`, `bf-tree-page`, `bf-tree-inner`, `bf-tree-store` | node identifiers, the shared page format, inner nodes, the page store, and the tree that composes them |
+| Executable | `bin/peppydb` | thin wiring |
+| Go services | `go/` | the planned gateway and placement driver; a hello-world program for now |
+
+Each component exposes one entry crate. Buck2 visibility rules stop other
+components from depending on internal crates, such as `bf-tree-page`.
