@@ -7,7 +7,26 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  buck2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Install the pinned components before Buck2 runs. Buck2 runs tests with
+      # a minimal environment; a missing component would make rustup install
+      # the toolchain inside parallel test actions.
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Install DotSlash
+        run: tools/ci/install-dotslash
+      - name: Check formatting
+        run: tools/fmt.sh
+      - name: Run clippy
+        run: tools/clippy.sh
+      - name: Run tests
+        run: tools/buck2 test //crates/... //bin/...
+
+  cargo:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
