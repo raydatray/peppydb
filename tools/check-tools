@@ -1,0 +1,24 @@
+#!/bin/sh
+# Fail if compilers on PATH differ from their pins. Buck2 takes rustc and go
+# from PATH, so a mismatch would silently change build output.
+set -eu
+cd "$(dirname "$0")/.."
+status=0
+
+want=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+have=$(rustc --version | awk '{print $2}')
+if [ "$have" != "$want" ]; then
+    echo "check-tools: rustc is $have, rust-toolchain.toml pins $want" >&2
+    status=1
+fi
+
+if [ -f go/go.mod ]; then
+    want=$(sed -n 's/^go \([0-9.]*\)$/\1/p' go/go.mod)
+    have=$(go env GOVERSION | sed 's/^go//')
+    if [ "$have" != "$want" ]; then
+        echo "check-tools: go is $have, go/go.mod pins $want" >&2
+        status=1
+    fi
+fi
+
+exit "$status"

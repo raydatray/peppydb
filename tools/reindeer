@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run reindeer at the pinned commit, installing it on first use.
+set -eu
+REV=150126ee2d4be8b1da63ed763cbb39f64c031cd5
+ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/peppydb/reindeer-$REV"
+if [ ! -x "$ROOT/bin/reindeer" ]; then
+    echo "tools/reindeer: installing reindeer $REV into $ROOT" >&2
+    cargo install --quiet --locked \
+        --git https://github.com/facebookincubator/reindeer --rev "$REV" \
+        --root "$ROOT" reindeer
+fi
+exec "$ROOT/bin/reindeer" "$@"

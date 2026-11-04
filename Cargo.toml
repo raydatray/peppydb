@@ -1,5 +1,7 @@
 [workspace]
 members = ["bin/peppydb", "crates/peppydb-bftree"]
+# Buck2 input only; see third-party/rust/Cargo.toml.
+exclude = ["third-party/rust"]
 default-members = ["bin/peppydb"]
 resolver = "3"
 
