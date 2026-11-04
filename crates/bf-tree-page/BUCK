@@ -1,0 +1,10 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+peppy_rust_library(
+    name = "bf-tree-page",
+    deps = [
+        "//third-party/rust:thiserror",
+        "//third-party/rust:zerocopy",
+    ],
+    visibility = ["//crates/peppydb-bftree:"],
+)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::page::layout::{HAS_FENCES, HIGH_INFINITY, LOW_INFINITY};
+use crate::layout::{HAS_FENCES, HIGH_INFINITY, LOW_INFINITY};
 
 struct Rng(u64);
 

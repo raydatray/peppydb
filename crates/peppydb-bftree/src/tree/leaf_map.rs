@@ -4,8 +4,8 @@ use zerocopy::FromBytes;
 
 use super::TreeError;
 use crate::store::PageStore;
-use crate::{Page, PageError};
 use bf_tree_node_id::LeafId;
+use bf_tree_page::{Page, PageError};
 
 /// The leaf mapping table: resolves a stable [`LeafId`] to the leaf's
 /// current bytes, loading them from the [`PageStore`] on first access.

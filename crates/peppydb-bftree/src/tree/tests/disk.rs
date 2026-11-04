@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::{FileStore, UpsertOutcome};
+use crate::FileStore;
+use bf_tree_page::UpsertOutcome;
 use zerocopy::IntoBytes;
 
 const VALUE_LEN: usize = 1000;

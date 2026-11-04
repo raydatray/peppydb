@@ -1,7 +1,7 @@
 //! Packed pages backed by caller-owned storage.
 //!
 //! ```
-//! use peppydb_bftree::{Page, RecordState};
+//! use bf_tree_page::{Page, RecordState};
 //!
 //! let mut storage = [0; 128];
 //! let page = Page::init(&mut storage).unwrap();
@@ -212,7 +212,7 @@ impl Page {
         Some(key.start..key.end + slot.value_len())
     }
 
-    pub(crate) fn check_capacity(capacity: usize) -> Result<(), PageError> {
+    pub fn check_capacity(capacity: usize) -> Result<(), PageError> {
         if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
             return Err(PageError::InvalidCapacity);
         }

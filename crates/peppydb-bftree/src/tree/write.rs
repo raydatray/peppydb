@@ -3,8 +3,8 @@ use zerocopy::FromBytes;
 use super::read::Path;
 use super::{Tree, TreeError};
 use crate::inner::{InnerError, InnerNode};
-use crate::{Page, PageError, RecordState, UpsertOutcome};
 use bf_tree_node_id::{ChildRef, LeafId};
+use bf_tree_page::{Page, PageError, RecordState, UpsertOutcome};
 
 /// The result of writing into one leaf without splitting it.
 enum LeafWrite {

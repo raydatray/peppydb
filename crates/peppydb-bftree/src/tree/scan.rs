@@ -1,8 +1,8 @@
 use std::iter::FusedIterator;
 
 use super::{Tree, TreeError};
-use crate::page::Iter;
-use crate::{Fence, RecordRef};
+use bf_tree_page::Iter;
+use bf_tree_page::{Fence, RecordRef};
 
 impl Tree {
     /// Iterate over records with keys in `[start, end)` in key order.

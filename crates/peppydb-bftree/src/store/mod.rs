@@ -33,8 +33,8 @@
 use zerocopy::little_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::Page;
 use bf_tree_node_id::LeafId;
+use bf_tree_page::Page;
 
 mod file;
 mod mem;

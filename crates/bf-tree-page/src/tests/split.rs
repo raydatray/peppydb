@@ -1,6 +1,6 @@
 use super::prefix::compressed_fixture;
 use super::*;
-use crate::page::split::{Merge, choose_split};
+use crate::split::{Merge, choose_split};
 
 type Owned = (Vec<u8>, RecordKind, Option<Vec<u8>>, bool);
 
