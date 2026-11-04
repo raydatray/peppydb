@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+bf-tree-inner = { path = "../bf-tree-inner" }
 bf-tree-node-id = { path = "../bf-tree-node-id" }
 bf-tree-page = { path = "../bf-tree-page" }
 thiserror.workspace = true

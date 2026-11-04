@@ -31,8 +31,8 @@
 
 use zerocopy::FromBytes;
 
-use crate::inner::{self, InnerError, InnerNode};
 use crate::store::{MemStore, PageStore, StoreError, Superblock};
+use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 use bf_tree_page::{Fence, Fences, Page, PageError};
 
@@ -109,7 +109,7 @@ impl TreeConfig {
             ));
         }
 
-        if inner::entry_size(self.max_key_len) > (self.inner_capacity - inner::HEADER_BYTES) / 2 {
+        if entry_size(self.max_key_len) > (self.inner_capacity - HEADER_BYTES) / 2 {
             return Err(TreeError::InvalidConfig(
                 "inner capacity must hold two maximum-length separators",
             ));

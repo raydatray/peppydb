@@ -2,5 +2,8 @@ load("//build:defs.bzl", "peppy_rust_library")
 
 peppy_rust_library(
     name = "bf-tree-node-id",
-    visibility = ["//crates/peppydb-bftree:"],
+    visibility = [
+        "//crates/bf-tree-inner:",
+        "//crates/peppydb-bftree:",
+    ],
 )

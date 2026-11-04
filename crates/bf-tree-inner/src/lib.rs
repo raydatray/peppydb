@@ -5,7 +5,7 @@
 //! its right child. All children of one node have the same kind.
 //!
 //! ```
-//! use peppydb_bftree::inner::InnerNode;
+//! use bf_tree_inner::InnerNode;
 //! use bf_tree_node_id::{ChildRef, LeafId};
 //!
 //! let leaf = |raw| ChildRef::Leaf(LeafId::new(raw).unwrap());
@@ -35,7 +35,7 @@ mod read;
 mod split;
 mod write;
 
-pub(crate) use layout::{HEADER_BYTES, entry_size};
+pub use layout::{HEADER_BYTES, entry_size};
 use layout::{Header, SLOT_BYTES, encode_kind};
 pub use read::{Iter, Route, SeparatorRef};
 pub use split::InnerSplit;
@@ -122,7 +122,7 @@ impl InnerNode {
         usize::from(self.header.remaining_size.get())
     }
 
-    pub(crate) fn check_capacity(capacity: usize) -> Result<(), InnerError> {
+    pub fn check_capacity(capacity: usize) -> Result<(), InnerError> {
         if !(64..=4096).contains(&capacity) || !capacity.is_multiple_of(64) {
             return Err(InnerError::InvalidCapacity);
         }

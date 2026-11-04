@@ -2,7 +2,7 @@ use zerocopy::FromBytes;
 
 use super::read::Path;
 use super::{Tree, TreeError};
-use crate::inner::{InnerError, InnerNode};
+use bf_tree_inner::{InnerError, InnerNode};
 use bf_tree_node_id::{ChildRef, LeafId};
 use bf_tree_page::{Page, PageError, RecordState, UpsertOutcome};
 
