@@ -4,7 +4,7 @@
 //! uniqueness, and reuse rules belong to the components that own the nodes.
 //!
 //! ```
-//! use peppydb_bftree::{ChildRef, InnerId, LeafId};
+//! use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 //!
 //! let leaf = LeafId::new(7).unwrap();
 //! assert_eq!(leaf.raw(), 7);
@@ -38,12 +38,12 @@ impl InnerId {
 
     /// The ID for a dense table or slot index. Indices never reach the
     /// reserved value, so this cannot fail for any real index.
-    pub(crate) fn from_index(index: usize) -> Self {
+    pub fn from_index(index: usize) -> Self {
         Self::new(index as u64).expect("indices stay below the reserved ID")
     }
 
     /// The dense index this ID addresses.
-    pub(crate) fn index(self) -> usize {
+    pub fn index(self) -> usize {
         usize::try_from(self.0).expect("IDs index in-memory tables")
     }
 }
@@ -68,12 +68,12 @@ impl LeafId {
 
     /// The ID for a dense table or slot index. Indices never reach the
     /// reserved value, so this cannot fail for any real index.
-    pub(crate) fn from_index(index: usize) -> Self {
+    pub fn from_index(index: usize) -> Self {
         Self::new(index as u64).expect("indices stay below the reserved ID")
     }
 
     /// The dense index this ID addresses.
-    pub(crate) fn index(self) -> usize {
+    pub fn index(self) -> usize {
         usize::try_from(self.0).expect("IDs index in-memory tables")
     }
 }

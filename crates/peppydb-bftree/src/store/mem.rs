@@ -1,5 +1,5 @@
 use super::{PageStore, StoreError, Superblock, check_buffer};
-use crate::LeafId;
+use bf_tree_node_id::LeafId;
 
 /// An in-memory [`PageStore`]: one boxed buffer per slot and a free list.
 ///

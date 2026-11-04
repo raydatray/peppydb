@@ -6,7 +6,8 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use super::InnerNode;
 use super::layout::{Slot, decode_child};
-use crate::{ChildRef, KeyRef};
+use crate::KeyRef;
+use bf_tree_node_id::ChildRef;
 
 /// The local child position and reference chosen for a query.
 ///

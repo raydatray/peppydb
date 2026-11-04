@@ -6,7 +6,7 @@
 //!
 //! ```
 //! use peppydb_bftree::inner::InnerNode;
-//! use peppydb_bftree::{ChildRef, LeafId};
+//! use bf_tree_node_id::{ChildRef, LeafId};
 //!
 //! let leaf = |raw| ChildRef::Leaf(LeafId::new(raw).unwrap());
 //!
@@ -28,7 +28,7 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::ChildRef;
+use bf_tree_node_id::ChildRef;
 
 mod layout;
 mod read;

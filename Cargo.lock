@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "bf-tree-node-id"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -67,6 +71,7 @@ version = "0.1.0"
 name = "peppydb-bftree"
 version = "0.1.0"
 dependencies = [
+ "bf-tree-node-id",
  "tempfile",
  "thiserror",
  "zerocopy",

@@ -5,7 +5,7 @@ use super::layout::{
     CHILD_BYTES, HEADER_BYTES, SLOT_BYTES, Slot, encode_kind, entry_size, stored_parts,
 };
 use super::{InnerError, InnerNode, SeparatorRef};
-use crate::ChildRef;
+use bf_tree_node_id::ChildRef;
 
 impl InnerNode {
     /// Insert a distinct, nonempty separator and the child to its right.

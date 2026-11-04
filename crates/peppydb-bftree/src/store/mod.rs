@@ -9,7 +9,8 @@
 //! whoever reads every slot, such as `Tree::open`.
 //!
 //! ```
-//! use peppydb_bftree::{LeafId, MemStore, PageStore, Superblock};
+//! use bf_tree_node_id::LeafId;
+//! use peppydb_bftree::{MemStore, PageStore, Superblock};
 //!
 //! let superblock = Superblock {
 //!     page_size: 256,
@@ -32,7 +33,8 @@
 use zerocopy::little_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::{LeafId, Page};
+use crate::Page;
+use bf_tree_node_id::LeafId;
 
 mod file;
 mod mem;
