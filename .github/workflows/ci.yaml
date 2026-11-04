@@ -34,7 +34,9 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Install DotSlash
+        run: tools/ci/install-dotslash
+      - name: Check generated Cargo manifests
+        run: tools/autocargo --check
       - name: Run tests
         run: cargo test --workspace --locked
