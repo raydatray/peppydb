@@ -2,6 +2,7 @@ go_library(
     name = "greet",
     package_name = "peppydb/go/internal/greet",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    deps = ["//third-party/go:golang.org/x/sync/errgroup"],
     visibility = ["//go/..."],
 )
 

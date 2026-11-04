@@ -122,6 +122,9 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   package directory has a `BUCK` file whose `package_name` is
   `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
   work directly in `go/`.
+- To add a Go dependency, import it, run `go get` and `go mod tidy` in `go/`,
+  run `tools/gobuckify-remote`, and add `//third-party/go:<import path>` to
+  the `deps` of the packages that use it.
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
@@ -136,6 +139,7 @@ tools/fmt.sh
 tools/clippy.sh
 tools/buck2 test //crates/... //bin/... //go/...
 tools/autocargo --check
+tools/gobuckify-remote --check
 cargo test --workspace --locked
 (cd go && go vet ./... && go test ./...)
 ```
