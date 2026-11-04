@@ -1,0 +1,22 @@
+# Direct crates.io dependencies of first-party Rust code. This is the only
+# place they are declared. After an edit, run `tools/buckify`, which resolves
+# Cargo.lock, regenerates BUCK with reindeer, and regenerates the Cargo
+# manifests.
+
+[workspace]
+
+[package]
+name = "rust-third-party"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Cargo requires a target; reindeer ignores it.
+[[bin]]
+name = "top"
+path = "top/main.rs"
+
+[dependencies]
+tempfile = "3.27.0"
+thiserror = "2"
+zerocopy = { version = "0.8", features = ["derive"] }

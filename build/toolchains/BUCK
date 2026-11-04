@@ -1,0 +1,60 @@
+# Toolchains used by the build. Compilers come from PATH: rustc, clippy-driver,
+# and rustdoc through rustup (pinned by rust-toolchain.toml), and the system C
+# compiler, which rustc uses as its linker.
+
+load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
+load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
+load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
+load("@prelude//toolchains:python.bzl", "remote_python_toolchain", "system_python_bootstrap_toolchain")
+load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
+load("@prelude//toolchains:rust.bzl", "system_rust_toolchain")
+
+system_rust_toolchain(
+    name = "rust",
+    default_edition = "2024",
+    # Was `[workspace.lints.rust] unsafe_code = "forbid"` in Cargo.toml.
+    rustc_flags = ["-Funsafe_code"],
+    # `cargo clippy -- -D warnings`. Also makes warnings fail normal builds.
+    deny_lints = ["warnings"],
+    doctests = True,
+    visibility = ["PUBLIC"],
+)
+
+system_cxx_toolchain(
+    name = "cxx",
+    visibility = ["PUBLIC"],
+)
+
+# Only referenced by an unconfigured select() branch in the prelude. Without
+# it, whole-repository `uquery` fails.
+alias(
+    name = "cxx_no_default_deps",
+    actual = ":cxx",
+    visibility = ["PUBLIC"],
+)
+
+system_genrule_toolchain(
+    name = "genrule",
+    visibility = ["PUBLIC"],
+)
+
+system_python_bootstrap_toolchain(
+    name = "python_bootstrap",
+    visibility = ["PUBLIC"],
+)
+
+remote_python_toolchain(
+    name = "python",
+    bootstrap = False,
+    visibility = ["PUBLIC"],
+)
+
+remote_test_execution_toolchain(
+    name = "remote_test_execution",
+    visibility = ["PUBLIC"],
+)
+
+noop_test_toolchain(
+    name = "test",
+    visibility = ["PUBLIC"],
+)

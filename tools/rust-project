@@ -1,0 +1,43 @@
+#!/usr/bin/env dotslash
+
+{
+  "name": "rust-project",
+  "platforms": {
+    "macos-aarch64": {
+      "size": 978391,
+      "hash": "blake3",
+      "digest": "ef611e3d53a6ebcd892e846fed41cedc22f081d8a311d07d1024ee51cc7967bd",
+      "format": "zst",
+      "path": "rust-project-aarch64-apple-darwin",
+      "providers": [
+        {
+          "url": "https://github.com/meta/buck2/releases/download/2026-11-01/rust-project-aarch64-apple-darwin.zst"
+        }
+      ]
+    },
+    "linux-x86_64": {
+      "size": 1207498,
+      "hash": "blake3",
+      "digest": "0c89222103e97526f139311c8ed24a534c036816d4328e2f3078fdaa132f2ed0",
+      "format": "zst",
+      "path": "rust-project-x86_64-unknown-linux-musl",
+      "providers": [
+        {
+          "url": "https://github.com/meta/buck2/releases/download/2026-11-01/rust-project-x86_64-unknown-linux-musl.zst"
+        }
+      ]
+    },
+    "linux-aarch64": {
+      "size": 1135169,
+      "hash": "blake3",
+      "digest": "a820b6758123d27ce386de6bd62d17b3e96915ce684c5c34250b6ab58b305089",
+      "format": "zst",
+      "path": "rust-project-aarch64-unknown-linux-musl",
+      "providers": [
+        {
+          "url": "https://github.com/meta/buck2/releases/download/2026-11-01/rust-project-aarch64-unknown-linux-musl.zst"
+        }
+      ]
+    }
+  }
+}

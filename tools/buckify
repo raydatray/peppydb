@@ -1,0 +1,5 @@
+#!/bin/sh
+# Regenerate third-party/rust/BUCK (and Cargo.lock) from third-party/rust/Cargo.toml.
+set -eu
+cd "$(dirname "$0")/.."
+tools/reindeer --third-party-dir third-party/rust buckify
