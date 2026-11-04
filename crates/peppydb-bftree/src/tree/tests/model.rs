@@ -80,7 +80,7 @@ fn run_on(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("model.bf");
-    let superblock = Superblock::from_config(&config);
+    let superblock = Superblock::from(&config);
     let mut tree = match backend {
         Backend::Memory => Tree::in_memory(config).unwrap(),
         Backend::MemoryReopen => {
@@ -294,7 +294,7 @@ fn baseline_file_store() {
     let value = [7; 16];
     let rate = |elapsed: std::time::Duration| COUNT as f64 / elapsed.as_secs_f64() / 1e6;
 
-    let store = FileStore::create(&path, Superblock::from_config(&config)).unwrap();
+    let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let started = Instant::now();
     for i in 0..COUNT {

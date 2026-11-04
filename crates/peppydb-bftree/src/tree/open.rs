@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use super::leaf_map::LeafMap;
 use super::store::InnerStore;
-use super::{Tree, TreeError};
+use super::{Tree, TreeConfig, TreeError};
 use crate::inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use crate::store::{PageStore, StoreError};
 use crate::{ChildRef, Fence, KeyRef, LeafId, Page, PageError};
@@ -28,7 +28,7 @@ impl Tree {
     /// missing, duplicated, or torn leaf is rejected rather than opened.
     /// Open is `O(leaves)` in I/O and memory; no leaf stays resident.
     pub fn open(mut store: Box<dyn PageStore>) -> Result<Self, TreeError> {
-        let config = store.superblock().to_config();
+        let config = TreeConfig::from(store.superblock());
         config.validate()?;
 
         let mut freed = Vec::new();

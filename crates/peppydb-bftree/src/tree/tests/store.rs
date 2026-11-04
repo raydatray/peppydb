@@ -96,7 +96,7 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
 #[test]
 fn corrupt_stored_leaves_are_reported_on_load() {
     let config = config(256, 128, 8, 16);
-    let mut store = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let mut store = MemStore::new(Superblock::from(&config)).unwrap();
     let id = store.alloc().unwrap();
     let mut bytes = vec![0; 256];
     Page::init_with_fences(
@@ -195,7 +195,7 @@ fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Counter, Counter) {
     let writes = Rc::new(Cell::new(0));
     let syncs = Rc::new(Cell::new(0));
     let store = Counting {
-        inner: Box::new(MemStore::new(Superblock::from_config(&config)).unwrap()),
+        inner: Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
         writes: writes.clone(),
         syncs: syncs.clone(),
     };
@@ -224,7 +224,7 @@ fn resident_pages(tree: &Tree) -> Vec<Vec<u8>> {
 fn create_checks_the_store_against_the_configuration() {
     let config = config(256, 128, 8, 16);
     let other = super::config(256, 128, 8, 8);
-    let store = MemStore::new(Superblock::from_config(&other)).unwrap();
+    let store = MemStore::new(Superblock::from(&other)).unwrap();
     assert_eq!(
         Tree::create(config, Box::new(store)).err(),
         Some(TreeError::InvalidStore(
@@ -232,7 +232,7 @@ fn create_checks_the_store_against_the_configuration() {
         ))
     );
 
-    let mut used = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let mut used = MemStore::new(Superblock::from(&config)).unwrap();
     used.alloc().unwrap();
     assert_eq!(
         Tree::create(config, Box::new(used)).err(),
@@ -240,13 +240,13 @@ fn create_checks_the_store_against_the_configuration() {
     );
 
     let bad = super::config(64, 64, 1, 0);
-    let store = MemStore::new(Superblock::from_config(&bad)).unwrap();
+    let store = MemStore::new(Superblock::from(&bad)).unwrap();
     assert!(matches!(
         Tree::create(bad, Box::new(store)),
         Err(TreeError::InvalidConfig(_))
     ));
 
-    let store = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
     let tree = Tree::create(config, Box::new(store)).unwrap();
     assert_eq!(tree.dirty_leaves(), 1);
     assert_eq!(tree.height(), 1);
@@ -294,9 +294,8 @@ fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
 fn memory_and_file_backends_store_identical_bytes() {
     let config = config(256, 128, 8, 16);
     let dir = tempfile::tempdir().unwrap();
-    let file =
-        FileStore::create(dir.path().join("tree.bf"), Superblock::from_config(&config)).unwrap();
-    let mem = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let file = FileStore::create(dir.path().join("tree.bf"), Superblock::from(&config)).unwrap();
+    let mem = MemStore::new(Superblock::from(&config)).unwrap();
     let mut trees = [
         Tree::create(config, Box::new(mem)).unwrap(),
         Tree::create(config, Box::new(file)).unwrap(),

@@ -115,7 +115,7 @@ fn built(n: u32, inner_capacity: usize) -> Tree {
         root: ChildRef::Leaf(leaf(0)),
         inner: InnerStore::new(config.inner_capacity),
         leaves: LeafMap::new(
-            Box::new(MemStore::new(Superblock::from_config(&config)).unwrap()),
+            Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
             [],
         ),
     };
@@ -253,7 +253,7 @@ fn assert_matches_model(tree: &Tree, model: &Model) {
 fn reopened_memory_trees_match_the_oracle_at_every_height() {
     let config = config(256, 128, 8, 16);
     for count in [0, 3, 60, 400, 3000] {
-        let store = MemStore::new(Superblock::from_config(&config)).unwrap();
+        let store = MemStore::new(Superblock::from(&config)).unwrap();
         let mut tree = Tree::create(config, Box::new(store)).unwrap();
         let mut model = Model::new();
         fill(&mut tree, &mut model, count);
@@ -281,7 +281,7 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
     let path = dir.path().join("tree.bf");
     let mut model = Model::new();
     let height = {
-        let store = FileStore::create(&path, Superblock::from_config(&config)).unwrap();
+        let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
         let mut tree = Tree::create(config, Box::new(store)).unwrap();
         fill(&mut tree, &mut model, 2000);
         tree.flush().unwrap();
@@ -305,7 +305,7 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
 #[test]
 fn unflushed_changes_are_lost_and_the_store_stays_consistent() {
     let config = config(256, 128, 8, 16);
-    let store = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 100);
@@ -338,7 +338,7 @@ fn unflushed_changes_are_lost_and_the_store_stays_consistent() {
 /// corruption fixtures.
 fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>) {
     let config = config(256, 128, 8, 16);
-    let store = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 200);
@@ -405,7 +405,7 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
 
     // An empty store, and a store whose only leaf is freed.
     let config = config(256, 128, 8, 16);
-    let empty = MemStore::new(Superblock::from_config(&config)).unwrap();
+    let empty = MemStore::new(Superblock::from(&config)).unwrap();
     assert_eq!(
         Tree::open(Box::new(empty)).err(),
         Some(TreeError::InconsistentLeaves("store holds no leaves"))
@@ -429,7 +429,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
 
     // Pages written under a wider key limit than the superblock claims.
     let narrow = config(256, 128, 4, 16);
-    let mut store = MemStore::new(Superblock::from_config(&narrow)).unwrap();
+    let mut store = MemStore::new(Superblock::from(&narrow)).unwrap();
     let id = store.alloc().unwrap();
     let mut bytes = vec![0; 256];
     let page = Page::init_with_fences(
@@ -449,7 +449,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
         ))
     );
 
-    let mut store = MemStore::new(Superblock::from_config(&narrow)).unwrap();
+    let mut store = MemStore::new(Superblock::from(&narrow)).unwrap();
     for (lower, upper) in [
         (None, Some([7u8; 8].as_slice())),
         (Some([7u8; 8].as_slice()), None),
