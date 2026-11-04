@@ -3,8 +3,8 @@ use std::ops::Bound;
 use std::time::Instant;
 
 use super::*;
-use crate::FileStore;
 use bf_tree_page::UpsertOutcome;
+use bf_tree_store::FileStore;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 

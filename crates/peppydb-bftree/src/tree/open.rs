@@ -12,10 +12,10 @@ use std::ops::Range;
 use super::leaf_map::LeafMap;
 use super::store::InnerStore;
 use super::{Tree, TreeConfig, TreeError};
-use crate::store::{PageStore, StoreError};
 use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, LeafId};
 use bf_tree_page::{Fence, KeyRef, Page, PageError};
+use bf_tree_store::{PageStore, StoreError};
 
 impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and

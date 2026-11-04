@@ -10,7 +10,7 @@
 //!
 //! ```
 //! use bf_tree_node_id::LeafId;
-//! use peppydb_bftree::{MemStore, PageStore, Superblock};
+//! use bf_tree_store::{MemStore, PageStore, Superblock};
 //!
 //! let superblock = Superblock {
 //!     page_size: 256,

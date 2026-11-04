@@ -4,6 +4,7 @@ peppy_rust_library(
     name = "bf-tree-node-id",
     visibility = [
         "//crates/bf-tree-inner:",
+        "//crates/bf-tree-store:",
         "//crates/peppydb-bftree:",
     ],
 )

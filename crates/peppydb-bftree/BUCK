@@ -6,6 +6,7 @@ peppy_rust_library(
         "//crates/bf-tree-inner:bf-tree-inner",
         "//crates/bf-tree-node-id:bf-tree-node-id",
         "//crates/bf-tree-page:bf-tree-page",
+        "//crates/bf-tree-store:bf-tree-store",
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],
