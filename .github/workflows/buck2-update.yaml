@@ -47,7 +47,8 @@ jobs:
         run: |
           tools/fmt.sh
           tools/clippy.sh
-          tools/buck2 test //crates/... //bin/...
+          tools/buck2 test //crates/... //bin/... //go/...
+          tools/autocargo --check
           cargo test --workspace --locked
 
       - name: Open a pull request

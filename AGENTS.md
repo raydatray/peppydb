@@ -101,9 +101,12 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 
 - Run `tools/buck2`, never a `buck2` from `PATH`. It is pinned with DotSlash
   (`brew install dotslash`).
-- Every tool is pinned. `tools/check-tools` fails if `rustc` or `go` on
-  `PATH` differ from their pins. Put rustup's `~/.cargo/bin` before any other
-  Rust installation on `PATH`.
+- Every tool is pinned. Buck2 downloads Go itself (`GO_VERSION` in
+  `build/toolchains/BUCK`), and `tools/fmt.sh` uses its `gofmt`.
+  `tools/check-tools` fails if `rustc` on `PATH` or `GO_VERSION` differ from
+  `rust-toolchain.toml` and `go/go.mod`. For the plain `go` command, use the
+  Go version in `go/go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
+  on `PATH`.
 - After changing a `BUCK` file, run `tools/autocargo` and commit the result.
 - To add, change, or remove a crates.io dependency, edit
   `third-party/rust/Cargo.toml`, run `tools/buckify`, and add
@@ -115,6 +118,10 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   may depend on it in `visibility`, and run `tools/autocargo`. Do not run
   `cargo init` or `cargo new`.
 - Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
+- Go code lives in the module at `go/` (`go/go.mod` is hand-written). Each
+  package directory has a `BUCK` file whose `package_name` is
+  `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
+  work directly in `go/`.
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
@@ -127,9 +134,10 @@ Before completing work that changes code or `BUCK` files, run:
 ```sh
 tools/fmt.sh
 tools/clippy.sh
-tools/buck2 test //crates/... //bin/...
+tools/buck2 test //crates/... //bin/... //go/...
 tools/autocargo --check
 cargo test --workspace --locked
+(cd go && go vet ./... && go test ./...)
 ```
 
 `buck2 test` reports one result per target; use `tools/buck2 run` on a
