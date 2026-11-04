@@ -1,6 +1,6 @@
 # 0009: Buck2 build, flat BF-Tree crates, and Go support
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [leaf storage](../design/bf-tree-leaf-store.md) (baseline commands change).
@@ -1021,21 +1021,68 @@ None. These items are confirmed during implementation:
 | Linux | CI on `ubuntu-latest` (x86_64) | All three jobs pass |
 | Documentation | Search for `cargo ` and `peppydb-bftree` in `AGENTS.md` and `docs/design/` | Only intentional references remain |
 
+### Outcomes
+
+Measured on macOS arm64 with the pinned tools (buck2 `2026-11-01`, rustc
+1.98.1, Go 1.27.0, reindeer `150126ee`).
+
+- **Test parity.** After every diff, Buck2 and Cargo ran 161 passed and 3
+  ignored unit tests, plus 6 doctests. Final split: `bf-tree-node-id` 3,
+  `bf-tree-page` 59, `bf-tree-inner` 30, `bf-tree-store` 18, and `bf-tree`
+  51 (3 ignored). Doctests run: a broken doctest failed `buck2 test`.
+- **Clippy and formatting.** Injected lints in library and test code made
+  `tools/clippy.sh` exit 1 and name all sites. A misformatted nested test
+  file, a misformatted Go file, and a wrong Go `package_name` each failed
+  `tools/fmt.sh`, and `--fix` restored the files.
+- **Visibility.** A dependency from `bin/peppydb` on `bf-tree-node-id`
+  failed with "is not visible". A probe binary used the whole public API
+  through `bf-tree` alone.
+- **Generated files.** Changing a `BUCK` dependency without regenerating
+  failed `tools/autocargo --check`. Adding a Go import without regenerating
+  failed `tools/gobuckify-remote --check`. The derived root `Cargo.lock` was
+  byte-identical to the hand-maintained one.
+- **Test selection.** The `rdeps` query selected exactly the changed crate
+  and its dependants for a file in each of the five crates.
+- **Release mode.** Debug and release builds were each cached: alternating
+  between them reran no actions. The same benchmark ran 0.11 M put/s in
+  debug and 2.19 M put/s in release. The page-cache baseline under
+  `@build/mode/release` (open ~34 ms, scan ~127 M records/s, warm get
+  ~1.95 M ops/s) is comparable to the recorded Cargo figures.
+- **Go.** `hello` built and ran under Buck2 with `golang.org/x/sync`
+  downloaded from the proxy and checked by sha256. `go vet` and `go test`
+  passed in `go/`. gopls resolved definitions and reported type errors both
+  with and without `tools/gopackagesdriver`. A `go.mod` above first-party
+  packages does not disturb Buck2's Go rules, so the fallback layout was not
+  needed. The linux-x86_64 configuration resolved for every target.
+- **Tool pins.** `tools/check-tools` rejected a different rustc.
+  `tools/update-buck2` round-tripped to a byte-identical pin.
+  `tools/ci/install-dotslash` verified and ran DotSlash 0.5.9. The update
+  workflow's release query returned the current pin, so it would open no
+  pull request.
+- **Clean build.** 696 actions in about 41 seconds for all Rust and Go
+  targets.
+- **Not yet run:** GitHub Actions itself. The first CI run is the first
+  x86_64 execution and the first use of the musl `buck2` build, and it will
+  show whether the repository allows the update workflow to open pull
+  requests. The scratch tests passed natively on linux/arm64.
+
 ## Progress
 
 - [x] Agree on the design and commit stack.
-- [ ] Diff 2: Buck2 build alongside Cargo, pinned with DotSlash.
-- [ ] Diff 3: Clippy, rustfmt, release mode, and CI.
-- [ ] Diff 4: Tree preparation (`Superblock` `From` conversions).
-- [ ] Diff 5: Generated Cargo manifests (`tools/autocargo`).
-- [ ] Diff 6: `bf-tree-node-id`.
-- [ ] Diff 7: `bf-tree-page`.
-- [ ] Diff 8: `bf-tree-inner`.
-- [ ] Diff 9: `bf-tree-store`.
-- [ ] Diff 10: `bf-tree`.
-- [ ] Diff 11: Go toolchain and hello-world program.
-- [ ] Diff 12: Generated third-party Go rules.
-- [ ] Diff 13: Documentation and stack-wide verification.
+- [x] Diff 2: Buck2 build alongside Cargo, pinned with DotSlash.
+- [x] Diff 3: Clippy, rustfmt, release mode, and CI.
+- [x] Diff 4: Tree preparation (`Superblock` `From` conversions).
+- [x] Diff 5: Generated Cargo manifests (`tools/autocargo`).
+- [x] Diff 6: `bf-tree-node-id`.
+- [x] Diff 7: `bf-tree-page`.
+- [x] Diff 8: `bf-tree-inner`.
+- [x] Diff 9: `bf-tree-store`.
+- [x] Diff 10: `bf-tree`.
+- [x] Diff 11: Go toolchain and hello-world program.
+- [x] Diff 12: Generated third-party Go rules.
+- [x] Diff 13: Documentation and stack-wide verification.
+- [ ] First CI run on GitHub (x86_64, musl `buck2`, the update workflow).
+  Not possible from the development machine; see Outcomes.
 
 ## Discoveries and plan changes
 
@@ -1074,6 +1121,26 @@ The design was tested in scratch repositories before this plan was written.
   dependants. A comment-only change does not stop the rebuild early, because
   rustc output contains source positions. Rust incremental compilation is
   off in the prelude, so each edit recompiles the whole crate.
+- **Found during implementation:**
+  - `docs/design/build-system.md` was trimmed during review to design
+    rationale only: why Buck2 is the source of truth, why the crate
+    boundaries exist and how they are enforced, why Cargo manifests are
+    generated but `go.mod` is not, why every tool is pinned, why build modes
+    are platforms, and why warnings and unsafe code are banned on the
+    toolchain. The layout, commands, CI requirements, and editor setup
+    listed for diff 13 were dropped, because `AGENTS.md`, the scripts, and
+    the workflow files already describe them.
+  - The `install-dotslash` GitHub action always installs the newest
+    DotSlash, so CI uses `tools/ci/install-dotslash` with a fixed version.
+  - The prelude's packages driver runs `buck2` from `PATH`, so
+    `tools/gopackagesdriver` puts the pinned `tools/buck2` first.
+  - `crates/bf-tree` re-exports `InnerError` and `PageError`, because
+    `TreeError` wraps them, and `LeafId`, `KeyRef`, `RecordRef`,
+    `RecordState`, and `RecordKind`, which appear in `TreeError` and scan
+    results. `bf-tree-node-id` and `bf-tree-page` are visible to the inner
+    and store crates as well as to `bf-tree`.
+  - Homebrew's `rustc` can shadow rustup's. `tools/check-tools` catches it,
+    and `AGENTS.md` says to put `~/.cargo/bin` first.
 - **Decisions made during planning:**
   - Crate names follow `<component>` and `<component>-<part>`.
   - No aliased re-exports. Imports name the defining crate, and `bf-tree`
