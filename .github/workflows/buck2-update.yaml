@@ -39,6 +39,11 @@ jobs:
         if: steps.release.outputs.changed == 'true'
         with:
           components: clippy, rustfmt, rust-src
+      - uses: actions/setup-go@v6
+        if: steps.release.outputs.changed == 'true'
+        with:
+          go-version-file: go/go.mod
+          cache: false
       - name: Install DotSlash
         if: steps.release.outputs.changed == 'true'
         run: tools/ci/install-dotslash
@@ -47,7 +52,8 @@ jobs:
         run: |
           tools/fmt.sh
           tools/clippy.sh
-          tools/buck2 test //crates/... //bin/...
+          tools/buck2 test //crates/... //bin/... //go/...
+          tools/autocargo --check
           cargo test --workspace --locked
 
       - name: Open a pull request

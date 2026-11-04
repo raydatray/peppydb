@@ -115,6 +115,10 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   may depend on it in `visibility`, and run `tools/autocargo`. Do not run
   `cargo init` or `cargo new`.
 - Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
+- Go code lives in the module at `go/` (`go/go.mod` is hand-written). Each
+  package directory has a `BUCK` file whose `package_name` is
+  `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
+  work directly in `go/`.
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
@@ -127,9 +131,10 @@ Before completing work that changes code or `BUCK` files, run:
 ```sh
 tools/fmt.sh
 tools/clippy.sh
-tools/buck2 test //crates/... //bin/...
+tools/buck2 test //crates/... //bin/... //go/...
 tools/autocargo --check
 cargo test --workspace --locked
+(cd go && go vet ./... && go test ./...)
 ```
 
 `buck2 test` reports one result per target; use `tools/buck2 run` on a

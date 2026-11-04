@@ -17,6 +17,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy, rustfmt, rust-src
+      # Buck2's Go toolchain uses `go` from PATH; go/go.mod pins the version.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
       - name: Install DotSlash
         run: tools/ci/install-dotslash
       - name: Check formatting
@@ -24,7 +29,7 @@ jobs:
       - name: Run clippy
         run: tools/clippy.sh
       - name: Run tests
-        run: tools/buck2 test //crates/... //bin/...
+        run: tools/buck2 test //crates/... //bin/... //go/...
 
   cargo:
     runs-on: ubuntu-latest
@@ -40,3 +45,17 @@ jobs:
         run: tools/autocargo --check
       - name: Run tests
         run: cargo test --workspace --locked
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Vet and test with the go command
+        working-directory: go
+        run: |
+          go vet ./...
+          go test ./...
