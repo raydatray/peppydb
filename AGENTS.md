@@ -94,20 +94,47 @@ The user may also explicitly ask to skip planning.
 - Keep important decisions, constraints, and rationale in the main document.
   Shared agent instructions belong in `AGENTS.md` or skills.
 
+## Build system
+Buck2 builds and tests everything. `BUCK` files are the source of truth; the
+`Cargo.toml` files outside `third-party/rust/` are generated. See
+`docs/plans/0009-buck2-build.md` until `docs/design/build-system.md` exists.
+
+- Run `tools/buck2`, never a `buck2` from `PATH`. It is pinned with DotSlash
+  (`brew install dotslash`).
+- Every tool is pinned. `tools/check-tools` fails if `rustc` or `go` on
+  `PATH` differ from their pins. Put rustup's `~/.cargo/bin` before any other
+  Rust installation on `PATH`.
+- After changing a `BUCK` file, run `tools/autocargo` and commit the result.
+- To add, change, or remove a crates.io dependency, edit
+  `third-party/rust/Cargo.toml`, run `tools/buckify`, and add
+  `//third-party/rust:<name>` to the `deps` of the targets that use it. If
+  reindeer warns about a build script, add
+  `third-party/rust/fixups/<crate>/fixups.toml` with `buildscript.run = true`.
+- To add a crate, create its directory with a `BUCK` file that uses
+  `peppy_rust_library` from `//build:defs.bzl`, list exactly the targets that
+  may depend on it in `visibility`, and run `tools/autocargo`. Do not run
+  `cargo init` or `cargo new`.
+- Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
+
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
-such as `cargo test -p peppydb-bftree` for the affected package.
+such as `tools/buck2 test //crates/peppydb-bftree/...`, or run one unit-test
+binary with a filter:
+`tools/buck2 run //crates/peppydb-bftree:peppydb-bftree-unittest -- open::`.
 
-Before completing work that changes Rust code, run:
+Before completing work that changes code or `BUCK` files, run:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+tools/fmt.sh
+tools/clippy.sh
+tools/buck2 test //crates/... //bin/...
+tools/autocargo --check
+cargo test --workspace --locked
 ```
 
-Use `--workspace` for workspace-wide checks: the default member is the
-executable, so plain `cargo test` does not cover every crate.
+`buck2 test` reports one result per target; use `tools/buck2 run` on a
+`-unittest` target to see individual tests. Clippy diagnostics do not fail
+`buck2 build`; `tools/clippy.sh` collects them and fails if there are any.
 
 Record additional algorithm-specific checks or benchmarks in the stack plan.
 Record verification outcomes in the plan and summarize them at handoff.
@@ -116,8 +143,6 @@ Report any unresolved failures or blockers explicitly.
 ## Version control
 - Use Sapling (`sl`) exclusively for version-control operations, including
   status, diffs, history, commits, and stack management.
-- Use `--vcs none` with `cargo init` and `cargo new` to avoid creating
-  additional repositories.
 
 ## Stacked diffs
 - Organize work as an ordered stack of small, cohesive commits. Each commit

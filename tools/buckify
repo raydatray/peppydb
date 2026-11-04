@@ -1,5 +1,8 @@
 #!/bin/sh
-# Regenerate third-party/rust/BUCK (and Cargo.lock) from third-party/rust/Cargo.toml.
+# Apply a change to third-party/rust/Cargo.toml: resolve Cargo.lock and
+# regenerate third-party/rust/BUCK with reindeer, then regenerate the Cargo
+# manifests from the Buck2 graph.
 set -eu
 cd "$(dirname "$0")/.."
 tools/reindeer --third-party-dir third-party/rust buckify
+tools/autocargo
