@@ -1,6 +1,6 @@
 # 0009: Buck2 build, flat BF-Tree crates, and Go support
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [leaf storage](../design/bf-tree-leaf-store.md) (baseline commands change).
@@ -234,13 +234,14 @@ locally and in CI. Tools that only fetch or unpack files (`curl`, `unzip`,
 | `rust-project` | release `2026-11-01` | DotSlash file `tools/rust-project` | with `buck2` |
 | `rustc`, `clippy`, `rustfmt`, `rustdoc`, `rust-src` | `1.98.1` | `rust-toolchain.toml`; rustup selects it | edit the file |
 | reindeer | commit `150126ee2d4be8b1da63ed763cbb39f64c031cd5` | `tools/reindeer` installs that commit with `cargo install --locked` into `~/.cache/peppydb/reindeer-<commit>` on first use | edit the commit in `tools/reindeer` |
-| Go | `1.27.0` | `go 1.27.0` in `go/go.mod`; CI reads it with `actions/setup-go`; `tools/check-tools` compares `go version` locally | edit `go/go.mod` |
+| Go | `1.27.0` | Buck2 downloads the official release (`http_archive`, sha256-pinned) named by `GO_VERSION` in `build/toolchains/BUCK`; `go/go.mod` states the same version, and `tools/check-tools` compares them | edit `GO_VERSION`, the three checksums, and `go/go.mod` |
 | DotSlash | `v0.5.9` | CI downloads the release archive and checks its sha256; locally `brew install dotslash` | edit the version and checksums in `ci.yaml` |
 
 `tools/check-tools` runs at the start of `tools/fmt.sh` and `tools/clippy.sh`.
-It fails with a clear message when `go` or `rustc` on `PATH` differ from their
-pins. Buck2 uses both from `PATH`, so a silent mismatch would change build
-output.
+It fails with a clear message when `rustc` on `PATH` or `GO_VERSION` differ
+from their pins. A `go` on `PATH` is not checked: Buck2 does not use it, and
+`tools/fmt.sh` runs the pinned distribution's `gofmt`. Buck2 uses `rustc` from `PATH`, so a silent
+mismatch would change build output.
 
 `tools/buckify` is the one command for third-party Rust changes. It runs
 `tools/reindeer --third-party-dir third-party/rust buckify`, then
@@ -595,8 +596,7 @@ jobs:
       - run: cd go && go vet ./... && go test ./...
 ```
 
-The `buck2` job also needs `actions/setup-go` from diff 11, because Buck2's
-Go toolchain uses `go` from `PATH`.
+Only the `go` job needs `actions/setup-go`. Buck2 downloads its own Go.
 
 The Rust components must be installed before Buck2 runs, in rustup's default
 location. Buck2 runs tests with a minimal environment. If a component is
@@ -750,9 +750,10 @@ RELEASE = ["-Copt-level=3", "-Cdebug-assertions=off", "-Coverflow-checks=off"]
 - **Compilers are not hermetic.**
   - `rustc`, `clippy-driver`, and `rustdoc` come from rustup, pinned by
     `rust-toolchain.toml`.
-  - `go` comes from `PATH`. `go/go.mod` states `go 1.27.0`, CI installs that
-    version with `actions/setup-go` (`go-version-file: go/go.mod`), and
-    `tools/check-tools` compares the local version.
+  - Go is hermetic for Buck2: the prelude's `go_distr` and `go_toolchain`
+    rules use the official release, downloaded and pinned by sha256. The `go`
+    command outside Buck2 uses `go` from `PATH`; the `go` CI job installs the
+    version in `go/go.mod`.
   - `go/go.mod` has no `toolchain` line. With such a line, the `go` command
     could download a toolchain inside a Buck2 action.
   - `buck2` itself is pinned by DotSlash.
@@ -932,7 +933,7 @@ Diff 13 finishes the documentation.
   - `gofmt -l` and the `package_name` check in `tools/fmt.sh`.
   - A `go vet` step.
   - `tools/gopackagesdriver`.
-  - `actions/setup-go` in the `buck2` job, and the new `go` CI job.
+  - The new `go` CI job, with `actions/setup-go`.
 - **Verification:**
   - `tools/buck2 run //go/cmd/hello:hello` prints its greeting, and
     `tools/buck2 test //go/...` passes.
@@ -1021,21 +1022,68 @@ None. These items are confirmed during implementation:
 | Linux | CI on `ubuntu-latest` (x86_64) | All three jobs pass |
 | Documentation | Search for `cargo ` and `peppydb-bftree` in `AGENTS.md` and `docs/design/` | Only intentional references remain |
 
+### Outcomes
+
+Measured on macOS arm64 with the pinned tools (buck2 `2026-11-01`, rustc
+1.98.1, Go 1.27.0, reindeer `150126ee`).
+
+- **Test parity.** After every diff, Buck2 and Cargo ran 161 passed and 3
+  ignored unit tests, plus 6 doctests. Final split: `bf-tree-node-id` 3,
+  `bf-tree-page` 59, `bf-tree-inner` 30, `bf-tree-store` 18, and `bf-tree`
+  51 (3 ignored). Doctests run: a broken doctest failed `buck2 test`.
+- **Clippy and formatting.** Injected lints in library and test code made
+  `tools/clippy.sh` exit 1 and name all sites. A misformatted nested test
+  file, a misformatted Go file, and a wrong Go `package_name` each failed
+  `tools/fmt.sh`, and `--fix` restored the files.
+- **Visibility.** A dependency from `bin/peppydb` on `bf-tree-node-id`
+  failed with "is not visible". A probe binary used the whole public API
+  through `bf-tree` alone.
+- **Generated files.** Changing a `BUCK` dependency without regenerating
+  failed `tools/autocargo --check`. Adding a Go import without regenerating
+  failed `tools/gobuckify-remote --check`. The derived root `Cargo.lock` was
+  byte-identical to the hand-maintained one.
+- **Test selection.** The `rdeps` query selected exactly the changed crate
+  and its dependants for a file in each of the five crates.
+- **Release mode.** Debug and release builds were each cached: alternating
+  between them reran no actions. The same benchmark ran 0.11 M put/s in
+  debug and 2.19 M put/s in release. The page-cache baseline under
+  `@build/mode/release` (open ~34 ms, scan ~127 M records/s, warm get
+  ~1.95 M ops/s) is comparable to the recorded Cargo figures.
+- **Go.** `hello` built and ran under Buck2 with `golang.org/x/sync`
+  downloaded from the proxy and checked by sha256. `go vet` and `go test`
+  passed in `go/`. gopls resolved definitions and reported type errors both
+  with and without `tools/gopackagesdriver`. A `go.mod` above first-party
+  packages does not disturb Buck2's Go rules, so the fallback layout was not
+  needed. The linux-x86_64 configuration resolved for every target.
+- **Tool pins.** `tools/check-tools` rejected a different rustc.
+  `tools/update-buck2` round-tripped to a byte-identical pin.
+  `tools/ci/install-dotslash` verified and ran DotSlash 0.5.9. The update
+  workflow's release query returned the current pin, so it would open no
+  pull request.
+- **Clean build.** 696 actions in about 41 seconds for all Rust and Go
+  targets.
+- **Not yet run:** GitHub Actions itself. The first CI run is the first
+  x86_64 execution and the first use of the musl `buck2` build, and it will
+  show whether the repository allows the update workflow to open pull
+  requests. The scratch tests passed natively on linux/arm64.
+
 ## Progress
 
 - [x] Agree on the design and commit stack.
-- [ ] Diff 2: Buck2 build alongside Cargo, pinned with DotSlash.
-- [ ] Diff 3: Clippy, rustfmt, release mode, and CI.
-- [ ] Diff 4: Tree preparation (`Superblock` `From` conversions).
-- [ ] Diff 5: Generated Cargo manifests (`tools/autocargo`).
-- [ ] Diff 6: `bf-tree-node-id`.
-- [ ] Diff 7: `bf-tree-page`.
-- [ ] Diff 8: `bf-tree-inner`.
-- [ ] Diff 9: `bf-tree-store`.
-- [ ] Diff 10: `bf-tree`.
-- [ ] Diff 11: Go toolchain and hello-world program.
-- [ ] Diff 12: Generated third-party Go rules.
-- [ ] Diff 13: Documentation and stack-wide verification.
+- [x] Diff 2: Buck2 build alongside Cargo, pinned with DotSlash.
+- [x] Diff 3: Clippy, rustfmt, release mode, and CI.
+- [x] Diff 4: Tree preparation (`Superblock` `From` conversions).
+- [x] Diff 5: Generated Cargo manifests (`tools/autocargo`).
+- [x] Diff 6: `bf-tree-node-id`.
+- [x] Diff 7: `bf-tree-page`.
+- [x] Diff 8: `bf-tree-inner`.
+- [x] Diff 9: `bf-tree-store`.
+- [x] Diff 10: `bf-tree`.
+- [x] Diff 11: Go toolchain and hello-world program.
+- [x] Diff 12: Generated third-party Go rules.
+- [x] Diff 13: Documentation and stack-wide verification.
+- [ ] First CI run on GitHub (x86_64, musl `buck2`, the update workflow).
+  Not possible from the development machine; see Outcomes.
 
 ## Discoveries and plan changes
 
@@ -1074,6 +1122,51 @@ The design was tested in scratch repositories before this plan was written.
   dependants. A comment-only change does not stop the rebuild early, because
   rustc output contains source positions. Rust incremental compilation is
   off in the prelude, so each edit recompiles the whole crate.
+- **Found during implementation:**
+  - The first CI run on linux/x86_64 failed to link the Go test:
+    `sync/atomic: invalid reference to internal/runtime/atomic.Load`. The
+    prelude passes `-std` to the assembler for standard-library packages
+    only when the toolchain reports Go 1.27 or later, and
+    `system_go_toolchain` reports no version. Go 1.27 requires the flag on
+    amd64; arm64 has no affected assembly, so the Mac and linux/arm64 runs
+    passed. Reproduced locally with `go build` on linux/amd64 and the flag
+    removed. Fixed in diff 11 by replacing `system_go_toolchain` (Go from
+    `PATH`, no version) with the prelude's `go_distr` and `go_toolchain`
+    rules over the official Go release, downloaded per host and pinned by
+    sha256. `go_distr` takes the version, so the prelude passes `-std`, and
+    Buck2 builds no longer depend on a `go` on `PATH`; the Buck2 CI jobs
+    dropped `setup-go`. Verified by building and testing with no `go` on
+    `PATH`: all 35 standard-library assembler actions received `-std`. A
+    first fix wrapped the system toolchain to add the version; it needed a
+    copy of all 26 `GoToolchainInfo` fields and was replaced. Cross-compiling
+    Go from macOS to Linux now reaches cgo in the standard library and stops
+    there, because macOS has no Linux C headers. Native builds are
+    unaffected.
+  - The next CI run failed in `tools/check-tools`: GitHub's runner image has
+    Go 1.24.13 on `PATH`, and the check still compared it with `go/go.mod`.
+    Buck2 no longer uses that `go`, so the comparison was removed, and
+    `tools/fmt.sh` now runs `gofmt` from the pinned download
+    (`toolchains//:go-root`). Verified with a fake Go 1.24.13 first on
+    `PATH`.
+  - `docs/design/build-system.md` was trimmed during review to design
+    rationale only: why Buck2 is the source of truth, why the crate
+    boundaries exist and how they are enforced, why Cargo manifests are
+    generated but `go.mod` is not, why every tool is pinned, why build modes
+    are platforms, and why warnings and unsafe code are banned on the
+    toolchain. The layout, commands, CI requirements, and editor setup
+    listed for diff 13 were dropped, because `AGENTS.md`, the scripts, and
+    the workflow files already describe them.
+  - The `install-dotslash` GitHub action always installs the newest
+    DotSlash, so CI uses `tools/ci/install-dotslash` with a fixed version.
+  - The prelude's packages driver runs `buck2` from `PATH`, so
+    `tools/gopackagesdriver` puts the pinned `tools/buck2` first.
+  - `crates/bf-tree` re-exports `InnerError` and `PageError`, because
+    `TreeError` wraps them, and `LeafId`, `KeyRef`, `RecordRef`,
+    `RecordState`, and `RecordKind`, which appear in `TreeError` and scan
+    results. `bf-tree-node-id` and `bf-tree-page` are visible to the inner
+    and store crates as well as to `bf-tree`.
+  - Homebrew's `rustc` can shadow rustup's. `tools/check-tools` catches it,
+    and `AGENTS.md` says to put `~/.cargo/bin` first.
 - **Decisions made during planning:**
   - Crate names follow `<component>` and `<component>-<part>`.
   - No aliased re-exports. Imports name the defining crate, and `bf-tree`

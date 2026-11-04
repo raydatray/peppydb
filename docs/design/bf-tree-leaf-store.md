@@ -202,11 +202,15 @@ The write-ahead log and crash atomicity are separate components. The page header
 ## Baselines
 
 Informational and single-threaded, on an Apple laptop with 48 GiB of RAM and
-an internal SSD. Both live in the tree tests as ignored benchmarks.
+an internal SSD. Both live in the tree tests as ignored benchmarks. They were
+measured with `cargo test --release` before the
+[Buck2 build](build-system.md). The Buck2 release platform uses the same
+optimization flags, and a check after the move measured comparable
+figures.
 
 ### Page cache (`baseline_file_store`)
 
-`cargo test --release -p peppydb-bftree -- --ignored --nocapture baseline_file`:
+`tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline_file`:
 one million random 8-byte keys with 16-byte values, default configuration,
 8692 leaves, 34 MiB file, written and reopened immediately, so every read is
 a page-cache hit.
@@ -225,8 +229,8 @@ The in-memory `Tree::in_memory` baseline is unchanged by the mapping table: abou
 
 ### Larger than memory (`disk_baseline`)
 
-`PEPPYDB_DISK_GIB=96 cargo test --release -p peppydb-bftree -- --ignored
---nocapture disk_baseline`. Nothing evicts yet, so a tree cannot be
+`PEPPYDB_DISK_GIB=96 tools/buck2 run @build/mode/release
+//crates/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline`. Nothing evicts yet, so a tree cannot be
 built through `put` beyond RAM; the benchmark writes the file directly in
 the on-disk format (sorted keys, three 1000-byte records per 4 KiB leaf),
 opens it, and measures 200,000 random gets, 5,000 scans of 100 records,

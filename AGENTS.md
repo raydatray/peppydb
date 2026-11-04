@@ -97,7 +97,7 @@ The user may also explicitly ask to skip planning.
 ## Build system
 Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 `Cargo.toml` files outside `third-party/rust/` are generated. See
-`docs/plans/0009-buck2-build.md` until `docs/design/build-system.md` exists.
+`docs/design/build-system.md`.
 
 - Run `tools/buck2`, never a `buck2` from `PATH`. It is pinned with DotSlash
   (`brew install dotslash`).
@@ -128,9 +128,9 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
-such as `tools/buck2 test //crates/peppydb-bftree/...`, or run one unit-test
+such as `tools/buck2 test //crates/bf-tree/...`, or run one unit-test
 binary with a filter:
-`tools/buck2 run //crates/peppydb-bftree:peppydb-bftree-unittest -- open::`.
+`tools/buck2 run //crates/bf-tree:bf-tree-unittest -- open::`.
 
 Before completing work that changes code or `BUCK` files, run:
 
