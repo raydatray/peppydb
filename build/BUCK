@@ -24,3 +24,15 @@ platform(
     deps = ["prelude//platforms:default"],
     visibility = ["PUBLIC"],
 )
+
+# Linux on x86_64, as on GitHub's runners. Used to check from other hosts that
+# the configured graph (including platform-specific Go dependencies) resolves.
+platform(
+    name = "linux-x86_64",
+    constraint_values = [
+        "config//cpu/constraints:x86_64",
+        "config//os/constraints:linux",
+    ],
+    deps = ["prelude//platforms:default"],
+    visibility = ["PUBLIC"],
+)
