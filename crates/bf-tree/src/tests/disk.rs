@@ -9,7 +9,7 @@
 //! cache cannot be dropped without root on macOS.
 //!
 //! ```sh
-//! PEPPYDB_DISK_GIB=96 cargo test --release -p peppydb-bftree -- --ignored --nocapture disk_baseline
+//! PEPPYDB_DISK_GIB=96 tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline
 //! ```
 //!
 //! `PEPPYDB_DISK_DIR` chooses where the file lives (default: a temporary

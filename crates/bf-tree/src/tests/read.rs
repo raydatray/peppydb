@@ -1,5 +1,5 @@
 use super::*;
-use crate::tree::invariants::InvariantError;
+use crate::invariants::InvariantError;
 
 fn leaf(raw: u64) -> LeafId {
     LeafId::new(raw).unwrap()

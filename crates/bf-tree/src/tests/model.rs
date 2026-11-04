@@ -242,7 +242,7 @@ fn reversed_ranges_are_rejected() {
 }
 
 /// An informational single-threaded baseline, not a gate. Run with
-/// `cargo test --release -p peppydb-bftree -- --ignored --nocapture baseline`.
+/// `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`.
 #[test]
 #[ignore = "informational benchmark"]
 fn baseline_throughput() {
@@ -283,7 +283,7 @@ fn baseline_throughput() {
 
 /// An informational `FileStore` baseline: flush, open, and cold versus warm
 /// point lookups. Run with
-/// `cargo test --release -p peppydb-bftree -- --ignored --nocapture baseline_file`.
+/// `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline_file`.
 #[test]
 #[ignore = "informational benchmark"]
 fn baseline_file_store() {

@@ -9,5 +9,5 @@ peppy_rust_library(
         "//third-party/rust:zerocopy",
     ],
     test_deps = ["//third-party/rust:tempfile"],
-    visibility = ["//crates/peppydb-bftree:"],
+    visibility = ["//crates/bf-tree:"],
 )

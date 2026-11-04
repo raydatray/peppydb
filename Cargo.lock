@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "bf-tree"
+version = "0.1.0"
+dependencies = [
+ "bf-tree-inner",
+ "bf-tree-node-id",
+ "bf-tree-page",
+ "bf-tree-store",
+ "tempfile",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
 name = "bf-tree-inner"
 version = "0.1.0"
 dependencies = [
@@ -95,19 +108,6 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "peppydb"
 version = "0.1.0"
-
-[[package]]
-name = "peppydb-bftree"
-version = "0.1.0"
-dependencies = [
- "bf-tree-inner",
- "bf-tree-node-id",
- "bf-tree-page",
- "bf-tree-store",
- "tempfile",
- "thiserror",
- "zerocopy",
-]
 
 [[package]]
 name = "proc-macro2"
