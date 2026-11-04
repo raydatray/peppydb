@@ -53,7 +53,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
-          cache: false
+          cache-dependency-path: go/go.sum
+      - name: Check generated third-party Go rules
+        run: tools/gobuckify-remote --check
       - name: Vet and test with the go command
         working-directory: go
         run: |

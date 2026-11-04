@@ -54,6 +54,7 @@ jobs:
           tools/clippy.sh
           tools/buck2 test //crates/... //bin/... //go/...
           tools/autocargo --check
+          tools/gobuckify-remote --check
           cargo test --workspace --locked
 
       - name: Open a pull request
