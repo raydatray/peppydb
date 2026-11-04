@@ -6,7 +6,7 @@ use std::rc::Rc;
 use zerocopy::IntoBytes;
 
 use super::*;
-use crate::FileStore;
+use bf_tree_store::FileStore;
 
 fn leaf(raw: u64) -> LeafId {
     LeafId::new(raw).unwrap()

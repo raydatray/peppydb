@@ -1,8 +1,8 @@
 //! The tiling check and the bulk build of inner levels, as pure functions.
 
 use super::*;
-use crate::FileStore;
 use crate::tree::open::{LeafBounds, build_inner, tile};
+use bf_tree_store::FileStore;
 use zerocopy::IntoBytes;
 
 fn leaf(raw: u64) -> LeafId {

@@ -25,6 +25,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bf-tree-store"
+version = "0.1.0"
+dependencies = [
+ "bf-tree-node-id",
+ "bf-tree-page",
+ "tempfile",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -92,6 +103,7 @@ dependencies = [
  "bf-tree-inner",
  "bf-tree-node-id",
  "bf-tree-page",
+ "bf-tree-store",
  "tempfile",
  "thiserror",
  "zerocopy",

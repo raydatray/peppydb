@@ -3,9 +3,9 @@ use std::cell::{Cell, OnceCell};
 use zerocopy::FromBytes;
 
 use super::TreeError;
-use crate::store::PageStore;
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
+use bf_tree_store::PageStore;
 
 /// The leaf mapping table: resolves a stable [`LeafId`] to the leaf's
 /// current bytes, loading them from the [`PageStore`] on first access.

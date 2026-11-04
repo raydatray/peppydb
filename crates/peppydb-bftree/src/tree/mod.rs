@@ -31,10 +31,10 @@
 
 use zerocopy::FromBytes;
 
-use crate::store::{MemStore, PageStore, StoreError, Superblock};
 use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 use bf_tree_page::{Fence, Fences, Page, PageError};
+use bf_tree_store::{MemStore, PageStore, StoreError, Superblock};
 
 #[cfg(test)]
 mod invariants;
