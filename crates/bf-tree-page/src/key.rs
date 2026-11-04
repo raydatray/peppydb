@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 /// value.
 ///
 /// ```
-/// use peppydb_bftree::KeyRef;
+/// use bf_tree_page::KeyRef;
 ///
 /// let key = KeyRef::from(b"acct/123".as_slice());
 /// assert_eq!(key.len(), 8);
@@ -24,7 +24,7 @@ pub struct KeyRef<'p> {
 }
 
 impl<'p> KeyRef<'p> {
-    pub(crate) fn new(prefix: &'p [u8], suffix: &'p [u8]) -> Self {
+    pub fn new(prefix: &'p [u8], suffix: &'p [u8]) -> Self {
         Self { prefix, suffix }
     }
 

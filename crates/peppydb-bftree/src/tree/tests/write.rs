@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::UpsertOutcome;
+use bf_tree_page::UpsertOutcome;
 use zerocopy::IntoBytes;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
