@@ -1,5 +1,5 @@
 use super::*;
-use crate::tree::store::InnerStore;
+use crate::store::InnerStore;
 
 #[test]
 fn defaults_validate() {

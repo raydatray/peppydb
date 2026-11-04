@@ -1,7 +1,9 @@
 load("//build:defs.bzl", "peppy_rust_library")
 
+# The BF-Tree component's entry crate. Other components depend on this crate
+# only; the bf-tree-* crates are internal.
 peppy_rust_library(
-    name = "peppydb-bftree",
+    name = "bf-tree",
     deps = [
         "//crates/bf-tree-inner:bf-tree-inner",
         "//crates/bf-tree-node-id:bf-tree-node-id",

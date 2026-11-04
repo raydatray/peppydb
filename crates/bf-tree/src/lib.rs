@@ -6,7 +6,7 @@
 //! access and kept resident.
 //!
 //! ```
-//! use peppydb_bftree::{Tree, TreeConfig, UpsertOutcome};
+//! use bf_tree::{Tree, TreeConfig, UpsertOutcome};
 //!
 //! let mut tree = Tree::in_memory(TreeConfig::default()).unwrap();
 //! for i in 0..1000u32 {
@@ -31,10 +31,16 @@
 
 use zerocopy::FromBytes;
 
-use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
-use bf_tree_node_id::{ChildRef, InnerId, LeafId};
-use bf_tree_page::{Fence, Fences, Page, PageError};
-use bf_tree_store::{MemStore, PageStore, StoreError, Superblock};
+use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
+use bf_tree_node_id::{ChildRef, InnerId};
+use bf_tree_page::{Fence, Fences, Page};
+
+// Types from the internal crates that appear in this crate's public API, so
+// that callers need no other dependency. Other items stay internal.
+pub use bf_tree_inner::InnerError;
+pub use bf_tree_node_id::LeafId;
+pub use bf_tree_page::{KeyRef, PageError, RecordKind, RecordRef, RecordState, UpsertOutcome};
+pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
 
 #[cfg(test)]
 mod invariants;

@@ -9,6 +9,6 @@ peppy_rust_library(
     visibility = [
         "//crates/bf-tree-inner:",
         "//crates/bf-tree-store:",
-        "//crates/peppydb-bftree:",
+        "//crates/bf-tree:",
     ],
 )
