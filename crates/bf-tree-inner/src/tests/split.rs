@@ -1,5 +1,5 @@
 use super::*;
-use crate::inner::split::choose_promotion;
+use crate::split::choose_promotion;
 
 fn entry_bytes(key: &[u8]) -> usize {
     8 + key.len().saturating_sub(4) + 8

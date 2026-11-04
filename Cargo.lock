@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "bf-tree-inner"
+version = "0.1.0"
+dependencies = [
+ "bf-tree-node-id",
+ "bf-tree-page",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
 name = "bf-tree-node-id"
 version = "0.1.0"
 
@@ -79,6 +89,7 @@ version = "0.1.0"
 name = "peppydb-bftree"
 version = "0.1.0"
 dependencies = [
+ "bf-tree-inner",
  "bf-tree-node-id",
  "bf-tree-page",
  "tempfile",
