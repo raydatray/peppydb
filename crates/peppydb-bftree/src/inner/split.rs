@@ -4,7 +4,7 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use super::layout::{HEADER_BYTES, entry_size, stored_parts};
 use super::{InnerError, InnerNode, SeparatorRef};
-use crate::ChildRef;
+use bf_tree_node_id::ChildRef;
 
 /// The result of [`InnerNode::split_with_insert`].
 #[derive(Debug)]

@@ -1,4 +1,4 @@
-use crate::InnerId;
+use bf_tree_node_id::InnerId;
 
 /// Fixed-capacity, zero-initialized inner-node buffers addressed by
 /// [`InnerId`].

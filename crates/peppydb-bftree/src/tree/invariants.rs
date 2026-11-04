@@ -1,5 +1,6 @@
 use super::Tree;
-use crate::{ChildRef, Fence, Fences, InnerId, KeyRef, LeafId};
+use crate::{Fence, Fences, KeyRef};
+use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 
 /// A structural invariant violation found by [`Tree::check_invariants`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

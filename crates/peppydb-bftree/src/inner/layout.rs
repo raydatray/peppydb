@@ -3,7 +3,8 @@ use std::ops::Range;
 use zerocopy::little_endian::{U16, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::{ChildRef, InnerId, KeyRef, LeafId};
+use crate::KeyRef;
+use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 
 pub(crate) const HEADER_BYTES: usize = 16;
 pub(super) const SLOT_BYTES: usize = 8;

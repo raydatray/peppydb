@@ -4,7 +4,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use super::{ENCODED_BYTES, PageStore, StoreError, Superblock, check_buffer};
-use crate::LeafId;
+use bf_tree_node_id::LeafId;
 
 /// A [`PageStore`] over one file: the superblock page followed by the slots.
 ///

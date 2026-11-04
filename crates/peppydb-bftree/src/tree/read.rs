@@ -1,5 +1,6 @@
 use super::{Tree, TreeError};
-use crate::{ChildRef, InnerId, LeafId, RecordState};
+use crate::RecordState;
+use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 
 /// Inner nodes visited from the root to a leaf, each with the child index
 /// that the descent took. The path holds IDs, never node references, so a

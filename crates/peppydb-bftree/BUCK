@@ -3,6 +3,7 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "peppydb-bftree",
     deps = [
+        "//crates/bf-tree-node-id:bf-tree-node-id",
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],

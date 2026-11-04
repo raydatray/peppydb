@@ -1,5 +1,5 @@
 use super::*;
-use crate::{InnerId, LeafId};
+use bf_tree_node_id::{InnerId, LeafId};
 
 mod layout;
 mod model;
