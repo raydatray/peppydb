@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Pin tools/buck2 and tools/rust-project to a buck2 release.
+
+Usage: tools/update-buck2 <tag>    (for example 2026-11-01)
+
+Copies the release's own DotSlash files and keeps only the platforms
+peppydb supports. The prelude ships inside the buck2 binary, so this also
+upgrades the rule definitions.
+"""
+
+import collections
+import json
+import pathlib
+import sys
+import urllib.request
+
+PLATFORMS = ["macos-aarch64", "linux-x86_64", "linux-aarch64"]
+TOOLS = pathlib.Path(__file__).resolve().parent
+
+
+def main(tag):
+    for name in ["buck2", "rust-project"]:
+        url = f"https://github.com/meta/buck2/releases/download/{tag}/{name}"
+        raw = urllib.request.urlopen(url).read().decode()
+        spec = json.loads(raw[raw.index("{"):], object_pairs_hook=collections.OrderedDict)
+        missing = [p for p in PLATFORMS if p not in spec["platforms"]]
+        if missing:
+            sys.exit(f"update-buck2: {name} {tag} has no {', '.join(missing)}")
+        spec["platforms"] = collections.OrderedDict((p, spec["platforms"][p]) for p in PLATFORMS)
+        path = TOOLS / name
+        path.write_text("#!/usr/bin/env dotslash\n\n" + json.dumps(spec, indent=2) + "\n")
+        print(f"update-buck2: {path.relative_to(TOOLS.parent)} -> {tag}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    main(sys.argv[1])

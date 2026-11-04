@@ -1,0 +1,65 @@
+name: Update buck2
+
+# Weekly: pin tools/buck2 and tools/rust-project to the newest dated buck2
+# release, run every check on it, and open a pull request. A prelude change
+# that breaks peppydb shows up as a failing update, not as a red main.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the newest dated release
+        id: release
+        run: |
+          tag=$(gh release list -R meta/buck2 --limit 50 --json tagName \
+            -q '[.[].tagName | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))] | sort | last')
+          current=$(sed -n 's#.*/releases/download/\([0-9-]*\)/.*#\1#p' tools/buck2 | head -1)
+          echo "newest=$tag current=$current"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$tag" = "$current" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Pin the new release
+        if: steps.release.outputs.changed == 'true'
+        run: tools/update-buck2 "${{ steps.release.outputs.tag }}"
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        if: steps.release.outputs.changed == 'true'
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Install DotSlash
+        if: steps.release.outputs.changed == 'true'
+        run: tools/ci/install-dotslash
+      - name: Run every check on the new release
+        if: steps.release.outputs.changed == 'true'
+        run: |
+          tools/fmt.sh
+          tools/clippy.sh
+          tools/buck2 test //crates/... //bin/...
+          cargo test --workspace --locked
+
+      - name: Open a pull request
+        if: steps.release.outputs.changed == 'true'
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          branch="buck2-update/$tag"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "Update buck2 to $tag"
+          git push --force origin "$branch"
+          gh pr create --head "$branch" --title "Update buck2 to $tag" \
+            --body "Automated weekly update. Every check passed on buck2 $tag." \
+            || echo "A pull request for $branch already exists."

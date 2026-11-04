@@ -1,0 +1,26 @@
+# Build configuration: the build_mode setting and the platforms that use it.
+
+# Debug or release. The Rust toolchain selects its optimization flags on this.
+constraint_setting(name = "build_mode")
+
+constraint_value(
+    name = "mode-debug",
+    constraint_setting = ":build_mode",
+    visibility = ["PUBLIC"],
+)
+
+constraint_value(
+    name = "mode-release",
+    constraint_setting = ":build_mode",
+    visibility = ["PUBLIC"],
+)
+
+# The host platform with release flags: `buck2 ... @build/mode/release`.
+# Release outputs get their own configuration, so they are cached separately
+# from debug outputs.
+platform(
+    name = "release",
+    constraint_values = [":mode-release"],
+    deps = ["prelude//platforms:default"],
+    visibility = ["PUBLIC"],
+)
