@@ -88,15 +88,10 @@ impl Tree {
         }
 
         let leaves = tile(leaves)?;
-        let mut inner = InnerStore::new(config.inner_capacity);
-        let root = build_inner(&mut inner, &leaves)?;
+        let mut inner = InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaves[0].id));
+        inner.root = build_inner(&mut inner, &leaves)?;
 
-        Ok(Self {
-            config,
-            root,
-            inner,
-            leaves: LeafMap::new(store, freed),
-        })
+        Ok(Self::assemble(config, inner, LeafMap::new(store, freed)))
     }
 }
 

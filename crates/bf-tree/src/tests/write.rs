@@ -126,7 +126,7 @@ fn removal_empties_leaves_without_merging() {
 
 #[test]
 fn limits_are_checked_before_touching_nodes() {
-    let mut tree = small();
+    let tree = small();
     tree.put(b"a", b"1").unwrap();
     let snapshot = tree.leaves.page_copy(LeafId::new(0).unwrap()).unwrap();
     assert_eq!(tree.put(b"", b"1"), Err(TreeError::EmptyKey));
@@ -193,4 +193,30 @@ fn removing_from_a_full_leaf_never_splits() {
         assert_eq!((tree.leaf_count(), tree.height()), (1, 1));
     }
     assert_model(&tree, &model);
+}
+
+#[test]
+fn threads_share_a_tree_through_a_shared_reference() {
+    const THREADS: u32 = 4;
+    const PER_THREAD: u32 = 150;
+    let tree = small();
+    std::thread::scope(|scope| {
+        for thread in 0..THREADS {
+            let tree = &tree;
+            scope.spawn(move || {
+                // Interleave the threads' keys so that they share leaves.
+                for i in 0..PER_THREAD {
+                    let k = key(i * THREADS + thread);
+                    tree.put(&k, &k).unwrap();
+                }
+            });
+        }
+    });
+
+    assert_eq!(tree.check_invariants(), Ok(()));
+    assert!(tree.height() >= 2);
+    for i in 0..THREADS * PER_THREAD {
+        assert_eq!(tree.get(&key(i)), Ok(Some(key(i).to_vec())), "{i}");
+    }
+    assert_eq!(tree.iter().count(), (THREADS * PER_THREAD) as usize);
 }

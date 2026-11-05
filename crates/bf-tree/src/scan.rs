@@ -49,7 +49,7 @@ impl Tree {
         let mut cursor = start.unwrap_or_default().to_vec();
         let mut key = Vec::new();
         loop {
-            let leaf = self.leaves.read(self.find_leaf(&cursor))?;
+            let leaf = self.read_leaf(&cursor)?;
             let next = with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
                 for record in page.range(Some(&cursor), end)? {
@@ -79,7 +79,7 @@ impl Tree {
     /// past it. The lower bound applies to every leaf, not only the first.
     fn scan_leaf(&self, cursor: &[u8], end: Option<&[u8]>) -> Result<LeafRecords, TreeError> {
         let n = self.config.leaf_capacity;
-        let leaf = self.leaves.read(self.find_leaf(cursor))?;
+        let leaf = self.read_leaf(cursor)?;
         with_scratch(|scratch| {
             let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
             let records = page
@@ -93,6 +93,19 @@ impl Tree {
 
             Ok((records, next))
         })
+    }
+}
+
+impl Tree {
+    /// Lock the leaf that owns `key` shared: route, lock, validate, retry.
+    pub(super) fn read_leaf(&self, key: &[u8]) -> Result<super::leaf_map::LeafRead<'_>, TreeError> {
+        loop {
+            let route = self.route(key);
+            let leaf = self.leaves.read(route.leaf)?;
+            if !self.route_changed(&route) {
+                return Ok(leaf);
+            }
+        }
     }
 }
 

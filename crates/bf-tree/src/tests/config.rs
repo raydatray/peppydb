@@ -67,7 +67,7 @@ fn inner_rule_is_tight_on_both_sides() {
 #[test]
 fn new_tree_is_one_unbounded_leaf() {
     let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
-    let ChildRef::Leaf(root) = tree.root else {
+    let ChildRef::Leaf(root) = tree.root() else {
         panic!("root must be a leaf");
     };
     let bytes = tree.leaves.page_copy(root).unwrap();
@@ -93,7 +93,7 @@ fn new_tree_is_one_unbounded_leaf() {
 
 #[test]
 fn store_allocates_distinct_zeroed_disjoint_buffers() {
-    let mut store = InnerStore::new(64);
+    let mut store = InnerStore::new(64, ChildRef::Leaf(LeafId::new(0).unwrap()));
     let ids: Vec<_> = (0..4).map(|_| store.alloc()).collect();
     let indices: Vec<_> = ids.iter().map(|id| id.index()).collect();
     assert_eq!(indices, [0, 1, 2, 3]);
@@ -114,7 +114,7 @@ fn store_allocates_distinct_zeroed_disjoint_buffers() {
 #[test]
 #[should_panic(expected = "distinct allocated IDs")]
 fn store_pair_rejects_aliasing() {
-    let mut store = InnerStore::new(64);
+    let mut store = InnerStore::new(64, ChildRef::Leaf(LeafId::new(0).unwrap()));
     let id = store.alloc();
     store.pair_mut(id, id);
 }

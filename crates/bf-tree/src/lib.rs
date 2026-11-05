@@ -30,11 +30,12 @@
 //! assert_eq!(tree.iter().count(), 999);
 //! ```
 
-use zerocopy::FromBytes;
+use std::sync::atomic::AtomicU64;
 
 use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
-use bf_tree_node_id::{ChildRef, InnerId};
+use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
+use bf_tree_sync::RwLock;
 
 // Types from the internal crates that appear in this crate's public API, so
 // that callers need no other dependency. Other items stay internal.
@@ -192,17 +193,27 @@ pub enum TreeError {
     Inner(#[from] InnerError),
 }
 
-/// An ordered map from nonempty byte keys to byte values.
+/// An ordered map from nonempty byte keys to byte values, shared between
+/// threads.
 ///
-/// Leaves live in a [`PageStore`] behind a leaf mapping table; inner nodes
-/// are in-memory data derived from leaf fences.
+/// Leaves live in a [`PageStore`] behind a leaf mapping table with one
+/// reader-writer lock per leaf; inner nodes are in-memory data derived from
+/// leaf fences, behind one reader-writer lock. Every operation takes `&self`.
 #[derive(Debug)]
 pub struct Tree {
     config: TreeConfig,
-    root: ChildRef,
-    inner: InnerStore,
+    inner: RwLock<InnerStore>,
+    /// Bumped, under the inner write lock, by every structural change.
+    inner_version: AtomicU64,
     leaves: LeafMap,
 }
+
+// Compile-time check: a tree and its scans can be shared between threads.
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    shared::<Tree>();
+    shared::<Scan<'static>>();
+};
 
 impl Tree {
     /// Validate `config` and create an empty tree on a [`MemStore`]: one
@@ -243,13 +254,13 @@ impl Tree {
     /// between the two page writes of a split can leave overlapping fences,
     /// which [`Tree::open`] rejects as an inconsistent leaf set (until shadow
     /// paging, plan 0018).
-    pub fn flush(&mut self) -> Result<(), TreeError> {
+    pub fn flush(&self) -> Result<(), TreeError> {
         self.leaves.sync()
     }
 
     /// Number of inner nodes.
     pub fn inner_count(&self) -> usize {
-        self.inner.len()
+        self.inner.read().len()
     }
 
     /// Number of leaf slots in the store, live or freed.
@@ -284,12 +295,20 @@ impl Tree {
             leaf.id()
         };
 
-        Ok(Self {
+        Ok(Self::assemble(
             config,
-            root: ChildRef::Leaf(root),
-            inner: InnerStore::new(config.inner_capacity),
+            InnerStore::new(config.inner_capacity, ChildRef::Leaf(root)),
             leaves,
-        })
+        ))
+    }
+
+    fn assemble(config: TreeConfig, inner: InnerStore, leaves: LeafMap) -> Self {
+        Self {
+            config,
+            inner: RwLock::new(inner),
+            inner_version: AtomicU64::new(0),
+            leaves,
+        }
     }
 
     /// The validated configuration.
@@ -307,14 +326,6 @@ impl Tree {
         }
 
         Ok(())
-    }
-
-    fn inner(&self, id: InnerId) -> &InnerNode {
-        InnerNode::ref_from_bytes(self.inner.get(id)).expect("inner buffers hold a node header")
-    }
-
-    fn inner_mut(&mut self, id: InnerId) -> &mut InnerNode {
-        InnerNode::mut_from_bytes(self.inner.get_mut(id)).expect("inner buffers hold a node header")
     }
 }
 

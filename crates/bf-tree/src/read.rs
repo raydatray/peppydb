@@ -1,12 +1,16 @@
-use super::leaf_map::with_scratch;
+use std::sync::atomic::Ordering;
+
+use super::leaf_map::{LeafWrite, with_scratch};
 use super::{Tree, TreeError};
-use bf_tree_node_id::{ChildRef, InnerId, LeafId};
+use bf_tree_node_id::LeafId;
 use bf_tree_page::RecordState;
 
-/// Inner nodes visited from the root to a leaf, each with the child index
-/// that the descent took. The path holds IDs, never node references, so a
-/// writer can borrow each parent mutably in turn.
-pub(super) type Path = Vec<(InnerId, usize)>;
+/// A leaf chosen by routing, and the routing version it was chosen under.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Route {
+    pub(super) leaf: LeafId,
+    version: u64,
+}
 
 impl Tree {
     /// Return a copy of the value stored for `key`, or `None`.
@@ -18,8 +22,8 @@ impl Tree {
 
     /// Call `f` exactly once with the value stored for `key`, or `None`, and
     /// return its result. The value is borrowed only for the call, so `f` is
-    /// the zero-copy form of [`Tree::get`]. `f` must not call back into the
-    /// tree.
+    /// the zero-copy form of [`Tree::get`]. `f` runs under the leaf's lock and
+    /// must not call back into the tree.
     pub fn get_with<R>(
         &self,
         key: &[u8],
@@ -28,7 +32,7 @@ impl Tree {
         self.check_key(key)?;
 
         let n = self.config.leaf_capacity;
-        let leaf = self.leaves.read(self.find_leaf(key))?;
+        let leaf = self.read_leaf(key)?;
         with_scratch(|scratch| {
             let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
             page.check_key(key)?;
@@ -43,42 +47,48 @@ impl Tree {
     /// Number of levels, counting the leaf level: a single-leaf tree has
     /// height 1.
     pub fn height(&self) -> usize {
-        let mut height = 1;
-        let mut child = self.root;
-        while let ChildRef::Inner(id) = child {
-            child = self.inner(id).first_child();
-            height += 1;
+        self.inner.read().height()
+    }
+
+    /// Route `key` to its leaf under the inner read lock, and note the
+    /// version. The lock is released on return.
+    pub(super) fn route(&self, key: &[u8]) -> Route {
+        let inner = self.inner.read();
+        // Written only under the write lock, so stable while we hold read.
+        let version = self.inner_version.load(Ordering::Relaxed);
+        Route {
+            leaf: inner.find_leaf(key),
+            version,
         }
-
-        height
     }
 
-    /// Descend to the leaf whose fences contain `key`, without a path.
-    pub(super) fn find_leaf(&self, key: &[u8]) -> LeafId {
-        self.descend(key, |_| {})
+    /// Whether a structural change happened since `route` was taken. Called
+    /// after locking the routed leaf: a split of that leaf bumps the version
+    /// before the splitter releases the leaf's lock.
+    pub(super) fn route_changed(&self, route: &Route) -> bool {
+        self.inner_version.load(Ordering::Acquire) != route.version
     }
 
-    /// Descend to the leaf whose fences contain `key` and record the path.
-    pub(super) fn locate(&self, key: &[u8]) -> (LeafId, Path) {
-        let mut path = Vec::new();
-        let leaf = self.descend(key, |step| path.push(step));
-
-        (leaf, path)
-    }
-
-    /// Routing is right-on-equality and leaf fences are lower-inclusive, so
-    /// any byte slice reaches the one leaf whose fences contain it.
-    fn descend(&self, key: &[u8], mut visit: impl FnMut((InnerId, usize))) -> LeafId {
-        let mut child = self.root;
+    /// Lock the leaf that owns `key` exclusively and run `f` on it: route,
+    /// lock, validate the route, and retry if a split intervened.
+    pub(super) fn with_leaf_write<R>(
+        &self,
+        key: &[u8],
+        f: impl FnOnce(&mut LeafWrite<'_>) -> Result<R, TreeError>,
+    ) -> Result<R, TreeError> {
         loop {
-            match child {
-                ChildRef::Leaf(id) => return id,
-                ChildRef::Inner(id) => {
-                    let route = self.inner(id).route(key);
-                    visit((id, route.index));
-                    child = route.child;
-                }
+            let route = self.route(key);
+            let mut leaf = self.leaves.write(route.leaf)?;
+            if self.route_changed(&route) {
+                continue;
             }
+            return f(&mut leaf);
         }
+    }
+
+    /// Route `key` to its leaf; a test aid that ignores concurrency.
+    #[cfg(test)]
+    pub(super) fn find_leaf(&self, key: &[u8]) -> LeafId {
+        self.inner.read().find_leaf(key)
     }
 }

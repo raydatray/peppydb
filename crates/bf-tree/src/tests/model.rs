@@ -243,7 +243,7 @@ fn reversed_ranges_are_rejected() {
 #[ignore = "informational benchmark"]
 fn baseline_throughput() {
     const COUNT: u64 = 1_000_000;
-    let mut tree = Tree::in_memory(TreeConfig::default()).unwrap();
+    let tree = Tree::in_memory(TreeConfig::default()).unwrap();
     let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes();
     let value = [7; 16];
 
@@ -292,7 +292,7 @@ fn baseline_file_store() {
     let rate = |elapsed: std::time::Duration| COUNT as f64 / elapsed.as_secs_f64() / 1e6;
 
     let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
-    let mut tree = Tree::create(config, Box::new(store)).unwrap();
+    let tree = Tree::create(config, Box::new(store)).unwrap();
     let started = Instant::now();
     for i in 0..COUNT {
         tree.put(&key(i), &value).unwrap();

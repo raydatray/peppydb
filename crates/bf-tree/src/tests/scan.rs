@@ -25,7 +25,7 @@ fn visited(tree: &Tree, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Vec<u8
 
 /// A tree with tiny nodes holding the even keys `0, 2, .., 2 * (count - 1)`.
 fn grown(count: u32) -> (Tree, Records) {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     let mut all = Vec::new();
     for i in (0..count).map(|i| (i * 7) % count) {
         let key = (i * 2).to_be_bytes();
@@ -143,7 +143,7 @@ fn grown_tree_scans_match_a_sorted_vector() {
 
 #[test]
 fn scans_skip_empty_leaves() {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..400u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
@@ -294,7 +294,7 @@ fn scan_with_stops_at_the_first_break() {
 
 #[test]
 fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
-    let (mut tree, all) = grown(600);
+    let (tree, all) = grown(600);
     let fences = boundaries(&tree);
     assert!(fences.len() > 10);
     // Empty whole leaves: the first, two adjacent ones, one in the middle,
