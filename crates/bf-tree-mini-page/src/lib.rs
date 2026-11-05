@@ -7,11 +7,13 @@
 //! a block of the circular buffer.
 
 mod class;
+mod leaf;
 mod mini;
 mod refs;
 mod write;
 
 pub use class::SizeClasses;
+pub use leaf::{LeafMut, LeafRef, Scan};
 pub use mini::{Apply, Lookup, Mini, MiniPage};
 pub use refs::RefBits;
 pub use write::{BufferError, WriteOutcome, buffer};
