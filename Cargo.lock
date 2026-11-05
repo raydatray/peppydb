@@ -20,6 +20,7 @@ name = "bf-tree-circular-buffer"
 version = "0.1.0"
 dependencies = [
  "bf-tree-node-id",
+ "bf-tree-sync",
  "thiserror",
 ]
 
@@ -67,6 +68,10 @@ dependencies = [
  "thiserror",
  "zerocopy",
 ]
+
+[[package]]
+name = "bf-tree-sync"
+version = "0.1.0"
 
 [[package]]
 name = "bitflags"

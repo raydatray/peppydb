@@ -1,5 +1,5 @@
+use bf_tree_sync::Mutex;
 use std::any::Any;
-use std::sync::Mutex;
 
 use bf_tree_node_id::LeafId;
 
@@ -21,9 +21,7 @@ fn leaf(raw: u64) -> LeafId {
 /// intended leak.
 fn keep_alive(value: impl Any + Send) {
     static KEPT: Mutex<Vec<Box<dyn Any + Send>>> = Mutex::new(Vec::new());
-    KEPT.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(Box::new(value));
+    KEPT.lock().push(Box::new(value));
 }
 
 /// The block's offset from the start of the slab, header included.
