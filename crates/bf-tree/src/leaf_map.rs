@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 
-use super::TreeError;
+use super::{TreeConfig, TreeError};
+use bf_tree_circular_buffer::{Block, CircularBuffer};
+use bf_tree_mini_page::{Mini, MiniPage, RefBits, SizeClasses};
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::PageStore;
@@ -17,37 +19,74 @@ use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
     entries: Table<RwLock<LeafEntry>>,
+    /// Every mini-page block. Its mutex is innermost: it may be taken under
+    /// a leaf lock, and it never waits for one.
+    pub(super) circular_buffer: CircularBuffer,
+    /// The mini-page ladder; blind writes (the next diff) use it.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) classes: SizeClasses,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct LeafEntry {
     /// The slot holds no page.
     freed: bool,
-    // Later plans add fields: `block` and `refs` (0013), `version` (0014),
-    // `dirty` (0015). The size test guards them.
+    /// A circular-buffer block holding this leaf's mini-page.
+    block: Option<Block>,
+    /// Reference bits for the mini-page's slots; `Some` exactly when `block`
+    /// is.
+    refs: Option<Box<RefBits>>,
+    // Later plans add `version` (0014) and `dirty` (0015). The size test
+    // guards the entry.
+}
+
+/// What a leaf holds in memory besides its base page in the store.
+pub(super) enum Residency<'e> {
+    Base,
+    Mini {
+        page: &'e MiniPage,
+        refs: &'e RefBits,
+    },
+}
+
+impl LeafEntry {
+    fn residency(&self) -> Residency<'_> {
+        match (&self.block, &self.refs) {
+            (Some(block), Some(refs)) => Residency::Mini {
+                page: MiniPage::from_bytes(block.as_ref()),
+                refs,
+            },
+            _ => Residency::Base,
+        }
+    }
 }
 
 /// A leaf held under its shared lock.
 pub(super) struct LeafRead<'m> {
     id: LeafId,
-    _entry: RwLockReadGuard<'m, LeafEntry>,
+    entry: RwLockReadGuard<'m, LeafEntry>,
 }
 
 /// A leaf held under its exclusive lock.
 pub(super) struct LeafWrite<'m> {
     id: LeafId,
-    _entry: RwLockWriteGuard<'m, LeafEntry>,
+    entry: RwLockWriteGuard<'m, LeafEntry>,
 }
 
 /// A held leaf lock, shared or exclusive. Base pages are read only through
 /// one.
 pub(super) trait Locked {
     fn id(&self) -> LeafId;
+    fn residency(&self) -> Residency<'_>;
 }
 
 impl Locked for LeafRead<'_> {
     fn id(&self) -> LeafId {
         self.id
+    }
+
+    fn residency(&self) -> Residency<'_> {
+        self.entry.residency()
     }
 }
 
@@ -55,19 +94,70 @@ impl Locked for LeafWrite<'_> {
     fn id(&self) -> LeafId {
         self.id
     }
+
+    fn residency(&self) -> Residency<'_> {
+        self.entry.residency()
+    }
+}
+
+impl LeafWrite<'_> {
+    /// Move the mini-page's two handles out of the entry; no bytes move.
+    pub(super) fn take_mini(&mut self) -> Option<Mini> {
+        match (self.entry.block.take(), self.entry.refs.take()) {
+            (Some(block), Some(refs)) => Some(Mini { block, refs }),
+            (None, None) => None,
+            _ => unreachable!("refs are present exactly with a block"),
+        }
+    }
+
+    /// Move a mini-page's handles back into the entry.
+    pub(super) fn put_mini(&mut self, mini: Option<Mini>) {
+        debug_assert!(self.entry.block.is_none());
+        if let Some(Mini { block, refs }) = mini {
+            self.entry.block = Some(block);
+            self.entry.refs = Some(refs);
+        }
+    }
 }
 
 impl LeafMap {
     /// Map the store's existing slots without loading any of them.
     /// `freed` marks the slots that hold no page.
-    pub(super) fn new(store: Box<dyn PageStore>, freed: impl IntoIterator<Item = bool>) -> Self {
+    pub(super) fn new(
+        store: Box<dyn PageStore>,
+        freed: impl IntoIterator<Item = bool>,
+        circular_buffer: CircularBuffer,
+        classes: SizeClasses,
+    ) -> Self {
         let entries: Table<RwLock<LeafEntry>> = Table::new();
         for (index, freed) in freed.into_iter().enumerate() {
             entries.grow_to(index + 1);
             entries.get(index).expect("just grown").write().freed = freed;
         }
 
-        Self { store, entries }
+        Self {
+            store,
+            entries,
+            circular_buffer,
+            classes,
+        }
+    }
+
+    /// A map over `store` with a circular buffer and ladder from a validated
+    /// `config`.
+    pub(super) fn for_config(
+        store: Box<dyn PageStore>,
+        freed: impl IntoIterator<Item = bool>,
+        config: &TreeConfig,
+    ) -> Result<Self, TreeError> {
+        let classes = config.size_classes()?;
+        let circular_buffer = CircularBuffer::new(
+            config.circular_buffer_bytes,
+            &config.buffer_classes(&classes),
+            0,
+        )
+        .map_err(|_| TreeError::InvalidConfig("invalid circular-buffer budget"))?;
+        Ok(Self::new(store, freed, circular_buffer, classes))
     }
 
     /// Number of slots, live or freed; IDs are `0..len()`.
@@ -79,9 +169,41 @@ impl LeafMap {
         self.store.as_ref()
     }
 
-    /// Give up the map and return its store.
+    /// Give up the map and return its store. Buffered mini-pages are lost;
+    /// flush first to keep them. Their blocks return to the circular buffer
+    /// before it is dropped.
     pub(super) fn into_store(self) -> Box<dyn PageStore> {
-        self.store
+        let Self {
+            store,
+            entries,
+            circular_buffer,
+            ..
+        } = self;
+        for entry in entries.iter() {
+            if let Some(block) = entry.write().block.take() {
+                circular_buffer.free(block);
+            }
+        }
+        store
+    }
+
+    /// The live leaves' IDs as of now; a by-ID walk such as `flush` uses
+    /// them.
+    pub(super) fn ids(&self) -> impl Iterator<Item = LeafId> + use<> {
+        (0..self.entries.len()).map(LeafId::from_index)
+    }
+
+    /// Lock leaf `id` exclusively if it is a live slot.
+    pub(super) fn write_if_live(&self, id: LeafId) -> Option<LeafWrite<'_>> {
+        self.write(id).ok()
+    }
+
+    /// Number of leaves holding a mini-page. Takes each shared lock in turn.
+    pub(super) fn buffered(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.read().block.is_some())
+            .count()
     }
 
     fn entry(&self, id: LeafId) -> Result<&RwLock<LeafEntry>, TreeError> {
@@ -103,7 +225,7 @@ impl LeafMap {
         if entry.freed {
             return Err(TreeError::UnknownLeaf(id));
         }
-        Ok(LeafRead { id, _entry: entry })
+        Ok(LeafRead { id, entry })
     }
 
     /// Lock leaf `id` exclusively. `UnknownLeaf` if it is not a live slot.
@@ -112,7 +234,7 @@ impl LeafMap {
         if entry.freed {
             return Err(TreeError::UnknownLeaf(id));
         }
-        Ok(LeafWrite { id, _entry: entry })
+        Ok(LeafWrite { id, entry })
     }
 
     /// Allocate a fresh slot and return it locked exclusively. It is
@@ -122,7 +244,7 @@ impl LeafMap {
         self.entries.grow_to(id.index() + 1);
         let mut entry = self.entry(id)?.write();
         *entry = LeafEntry::default();
-        Ok(LeafWrite { id, _entry: entry })
+        Ok(LeafWrite { id, entry })
     }
 
     /// Return a fresh, never-reachable slot to the store, for a split that
@@ -131,7 +253,7 @@ impl LeafMap {
         // Free the slot first: if that fails, the entry stays live and the
         // slot keeps what was written, rather than claiming a free slot.
         self.store.free(leaf.id)?;
-        leaf._entry.freed = true;
+        leaf.entry.freed = true;
         Ok(())
     }
 
@@ -186,6 +308,53 @@ impl LeafMap {
 
 #[cfg(test)]
 impl LeafMap {
+    /// Install a mini-page holding `records` for leaf `id`, allocated from
+    /// the circular buffer at the smallest class that holds them. Test
+    /// fixtures build buffered leaves this way before blind writes exist.
+    pub(super) fn install_mini(
+        &self,
+        id: LeafId,
+        records: &[(&[u8], bf_tree_page::RecordState<'_>)],
+    ) -> Result<(), TreeError> {
+        let mut leaf = self.write(id)?;
+        let bytes: usize = records
+            .iter()
+            .map(|(key, state)| 8 + key.len() + state.value().map_or(0, <[u8]>::len))
+            .sum();
+        let class = self
+            .classes
+            .smallest_for(bytes)
+            .ok_or(TreeError::Page(PageError::RecordTooLarge))?;
+        let block = self
+            .circular_buffer
+            .alloc(class, bf_tree_circular_buffer::Kind::Mini, id)
+            .map_err(|_| TreeError::InvalidConfig("circular buffer full"))?;
+        let mut mini = Mini::new(block, id);
+        for (key, state) in records {
+            mini.apply(key, *state)?;
+        }
+        leaf.put_mini(Some(mini));
+        Ok(())
+    }
+
+    /// Point leaf `id`'s mini-page at another leaf, to test the checker.
+    pub(super) fn corrupt_mini_backing(&self, id: LeafId, other: LeafId) {
+        let mut leaf = self.write(id).unwrap();
+        let mut mini = leaf.take_mini().expect("a mini-page");
+        let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(mini.block.as_mut()).unwrap();
+        page.set_backing_leaf(Some(other));
+        leaf.put_mini(Some(mini));
+    }
+
+    /// A copy of leaf `id`'s mini-page bytes, if it has one.
+    pub(super) fn mini_copy(&self, id: LeafId) -> Option<Vec<u8>> {
+        let leaf = self.read(id).ok()?;
+        match leaf.residency() {
+            Residency::Mini { page, .. } => Some(zerocopy::IntoBytes::as_bytes(page).to_vec()),
+            Residency::Base => None,
+        }
+    }
+
     /// A copy of leaf `id`'s base page, read under its shared lock.
     pub(super) fn page_copy(&self, id: LeafId) -> Result<Vec<u8>, TreeError> {
         let leaf = self.read(id)?;

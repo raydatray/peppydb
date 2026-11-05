@@ -1,9 +1,10 @@
 use std::iter::FusedIterator;
 use std::ops::ControlFlow;
 
-use super::leaf_map::with_scratch;
+use super::leaf_map::{Locked, Residency, with_scratch};
 use super::{Tree, TreeError};
-use bf_tree_page::{Fence, RecordState};
+use bf_tree_mini_page::LeafRef;
+use bf_tree_page::Fence;
 
 /// One leaf's live records in range, copied, and where the scan continues.
 type LeafRecords = (Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>);
@@ -52,8 +53,12 @@ impl Tree {
             let leaf = self.read_leaf(&cursor)?;
             let next = with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
-                for record in page.range(Some(&cursor), end)? {
-                    let RecordState::Insert(value) = record.state else {
+                let view = LeafRef {
+                    base: page,
+                    mini: mini_of(&leaf),
+                };
+                for record in view.range(Some(&cursor), end)? {
+                    let Some(value) = record.state.value() else {
                         continue;
                     };
                     key.clear();
@@ -82,11 +87,15 @@ impl Tree {
         let leaf = self.read_leaf(cursor)?;
         with_scratch(|scratch| {
             let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
-            let records = page
+            let view = LeafRef {
+                base: page,
+                mini: mini_of(&leaf),
+            };
+            let records = view
                 .range(Some(cursor), end)?
-                .filter_map(|record| match record.state {
-                    RecordState::Insert(value) => Some((record.key.to_vec(), value.to_vec())),
-                    _ => None,
+                .filter_map(|record| {
+                    let value = record.state.value()?;
+                    Some((record.key.to_vec(), value.to_vec()))
                 })
                 .collect();
             let next = next_leaf(page.fences().expect("tree leaves are fenced").upper, end);
@@ -106,6 +115,14 @@ impl Tree {
                 return Ok(leaf);
             }
         }
+    }
+}
+
+/// The leaf's mini-page, if it has one.
+fn mini_of(leaf: &impl Locked) -> Option<&bf_tree_mini_page::MiniPage> {
+    match leaf.residency() {
+        Residency::Mini { page, .. } => Some(page),
+        Residency::Base => None,
     }
 }
 
