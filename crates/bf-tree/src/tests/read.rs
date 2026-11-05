@@ -11,12 +11,15 @@ fn inner(raw: u64) -> InnerId {
 
 #[test]
 fn single_leaf_tree_serves_lookups() {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     assert_eq!(tree.height(), 1);
     assert_eq!(tree.get(b"a"), Ok(None));
     assert_eq!(tree.locate(b"a"), (leaf(0), vec![]));
     let root = tree.find_leaf(b"");
-    tree.leaf_mut(root).unwrap().try_insert(b"a", b"1").unwrap();
+    let mut bytes = tree.leaves.page_copy(root).unwrap();
+    let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(&mut bytes).unwrap();
+    page.try_insert(b"a", b"1").unwrap();
+    tree.leaves.overwrite(root, &mut bytes).unwrap();
     assert_eq!(tree.get(b"a"), Ok(Some(b"1".to_vec())));
     assert_eq!(tree.check_invariants(), Ok(()));
 }
@@ -98,14 +101,24 @@ fn checker_catches_a_mismatched_fence() {
         Err(InvariantError::FenceMismatch(leaf(0)))
     );
 
-    // An unfenced leaf never matches its interval.
+    // An unfenced leaf never matches its interval. Loading rejects it
+    // before the fence comparison, so the checker cannot load it.
     let mut tree = empty_tree();
-    let id = tree.leaves.alloc().unwrap();
-    Page::init(tree.leaves.bytes_mut(id).unwrap()).unwrap();
+    let id = tree.leaves.alloc_id().unwrap();
+    let mut bytes = vec![0; tree.config.leaf_capacity];
+    Page::init(&mut bytes).unwrap();
+    tree.leaves.overwrite(id, &mut bytes).unwrap();
     tree.root = ChildRef::Leaf(id);
     assert_eq!(
+        tree.leaves.page_copy(id).err(),
+        Some(TreeError::CorruptLeaf {
+            id,
+            reason: "page has no fences",
+        })
+    );
+    assert_eq!(
         tree.check_invariants(),
-        Err(InvariantError::FenceMismatch(id))
+        Err(InvariantError::Dangling(ChildRef::Leaf(id)))
     );
 }
 
@@ -132,8 +145,8 @@ fn checker_catches_uneven_depth() {
 
 #[test]
 fn checker_catches_unreachable_duplicate_and_dangling_nodes() {
-    let mut tree = two_level();
-    tree.leaves.alloc().unwrap();
+    let tree = two_level();
+    tree.leaves.alloc_id().unwrap();
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::Unreachable(ChildRef::Leaf(leaf(3))))
@@ -181,12 +194,19 @@ fn checker_catches_empty_inner_nodes_and_stray_records() {
     let l1 = add_leaf(&mut tree, Some(b"a"), Some(b"z"), &[b"y"]);
     let l2 = add_leaf(&mut tree, Some(b"x"), None, &[]);
     tree.root = add_inner(&mut tree, l0, &[(b"a", l1), (b"x", l2)]);
-    let bytes = tree.leaves.bytes_mut(leaf(1)).unwrap();
+    let mut bytes = tree.leaves.page_copy(leaf(1)).unwrap();
     let offset = usize::from(u16::from_le_bytes([bytes[40], bytes[41]]));
     assert_eq!(bytes[offset], b'z');
     bytes[offset] = b'x';
+    tree.leaves.overwrite(leaf(1), &mut bytes).unwrap();
+    // Page validation rejects the stray record, so the checker cannot load
+    // the leaf and reports it before its own range check.
+    assert_eq!(
+        Page::validate(&bytes).err(),
+        Some(PageError::Corrupt("record at or above the upper fence"))
+    );
     assert_eq!(
         tree.check_invariants(),
-        Err(InvariantError::RecordOutOfRange(leaf(1)))
+        Err(InvariantError::Dangling(ChildRef::Leaf(leaf(1))))
     );
 }

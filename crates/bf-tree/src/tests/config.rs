@@ -70,7 +70,8 @@ fn new_tree_is_one_unbounded_leaf() {
     let ChildRef::Leaf(root) = tree.root else {
         panic!("root must be a leaf");
     };
-    let page = tree.leaf(root).unwrap();
+    let bytes = tree.leaves.page_copy(root).unwrap();
+    let page = Page::validate(&bytes).unwrap();
     assert_eq!(page.capacity(), 256);
     assert!(page.is_empty());
     assert_eq!(

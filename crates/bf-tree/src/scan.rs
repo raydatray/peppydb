@@ -1,6 +1,7 @@
 use std::iter::FusedIterator;
 use std::ops::ControlFlow;
 
+use super::leaf_map::with_scratch;
 use super::{Tree, TreeError};
 use bf_tree_page::{Fence, RecordState};
 
@@ -44,21 +45,29 @@ impl Tree {
     ) -> Result<(), TreeError> {
         check_range(start, end)?;
 
+        let n = self.config.leaf_capacity;
         let mut cursor = start.unwrap_or_default().to_vec();
         let mut key = Vec::new();
         loop {
-            let page = self.leaf(self.find_leaf(&cursor))?;
-            for record in page.range(Some(&cursor), end)? {
-                let RecordState::Insert(value) = record.state else {
-                    continue;
-                };
-                key.clear();
-                key.extend(record.key.bytes());
-                if visit(&key, value).is_break() {
-                    return Ok(());
+            let leaf = self.leaves.read(self.find_leaf(&cursor))?;
+            let next = with_scratch(|scratch| -> Result<_, TreeError> {
+                let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+                for record in page.range(Some(&cursor), end)? {
+                    let RecordState::Insert(value) = record.state else {
+                        continue;
+                    };
+                    key.clear();
+                    key.extend(record.key.bytes());
+                    if visit(&key, value).is_break() {
+                        return Ok(None);
+                    }
                 }
-            }
-            match next_leaf(page.fences().expect("tree leaves are fenced").upper, end) {
+                Ok(next_leaf(
+                    page.fences().expect("tree leaves are fenced").upper,
+                    end,
+                ))
+            })?;
+            match next {
                 Some(next) => cursor = next,
                 None => return Ok(()),
             }
@@ -69,17 +78,21 @@ impl Tree {
     /// `cursor`, and that leaf's finite upper fence if the scan continues
     /// past it. The lower bound applies to every leaf, not only the first.
     fn scan_leaf(&self, cursor: &[u8], end: Option<&[u8]>) -> Result<LeafRecords, TreeError> {
-        let page = self.leaf(self.find_leaf(cursor))?;
-        let records = page
-            .range(Some(cursor), end)?
-            .filter_map(|record| match record.state {
-                RecordState::Insert(value) => Some((record.key.to_vec(), value.to_vec())),
-                _ => None,
-            })
-            .collect();
-        let next = next_leaf(page.fences().expect("tree leaves are fenced").upper, end);
+        let n = self.config.leaf_capacity;
+        let leaf = self.leaves.read(self.find_leaf(cursor))?;
+        with_scratch(|scratch| {
+            let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+            let records = page
+                .range(Some(cursor), end)?
+                .filter_map(|record| match record.state {
+                    RecordState::Insert(value) => Some((record.key.to_vec(), value.to_vec())),
+                    _ => None,
+                })
+                .collect();
+            let next = next_leaf(page.fences().expect("tree leaves are fenced").upper, end);
 
-        Ok((records, next))
+            Ok((records, next))
+        })
     }
 }
 

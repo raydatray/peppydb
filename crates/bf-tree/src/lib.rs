@@ -1,9 +1,10 @@
-//! A single-threaded BF-Tree of fenced base leaves over a page store.
+//! A BF-Tree of fenced base leaves over a page store.
 //!
 //! The tree routes through [`InnerNode`]s to fenced leaf [`Page`]s. It starts
 //! as one unbounded leaf; the first leaf split creates the first inner node.
-//! Every leaf is at the same depth. Leaves are loaded from the store on first
-//! access and kept resident.
+//! Every leaf is at the same depth. Each leaf has its own reader-writer lock,
+//! and every access loads its base page from the store; nothing stays
+//! resident.
 //!
 //! ```
 //! use bf_tree::{Tree, TreeConfig};
@@ -53,7 +54,7 @@ mod write;
 
 #[cfg(test)]
 pub use invariants::InvariantError;
-use leaf_map::LeafMap;
+use leaf_map::{LeafMap, Locked};
 pub use scan::Scan;
 use store::InnerStore;
 
@@ -219,7 +220,8 @@ impl Tree {
     /// Validate `config` and create an empty tree on an empty `store` whose
     /// superblock was built from the same configuration.
     ///
-    /// The first leaf is dirty until [`Tree::flush`] writes it.
+    /// The first leaf is written to the store at once; [`Tree::flush`] makes
+    /// it durable.
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         config.validate()?;
         if *store.superblock() != Superblock::from(&config) {
@@ -234,15 +236,15 @@ impl Tree {
         Self::with_store(config, store)
     }
 
-    /// Write every modified leaf to the store and sync it.
+    /// Make every completed write durable.
     ///
-    /// Data is durable only after `flush` returns. Dropping a tree does not
-    /// flush; unflushed changes are lost. There is no per-operation atomicity:
-    /// if the process stops during `flush`, the store may hold some but not
-    /// all of the modified leaves, which [`Tree::open`] detects as an
-    /// inconsistent leaf set.
+    /// Every write goes to the store as it happens, so dropping the tree
+    /// loses nothing that the store kept; `flush` syncs it. A process stop
+    /// between the two page writes of a split can leave overlapping fences,
+    /// which [`Tree::open`] rejects as an inconsistent leaf set (until shadow
+    /// paging, plan 0018).
     pub fn flush(&mut self) -> Result<(), TreeError> {
-        self.leaves.flush()
+        self.leaves.sync()
     }
 
     /// Number of inner nodes.
@@ -255,38 +257,32 @@ impl Tree {
         self.leaves.len()
     }
 
-    /// Number of leaves currently held in memory.
-    pub fn resident_leaves(&self) -> usize {
-        self.leaves.resident_count()
-    }
-
-    /// Number of leaves whose resident copy is newer than the store.
-    pub fn dirty_leaves(&self) -> usize {
-        self.leaves.dirty_count()
-    }
-
     /// The store that holds the leaves.
     pub fn store(&self) -> &dyn PageStore {
         self.leaves.store()
     }
 
     /// Close the tree and return its store, for example to reopen it with
-    /// [`Tree::open`]. Unflushed changes are lost; call [`Tree::flush`] first
-    /// to keep them.
+    /// [`Tree::open`]. Call [`Tree::flush`] first to make the writes
+    /// durable.
     pub fn into_store(self) -> Box<dyn PageStore> {
         self.leaves.into_store()
     }
 
     /// Build an empty tree on an empty store that already describes `config`.
     fn with_store(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
-        let mut leaves = LeafMap::new(store, []);
-        let root = leaves.alloc()?;
+        let leaves = LeafMap::new(store, []);
         let unbounded = Fences {
             lower: Fence::Unbounded,
             upper: Fence::Unbounded,
         };
-
-        Page::init_with_fences(leaves.bytes_mut(root)?, unbounded)?;
+        let root = {
+            let leaf = leaves.alloc()?;
+            let mut bytes = vec![0; config.leaf_capacity];
+            Page::init_with_fences(&mut bytes, unbounded)?;
+            leaves.write_through(&mut [(leaf.id(), &mut bytes)])?;
+            leaf.id()
+        };
 
         Ok(Self {
             config,
@@ -311,14 +307,6 @@ impl Tree {
         }
 
         Ok(())
-    }
-
-    fn leaf(&self, id: LeafId) -> Result<&Page, TreeError> {
-        self.leaves.page(id)
-    }
-
-    fn leaf_mut(&mut self, id: LeafId) -> Result<&mut Page, TreeError> {
-        self.leaves.page_mut(id)
     }
 
     fn inner(&self, id: InnerId) -> &InnerNode {

@@ -55,12 +55,11 @@ fn expected(
 fn boundaries(tree: &Tree) -> Vec<Vec<u8>> {
     let mut fences: Vec<_> = (0..tree.leaf_count())
         .filter_map(|index| {
-            match tree
-                .leaf(LeafId::new(index as u64).unwrap())
-                .unwrap()
-                .fences()?
-                .lower
-            {
+            let bytes = tree
+                .leaves
+                .page_copy(LeafId::new(index as u64).unwrap())
+                .unwrap();
+            match Page::validate(&bytes).unwrap().fences()?.lower {
                 Fence::Key(key) => Some(key.to_vec()),
                 Fence::Unbounded => None,
             }
@@ -156,9 +155,11 @@ fn scans_skip_empty_leaves() {
     assert_eq!(tree.check_invariants(), Ok(()));
     let empty = (0..tree.leaf_count())
         .filter(|&index| {
-            tree.leaf(LeafId::new(index as u64).unwrap())
-                .unwrap()
-                .is_empty()
+            let bytes = tree
+                .leaves
+                .page_copy(LeafId::new(index as u64).unwrap())
+                .unwrap();
+            Page::validate(&bytes).unwrap().is_empty()
         })
         .count();
     assert!(empty >= 3, "{empty} empty leaves");
@@ -317,9 +318,11 @@ fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
     assert_eq!(tree.check_invariants(), Ok(()));
     let empty = (0..tree.leaf_count())
         .filter(|&index| {
-            tree.leaf(LeafId::new(index as u64).unwrap())
-                .unwrap()
-                .is_empty()
+            let bytes = tree
+                .leaves
+                .page_copy(LeafId::new(index as u64).unwrap())
+                .unwrap();
+            Page::validate(&bytes).unwrap().is_empty()
         })
         .count();
     assert_eq!(empty, 5);

@@ -1,3 +1,4 @@
+use super::leaf_map::with_scratch;
 use super::{Tree, TreeError};
 use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 use bf_tree_page::RecordState;
@@ -26,11 +27,17 @@ impl Tree {
     ) -> Result<R, TreeError> {
         self.check_key(key)?;
 
-        let record = self.leaf(self.find_leaf(key))?.get(key)?;
-        Ok(f(record.and_then(|record| match record.state {
-            RecordState::Insert(value) => Some(value),
-            _ => None,
-        })))
+        let n = self.config.leaf_capacity;
+        let leaf = self.leaves.read(self.find_leaf(key))?;
+        with_scratch(|scratch| {
+            let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+            page.check_key(key)?;
+            let record = page.get(key)?;
+            Ok(f(record.and_then(|record| match record.state {
+                RecordState::Insert(value) => Some(value),
+                _ => None,
+            })))
+        })
     }
 
     /// Number of levels, counting the leaf level: a single-leaf tree has

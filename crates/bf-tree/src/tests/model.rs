@@ -103,7 +103,6 @@ fn run_on(
         let context = format!("{backend:?} {config:?} {keys:?} seed {seed:#x} step {step}");
         if step % reopen_every == reopen_every - 1 {
             tree.flush().unwrap();
-            assert_eq!(tree.dirty_leaves(), 0, "{context}");
             tree = match backend {
                 Backend::Memory => tree,
                 Backend::MemoryReopen => Tree::open(tree.into_store()).unwrap(),
@@ -317,7 +316,6 @@ fn baseline_file_store() {
         .count();
     let cold = started.elapsed();
     assert_eq!(found as u64, COUNT);
-    assert_eq!(tree.resident_leaves(), leaves);
 
     let started = Instant::now();
     let found = (0..COUNT)

@@ -1,6 +1,6 @@
 use super::Tree;
 use bf_tree_node_id::{ChildRef, InnerId, LeafId};
-use bf_tree_page::{Fence, Fences, KeyRef};
+use bf_tree_page::{Fence, Fences, KeyRef, Page};
 
 /// A structural invariant violation found by [`Tree::check_invariants`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -108,10 +108,13 @@ impl<'t> Checker<'t> {
             return Err(InvariantError::UnevenDepth(id));
         }
 
-        let page = self
+        let bytes = self
             .tree
-            .leaf(id)
+            .leaves
+            .page_copy(id)
             .map_err(|_| InvariantError::Dangling(ChildRef::Leaf(id)))?;
+        let page =
+            Page::validate(&bytes).map_err(|_| InvariantError::Dangling(ChildRef::Leaf(id)))?;
         if page.fences() != Some(interval) {
             return Err(InvariantError::FenceMismatch(id));
         }

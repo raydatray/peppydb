@@ -187,20 +187,9 @@ fn disk_baseline() {
     }
     latencies.report("put, replace random", "ops");
 
-    let dirty = tree.dirty_leaves();
     let started = Instant::now();
     tree.flush().unwrap();
-    let elapsed = started.elapsed();
-    println!(
-        "flush:                 {elapsed:.1?}  {dirty} dirty leaves, {:.0} leaves/s, {:.1} MiB/s",
-        dirty as f64 / elapsed.as_secs_f64(),
-        (dirty * config.leaf_capacity) as f64 / (1 << 20) as f64 / elapsed.as_secs_f64()
-    );
-    println!(
-        "resident after run:    {} leaves ({:.1} GiB)",
-        tree.resident_leaves(),
-        (tree.resident_leaves() * config.leaf_capacity) as f64 / (1u64 << 30) as f64
-    );
+    println!("flush (sync):          {:.1?}", started.elapsed());
 
     drop(tree);
     let _ = std::fs::remove_file(&path);

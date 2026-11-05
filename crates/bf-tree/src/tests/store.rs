@@ -1,9 +1,7 @@
-//! The leaf mapping table: residency and dirty tracking.
+//! The leaf mapping table and write-through to the store.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use zerocopy::IntoBytes;
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use bf_tree_store::FileStore;
@@ -13,69 +11,73 @@ fn leaf(raw: u64) -> LeafId {
 }
 
 #[test]
-fn a_new_tree_has_one_dirty_resident_leaf() {
-    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
-    assert_eq!(tree.leaf_count(), 1);
-    assert_eq!(tree.resident_leaves(), 1);
-    assert_eq!(tree.dirty_leaves(), 1);
-    assert_eq!(tree.leaves.store().slots(), 1);
+fn entry_lock_is_at_most_64_bytes() {
+    assert!(size_of::<bf_tree_sync::RwLock<crate::leaf_map::LeafEntry>>() <= 64);
 }
 
 #[test]
-fn reads_do_not_dirty_and_writes_do() {
+fn a_new_tree_stores_its_one_leaf_at_once() {
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    assert_eq!(tree.leaf_count(), 1);
+    assert_eq!(tree.leaves.store().slots(), 1);
+    let stored = stored_pages(&tree);
+    let page = Page::validate(&stored[0]).unwrap();
+    assert!(page.is_empty());
+    assert_eq!(
+        page.fences(),
+        Some(Fences {
+            lower: Fence::Unbounded,
+            upper: Fence::Unbounded,
+        })
+    );
+}
+
+#[test]
+fn a_fresh_map_over_the_store_serves_every_leaf() {
     let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..200u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
     let leaves = tree.leaf_count();
     assert!(leaves > 2);
-    assert_eq!(tree.resident_leaves(), leaves);
-    assert_eq!(tree.dirty_leaves(), leaves, "every split output is dirty");
     assert_eq!(tree.leaves.store().slots() as usize, leaves);
+    assert_eq!(stored_pages(&tree), copied_pages(&tree));
 
-    // Copy every page to the store by hand, then map the store afresh:
-    // nothing is resident until touched.
-    let images: Vec<_> = (0..leaves)
-        .map(|index| tree.leaf(leaf(index as u64)).unwrap().as_bytes().to_vec())
-        .collect();
+    // Map the unflushed store afresh, keeping the inner nodes: the store
+    // already holds every page.
     let store = tree.leaves.into_store();
-    for (index, image) in images.iter().enumerate() {
-        store.write(leaf(index as u64), image).unwrap();
-    }
     let mut tree = Tree {
         config: tree.config,
         root: tree.root,
         inner: tree.inner,
         leaves: LeafMap::new(store, (0..leaves).map(|_| false)),
     };
-    assert_eq!(tree.resident_leaves(), 0);
-    assert_eq!(tree.dirty_leaves(), 0);
-
     let key = 7u32.to_be_bytes();
     assert_eq!(tree.get(&key), Ok(Some(b"v".to_vec())));
-    assert_eq!(tree.resident_leaves(), 1);
-    assert_eq!(tree.dirty_leaves(), 0);
     assert_eq!(
         tree.check_invariants(),
         Ok(()),
         "the checker loads every leaf"
     );
-    assert_eq!(tree.resident_leaves(), leaves);
-    assert_eq!(tree.dirty_leaves(), 0);
 
+    // A put reaches the store before it returns.
+    let before = stored_pages(&tree);
     tree.put(&key, b"w").unwrap();
-    assert_eq!(tree.dirty_leaves(), 1);
+    let after = stored_pages(&tree);
+    let changed = (0..leaves).filter(|&i| before[i] != after[i]).count();
+    assert_eq!(changed, 1);
+    assert_eq!(tree.get(&key), Ok(Some(b"w".to_vec())));
 }
 
 #[test]
 fn unknown_and_freed_leaves_are_rejected_without_panicking() {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     assert_eq!(
-        tree.leaf(leaf(5)).err(),
+        tree.leaves.page_copy(leaf(5)).err(),
         Some(TreeError::UnknownLeaf(leaf(5)))
     );
     assert_eq!(
-        tree.leaf_mut(leaf(5)).err(),
+        tree.leaves.overwrite(leaf(5), &mut [0; 256]).err(),
         Some(TreeError::UnknownLeaf(leaf(5)))
     );
 
@@ -87,7 +89,7 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
         leaves: LeafMap::new(store, [true]),
     };
     assert_eq!(
-        tree.leaf(leaf(0)).err(),
+        tree.leaves.page_copy(leaf(0)).err(),
         Some(TreeError::UnknownLeaf(leaf(0)))
     );
     assert_eq!(tree.get(b"a"), Err(TreeError::UnknownLeaf(leaf(0))));
@@ -126,39 +128,34 @@ fn corrupt_stored_leaves_are_reported_on_load() {
 }
 
 #[test]
-fn split_pairs_load_the_left_leaf_on_demand() {
+fn a_split_loads_the_left_leaf_from_the_store() {
     let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..7u32 {
         tree.put(&i.to_be_bytes(), &[1; 16]).unwrap();
     }
-    // Round-trip the full leaf through the store, then force a split.
-    let mut page = vec![0; 256];
-    page.copy_from_slice(tree.leaf(leaf(0)).unwrap().as_bytes());
+    // Map the store of the full leaf afresh, then force a split.
     let store = tree.leaves.into_store();
-    store.write(leaf(0), &page).unwrap();
     let mut tree = Tree {
         config: tree.config,
         root: tree.root,
         inner: tree.inner,
         leaves: LeafMap::new(store, [false]),
     };
-    assert_eq!(tree.resident_leaves(), 0);
 
     tree.put(&7u32.to_be_bytes(), &[1; 16]).unwrap();
     tree.put(&8u32.to_be_bytes(), &[1; 16]).unwrap();
     assert_eq!(tree.height(), 2);
     assert_eq!(tree.leaf_count(), 2);
-    assert_eq!(tree.resident_leaves(), 2);
-    assert_eq!(tree.dirty_leaves(), 2);
+    assert_eq!(stored_pages(&tree), copied_pages(&tree));
     assert_eq!(tree.check_invariants(), Ok(()));
 }
 
-/// A store that counts writes and syncs, over any backend.
+/// A store that records writes and counts syncs, over any backend.
 #[derive(Debug)]
 struct Counting {
     inner: Box<dyn PageStore>,
-    writes: Arc<AtomicUsize>,
-    syncs: Arc<AtomicUsize>,
+    writes: Writes,
+    syncs: Counter,
 }
 
 impl PageStore for Counting {
@@ -178,7 +175,7 @@ impl PageStore for Counting {
         self.inner.read(id, buf)
     }
     fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        self.writes.fetch_add(1, Ordering::Relaxed);
+        self.writes.lock().unwrap().push(id);
         self.inner.write(id, buf)
     }
     fn sync(&self) -> Result<(), StoreError> {
@@ -191,9 +188,11 @@ impl PageStore for Counting {
 }
 
 type Counter = Arc<AtomicUsize>;
+/// The leaf of every store write, in order.
+type Writes = Arc<Mutex<Vec<LeafId>>>;
 
-fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Counter, Counter) {
-    let writes = Arc::new(AtomicUsize::new(0));
+fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Writes, Counter) {
+    let writes = Writes::default();
     let syncs = Arc::new(AtomicUsize::new(0));
     let store = Counting {
         inner: Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
@@ -215,9 +214,10 @@ fn stored_pages(tree: &Tree) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn resident_pages(tree: &Tree) -> Vec<Vec<u8>> {
+/// Every leaf page, copied under its shared lock.
+fn copied_pages(tree: &Tree) -> Vec<Vec<u8>> {
     (0..tree.leaf_count())
-        .map(|index| tree.leaf(leaf(index as u64)).unwrap().as_bytes().to_vec())
+        .map(|index| tree.leaves.page_copy(leaf(index as u64)).unwrap())
         .collect()
 }
 
@@ -249,59 +249,86 @@ fn create_checks_the_store_against_the_configuration() {
 
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     let tree = Tree::create(config, Box::new(store)).unwrap();
-    assert_eq!(tree.dirty_leaves(), 1);
+    assert_eq!(tree.store().slots(), 1);
+    assert!(tree.leaves.is_live(leaf(0)));
     assert_eq!(tree.height(), 1);
 }
 
 #[test]
-fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
+fn puts_write_through_and_flush_only_syncs() {
     let config = config(256, 128, 8, 16);
     let (store, writes, syncs) = counting(config);
     let mut tree = Tree::create(config, store).unwrap();
-    assert_eq!(writes.load(Ordering::Relaxed), 0);
+    assert_eq!(*writes.lock().unwrap(), [leaf(0)], "create writes the root");
+    writes.lock().unwrap().clear();
 
+    let mut splits = 0;
     for i in 0..200u32 {
-        tree.put(&i.to_be_bytes(), b"v").unwrap();
+        let key = i.to_be_bytes();
+        let (left, _) = tree.locate(&key);
+        let leaves = tree.leaf_count();
+        tree.put(&key, b"v").unwrap();
+        let written = std::mem::take(&mut *writes.lock().unwrap());
+        if tree.leaf_count() == leaves {
+            // In place: one write of the owning leaf.
+            assert_eq!(written, [left], "put {i}");
+        } else {
+            // A split: the new right leaf first, then the reachable left one.
+            assert_eq!(tree.leaf_count(), leaves + 1);
+            assert_eq!(written, [leaf(leaves as u64), left], "put {i}");
+            splits += 1;
+        }
     }
-    let leaves = tree.leaf_count();
-    assert_eq!(tree.dirty_leaves(), leaves);
+    assert!(splits >= 2);
+    assert_eq!(syncs.load(Ordering::Relaxed), 0);
+    assert_eq!(stored_pages(&tree), copied_pages(&tree));
 
+    // Flush writes nothing and syncs once, every time.
     tree.flush().unwrap();
-    assert_eq!(
-        (
-            writes.load(Ordering::Relaxed),
-            syncs.load(Ordering::Relaxed)
-        ),
-        (leaves, 1)
-    );
-    assert_eq!(tree.dirty_leaves(), 0);
-    assert_eq!(stored_pages(&tree), resident_pages(&tree));
+    tree.flush().unwrap();
+    assert!(writes.lock().unwrap().is_empty());
+    assert_eq!(syncs.load(Ordering::Relaxed), 2);
 
-    // A clean tree writes nothing; reads keep it clean.
+    // Reads and rejected operations write nothing; a remove writes its leaf.
     assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(Some(b"v".to_vec())));
-    tree.flush().unwrap();
-    assert_eq!(
-        (
-            writes.load(Ordering::Relaxed),
-            syncs.load(Ordering::Relaxed)
-        ),
-        (leaves, 2)
-    );
-
-    // One leaf written after one update; a split dirties two.
-    tree.put(&3u32.to_be_bytes(), b"w").unwrap();
-    assert_eq!(tree.dirty_leaves(), 1);
-    tree.flush().unwrap();
-    assert_eq!(writes.load(Ordering::Relaxed), leaves + 1);
-    assert_eq!(stored_pages(&tree), resident_pages(&tree));
-
+    assert_eq!(tree.put(&[1; 9], b"v"), Err(TreeError::KeyTooLarge));
+    assert!(writes.lock().unwrap().is_empty());
+    let (owner, _) = tree.locate(&3u32.to_be_bytes());
     assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(()));
+    assert_eq!(*writes.lock().unwrap(), [owner]);
     assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(None));
-    assert_eq!(tree.dirty_leaves(), 1);
-    assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(()));
-    tree.flush().unwrap();
-    assert_eq!(stored_pages(&tree), resident_pages(&tree));
+    assert_eq!(stored_pages(&tree), copied_pages(&tree));
     assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+#[test]
+fn a_dropped_tree_loses_no_write() {
+    let config = config(256, 128, 8, 16);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tree.bf");
+    let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
+    let mut tree = Tree::create(config, Box::new(store)).unwrap();
+    for i in 0..300u32 {
+        tree.put(&i.to_be_bytes(), &i.to_le_bytes()).unwrap();
+    }
+    for i in (0..300u32).step_by(7) {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+    assert!(tree.height() >= 2);
+    let leaves = tree.leaf_count();
+    let expected = collect(tree.iter());
+
+    // No flush: the store already holds every write.
+    let tree = Tree::open(tree.into_store()).unwrap();
+    assert_eq!(tree.leaf_count(), leaves);
+    assert_eq!(collect(tree.iter()), expected);
+    assert_eq!(tree.check_invariants(), Ok(()));
+    drop(tree);
+
+    // The same holds through the file, written but never synced.
+    let tree = Tree::open(Box::new(FileStore::open(&path).unwrap())).unwrap();
+    assert_eq!(collect(tree.iter()), expected);
+    assert_eq!(expected.len(), 300 - 300usize.div_ceil(7));
 }
 
 #[test]
@@ -326,13 +353,12 @@ fn memory_and_file_backends_store_identical_bytes() {
             }
         }
         tree.flush().unwrap();
-        assert_eq!(tree.dirty_leaves(), 0);
         assert_eq!(tree.check_invariants(), Ok(()));
     }
 
     let [mem, file] = trees;
     assert_eq!(stored_pages(&mem), stored_pages(&file));
-    assert_eq!(stored_pages(&file), resident_pages(&file));
+    assert_eq!(stored_pages(&file), copied_pages(&file));
     assert_eq!(collect(mem.iter()), collect(file.iter()));
     assert!(mem.height() >= 2);
 }

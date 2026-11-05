@@ -1,10 +1,11 @@
 use zerocopy::FromBytes;
 
+use super::leaf_map::{Locked, with_scratch};
 use super::read::Path;
 use super::{Tree, TreeError};
 use bf_tree_inner::{InnerError, InnerNode};
 use bf_tree_node_id::{ChildRef, LeafId};
-use bf_tree_page::{KeyRef, Page, RecordRef, RecordState};
+use bf_tree_page::{KeyRef, RecordRef, RecordState};
 
 impl Tree {
     /// Insert `key` with `value`, or replace its current value.
@@ -39,32 +40,55 @@ impl Tree {
             key: KeyRef::from(key),
             state,
         }];
-        // The batch check rejects a key outside the leaf's fences, which
-        // would mean a routing bug.
-        let page = self.leaf_mut(leaf)?;
-        if page.merge_batch_fits(batch.iter().copied())? {
-            page.merge_batch_in_place(batch.iter().copied())?;
-            return Ok(());
-        }
+        let n = self.config.leaf_capacity;
+        let separator = {
+            let leaves = &self.leaves;
+            let leaf = leaves.write(leaf)?;
+            with_scratch(|scratch| -> Result<_, TreeError> {
+                let page = leaves.load_base(&leaf, &mut scratch.page[..n])?;
+                page.check_key(key)?;
+                if page.merge_batch_fits(batch.iter().copied())? {
+                    page.merge_batch_in_place(batch.iter().copied())?;
+                    leaves.write_through(&mut [(leaf.id(), &mut scratch.page[..n])])?;
+                    return Ok(None);
+                }
 
-        self.split_and_propagate(leaf, &path, &batch)
+                let right = leaves.alloc()?;
+                let split = page.merge_batch_split(&mut scratch.right[..n], batch.iter().copied());
+                let separator = match split {
+                    Ok(split) => split.separator,
+                    Err(error) => {
+                        leaves.discard(right)?;
+                        return Err(error.into());
+                    }
+                };
+                let mut pages = [
+                    (leaf.id(), &mut scratch.page[..n]),
+                    (right.id(), &mut scratch.right[..n]),
+                ];
+                if let Err(error) = leaves.write_through(&mut pages) {
+                    leaves.discard(right)?;
+                    return Err(error);
+                }
+                Ok(Some((separator, right.id())))
+            })?
+        };
+
+        match separator {
+            None => Ok(()),
+            Some((separator, right)) => self.propagate(&path, separator, right),
+        }
     }
 
-    /// Split `leaf` with `batch` merged in, then insert each new separator
-    /// into the parent recorded on `path`, splitting full parents in turn.
-    /// When the path is exhausted, grow a new root over the old one.
-    fn split_and_propagate(
+    /// Insert `separator -> right` into the parent recorded on `path`,
+    /// splitting full parents in turn. When the path is exhausted, grow a
+    /// new root over the old one.
+    fn propagate(
         &mut self,
-        leaf: LeafId,
         path: &Path,
-        batch: &[RecordRef<'_>],
+        mut separator: Vec<u8>,
+        right: LeafId,
     ) -> Result<(), TreeError> {
-        let right = self.leaves.alloc()?;
-        let (left_bytes, right_bytes) = self.leaves.pair_mut(leaf, right)?;
-        let page = Page::mut_from_bytes(left_bytes).expect("leaf buffers hold a page header");
-        let mut separator = page
-            .merge_batch_split(right_bytes, batch.iter().copied())?
-            .separator;
         let mut child = ChildRef::Leaf(right);
 
         for &(parent, _) in path.iter().rev() {
