@@ -1,6 +1,6 @@
 # 0014: Eviction and the second chance
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Circular buffer](../design/bf-tree-circular-buffer.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -433,9 +433,10 @@ stored in the superblock.
 - **Plan 0015** adds `Hint::Cache` and `Hint::Promote`, the `Full` arms of
   `evict` (write back if dirty, free, retire) and `relocate` (copy the
   page bytes, keep `dirty`), the "no dirty record" shortcut in
-  `merge_leaf` (free without reading the base), and a deferred promotion
-  that calls `evict` for `Full` victims and `CircularBuffer::unclaim` for
-  others.
+  `merge_leaf` (free without reading the base), and deferred hints
+  (promotions and cache fills) that call `evict` for `Full` victims, free
+  mini-pages that hold no dirty record, and `CircularBuffer::unclaim` the
+  rest.
   It must not need to change `make_room`, `evict_one`, the `Attempt` loop,
   or `maintain`'s version check.
 - **Plan 0016** replaces the inner `RwLock` and `inner_version` behind
@@ -517,13 +518,20 @@ contains only the new protocol.
 
 ## Open questions
 
-- **Region bounds.** Should `validate` cap `second_chance_percent` below
-  100? Values near 100 relocate on almost every access and make `free`
-  tombstone almost every block. Recommendation: accept 0 to 100, document
-  the cost, and let plan 0023 measure.
-- **Relocation into a smaller class.** A relocation that drops many cold
-  clean records (after plan 0015) could copy into a smaller class.
-  Recommendation: keep the same class now; revisit with measurements.
+None.
+
+Resolved:
+
+- **Region bounds.** `validate` accepts `second_chance_percent` from 0 to
+  100. Values near 100 relocate on almost every access and make `free`
+  tombstone almost every block; the design documents state this cost, and
+  plan 0023 measures it.
+- **Relocation into a smaller class.** A relocation copies into a block of
+  the same class, dropping cold clean records as it copies, as upstream
+  does: `move_cache_page_to_tail` allocates the page's current
+  `node_size` and calls `copy_initialize_to(.., discard_cold = true)`, with
+  a TODO to shrink (`src/mini_page_op.rs`, `src/storage.rs`
+  `move_mini_page_to_tail`). Shrinking can come later, with measurements.
 
 ## Verification strategy
 
@@ -543,7 +551,7 @@ contains only the new protocol.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: eviction and the retry loop; `CircularBufferFull` removed.
 - [ ] Diff 3: `LeafEntry::version`, relocation, `Hint`, and `maintain`.
 - [ ] Diff 4: budget, durability, and concurrent models.
