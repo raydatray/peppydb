@@ -5,6 +5,7 @@ peppy_rust_library(
     deps = [
         "//crates/bf-tree-node-id:bf-tree-node-id",
         "//crates/bf-tree-page:bf-tree-page",
+        "//crates/bf-tree-sync:bf-tree-sync",
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],

@@ -14,6 +14,7 @@ fn mem() -> Box<dyn PageStore> {
 /// The temporary directory lives as long as the store; the store never
 /// touches the path again after `create`.
 fn file() -> Box<dyn PageStore> {
+    #[derive(Debug)]
     struct Owned {
         store: FileStore,
         _dir: tempfile::TempDir,
@@ -26,19 +27,19 @@ fn file() -> Box<dyn PageStore> {
         fn slots(&self) -> u64 {
             self.store.slots()
         }
-        fn alloc(&mut self) -> Result<LeafId, StoreError> {
+        fn alloc(&self) -> Result<LeafId, StoreError> {
             self.store.alloc()
         }
-        fn free(&mut self, id: LeafId) -> Result<(), StoreError> {
+        fn free(&self, id: LeafId) -> Result<(), StoreError> {
             self.store.free(id)
         }
         fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
             self.store.read(id, buf)
         }
-        fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+        fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
             self.store.write(id, buf)
         }
-        fn sync(&mut self) -> Result<(), StoreError> {
+        fn sync(&self) -> Result<(), StoreError> {
             self.store.sync()
         }
         fn superblock(&self) -> &Superblock {
@@ -55,11 +56,11 @@ fn backends() -> Vec<(&'static str, Factory)> {
     vec![("mem", mem as Factory), ("file", file as Factory)]
 }
 
-fn for_each_backend(scenario: impl Fn(&mut dyn PageStore)) {
+fn for_each_backend(scenario: impl Fn(&dyn PageStore)) {
     for (name, factory) in backends() {
-        let mut store = factory();
+        let store = factory();
         eprintln!("backend {name}");
-        scenario(store.as_mut());
+        scenario(store.as_ref());
     }
 }
 
@@ -183,5 +184,49 @@ fn buffers_must_be_exactly_one_page() {
             assert_eq!(store.read(id, &mut buf), expected);
             assert_eq!(store.write(id, &buf), expected);
         }
+    });
+}
+
+#[test]
+fn concurrent_allocs_return_distinct_ids() {
+    for_each_backend(|store| {
+        let ids: Vec<LeafId> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| (0..50).map(|_| store.alloc().unwrap()).collect::<Vec<_>>())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let mut raw: Vec<_> = ids.iter().map(|id| id.raw()).collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), 200);
+        assert_eq!(store.slots(), 200);
+    });
+}
+
+#[test]
+fn threads_write_distinct_slots_and_read_them_back() {
+    for_each_backend(|store| {
+        let ids: Vec<_> = (0..64).map(|_| store.alloc().unwrap()).collect();
+        std::thread::scope(|scope| {
+            for (thread, chunk) in ids.chunks(16).enumerate() {
+                scope.spawn(move || {
+                    for round in 0..20u8 {
+                        for (i, &id) in chunk.iter().enumerate() {
+                            let fill = (thread as u8 * 64) ^ (i as u8) ^ round;
+                            store.write(id, &page_image(PAGE, fill)).unwrap();
+                            let mut back = vec![0; PAGE];
+                            store.read(id, &mut back).unwrap();
+                            assert_eq!(back, page_image(PAGE, fill));
+                        }
+                    }
+                });
+            }
+        });
     });
 }

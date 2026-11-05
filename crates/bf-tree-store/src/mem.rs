@@ -1,18 +1,26 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::{PageStore, StoreError, Superblock, check_buffer};
 use bf_tree_node_id::LeafId;
+use bf_tree_sync::{Mutex, Table};
 
 /// An in-memory [`PageStore`]: one boxed buffer per slot and a free list.
 ///
 /// This is the fast test backend and the store behind `Tree::in_memory`. `sync` is
-/// a no-op; nothing outlives the value.
+/// a no-op; nothing outlives the value. A read or write locks only its slot.
 #[derive(Debug)]
 pub struct MemStore {
     superblock: Superblock,
-    pages: Vec<Box<[u8]>>,
-    /// Parallel to `pages`: whether the slot is on the free list.
-    freed: Vec<bool>,
-    /// Freed slot indices, reused last-in first-out.
-    free: Vec<usize>,
+    slots: Table<MemSlot>,
+    /// Freed slot indices, reused last-in first-out. Also serializes growth.
+    free: Mutex<Vec<usize>>,
+}
+
+#[derive(Debug, Default)]
+struct MemSlot {
+    page: Mutex<Box<[u8]>>,
+    /// Whether the slot is on the free list.
+    freed: AtomicBool,
 }
 
 impl MemStore {
@@ -22,16 +30,15 @@ impl MemStore {
 
         Ok(Self {
             superblock,
-            pages: Vec::new(),
-            freed: Vec::new(),
-            free: Vec::new(),
+            slots: Table::new(),
+            free: Mutex::new(Vec::new()),
         })
     }
 
-    fn index(&self, id: LeafId) -> Result<usize, StoreError> {
+    fn slot(&self, id: LeafId) -> Result<&MemSlot, StoreError> {
         usize::try_from(id.raw())
             .ok()
-            .filter(|&index| index < self.pages.len())
+            .and_then(|index| self.slots.get(index))
             .ok_or(StoreError::UnknownSlot(id))
     }
 }
@@ -42,59 +49,63 @@ impl PageStore for MemStore {
     }
 
     fn slots(&self) -> u64 {
-        self.pages.len() as u64
+        self.slots.len() as u64
     }
 
-    fn alloc(&mut self) -> Result<LeafId, StoreError> {
-        if let Some(index) = self.free.pop() {
-            self.freed[index] = false;
+    fn alloc(&self) -> Result<LeafId, StoreError> {
+        // Allocate the page before taking the free-list mutex.
+        let page = vec![0; self.superblock.page_size].into_boxed_slice();
+        let mut free = self.free.lock();
+        if let Some(index) = free.pop() {
+            let slot = self.slots.get(index).expect("freed slots exist");
+            slot.freed.store(false, Ordering::Release);
 
             return Ok(LeafId::from_index(index));
         }
 
-        let index = self.pages.len();
-        self.pages
-            .push(vec![0; self.superblock.page_size].into_boxed_slice());
-        self.freed.push(false);
+        let index = self.slots.len();
+        self.slots.grow_to(index + 1);
+        *self.slots.get(index).expect("just grown").page.lock() = page;
 
         Ok(LeafId::from_index(index))
     }
 
-    fn free(&mut self, id: LeafId) -> Result<(), StoreError> {
-        let index = self.index(id)?;
-        if self.freed[index] {
+    fn free(&self, id: LeafId) -> Result<(), StoreError> {
+        let slot = self.slot(id)?;
+        let mut free = self.free.lock();
+        if slot.freed.load(Ordering::Acquire) {
             return Err(StoreError::FreedSlot(id));
         }
 
-        self.pages[index].fill(0);
-        self.freed[index] = true;
-        self.free.push(index);
+        slot.page.lock().fill(0);
+        slot.freed.store(true, Ordering::Release);
+        free.push(id.index());
 
         Ok(())
     }
 
     fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
-        let index = self.index(id)?;
+        let slot = self.slot(id)?;
         check_buffer(self.superblock.page_size, buf)?;
 
-        buf.copy_from_slice(&self.pages[index]);
+        buf.copy_from_slice(&slot.page.lock());
 
         Ok(())
     }
 
-    fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        let index = self.index(id)?;
+    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+        let slot = self.slot(id)?;
         check_buffer(self.superblock.page_size, buf)?;
-        if self.freed[index] {
+        if slot.freed.load(Ordering::Acquire) {
             return Err(StoreError::FreedSlot(id));
         }
 
-        self.pages[index].copy_from_slice(buf);
+        slot.page.lock().copy_from_slice(buf);
 
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<(), StoreError> {
+    fn sync(&self) -> Result<(), StoreError> {
         Ok(())
     }
 
