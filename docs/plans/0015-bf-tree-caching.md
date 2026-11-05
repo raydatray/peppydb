@@ -632,7 +632,7 @@ Resolved:
 - [x] Diff 3: read promotion, split promotion, and deferral.
 - [x] Diff 4: record and negative caching.
 - [x] Diff 5: scan promotion.
-- [ ] Diff 6: policy models.
+- [x] Diff 6: policy models.
 - [ ] Diff 7: caching design document and roadmap.
 - [ ] Stack-wide verification.
 
@@ -652,6 +652,12 @@ Resolved:
   untouched. Write-load promotion and read promotion need the page in
   scratch, so they call `merge_keeping_page`, which loads the base page
   after such a no-op merge.
+- **Model buffer sizes.** The plan asked for circular buffers of two,
+  four, and eight pages. `validate` requires a power of two of at least
+  `2 * (leaf_capacity + 16)`, which is 1024 bytes for 256-byte leaves, so
+  the model uses 1, 2, and 4 KiB: about four, eight, and sixteen pages.
+  The model runs 60 policy combinations; the rate-0 runs without second
+  chance assert that reads and scans allocate nothing.
 
 ## Agent notes
 
