@@ -630,7 +630,7 @@ Resolved:
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: full pages and write-load promotion.
 - [x] Diff 3: read promotion, split promotion, and deferral.
-- [ ] Diff 4: record and negative caching.
+- [x] Diff 4: record and negative caching.
 - [ ] Diff 5: scan promotion.
 - [ ] Diff 6: policy models.
 - [ ] Diff 7: caching design document and roadmap.
@@ -647,6 +647,11 @@ Resolved:
 - **Hints are a struct, not only an enum.** `Noted` records the leaf
   version, an `aging` flag (the second chance), and an optional `Hint`,
   so one read can both relocate a block and promote a page.
+- **Callers that keep a page use `merge_keeping_page`.** `merge_leaf` now
+  frees a mini-page with no dirty record without I/O and leaves scratch
+  untouched. Write-load promotion and read promotion need the page in
+  scratch, so they call `merge_keeping_page`, which loads the base page
+  after such a no-op merge.
 
 ## Agent notes
 

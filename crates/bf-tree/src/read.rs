@@ -49,21 +49,24 @@ impl Tree {
             }
             Residency::Base => None,
         };
-        let base_served = buffered.is_none();
+        let mut hint = None;
         let result = match buffered {
             Some(value) => f(value),
             None => with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
                 page.check_key(key)?;
-                let record = page.get(key)?;
-                Ok(f(record.and_then(|record| match record.state {
+                let value = page.get(key)?.and_then(|record| match record.state {
                     RecordState::Insert(value) => Some(value),
                     _ => None,
-                })))
+                });
+                // A read served by the base page may leave something behind.
+                if self.roll_read() {
+                    hint = Some(self.read_hint(key, value));
+                }
+                Ok(f(value))
             })?,
         };
         drop(leaf);
-        let hint = if base_served { self.read_hint() } else { None };
         self.maintain(noted.with_hint(hint))?;
         Ok(result)
     }

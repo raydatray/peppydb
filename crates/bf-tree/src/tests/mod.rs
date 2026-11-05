@@ -13,6 +13,7 @@ mod open;
 mod overlay;
 mod promote;
 mod read;
+mod record;
 mod route;
 mod scan;
 mod second_chance;

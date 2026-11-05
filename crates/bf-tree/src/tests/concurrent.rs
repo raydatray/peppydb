@@ -287,9 +287,9 @@ fn threads_agree_under_constant_eviction() {
                 circular_buffer_bytes: bytes,
                 second_chance_percent: percent,
                 write_load_full_page: full,
-                // Page promotion on reads, where full pages are on.
-                read_promotion_percent: if full { 30 } else { 0 },
-                read_record_cache: false,
+                // Page promotion where full pages are on, else record caching.
+                read_promotion_percent: 30,
+                read_record_cache: !full,
                 ..tiny()
             };
             let stop = AtomicBool::new(false);
