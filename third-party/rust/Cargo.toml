@@ -17,6 +17,7 @@ name = "top"
 path = "top/main.rs"
 
 [dependencies]
+arc-swap = "1.9"
 tempfile = "3.27.0"
 thiserror = "2"
 zerocopy = { version = "0.8", features = ["derive"] }

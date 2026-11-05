@@ -12,6 +12,7 @@ peppy_rust_library(
         "//crates/bf-tree-page:bf-tree-page",
         "//crates/bf-tree-store:bf-tree-store",
         "//crates/bf-tree-sync:bf-tree-sync",
+        "//third-party/rust:arc-swap",
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],

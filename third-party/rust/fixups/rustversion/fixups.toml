@@ -1,0 +1,3 @@
+# Run the build script, as Cargo does. It writes version.expr into OUT_DIR,
+# which the crate includes.
+buildscript.run = true
