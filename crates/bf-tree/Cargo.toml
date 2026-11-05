@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+arc-swap.workspace = true
 bf-tree-circular-buffer = { path = "../bf-tree-circular-buffer" }
 bf-tree-inner = { path = "../bf-tree-inner" }
 bf-tree-mini-page = { path = "../bf-tree-mini-page" }
