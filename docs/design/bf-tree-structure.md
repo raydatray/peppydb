@@ -7,8 +7,8 @@ fences agree, when nodes split, which keys and values the tree admits, and how
 scans move between leaves.
 
 The tree is shared between threads: it is `Send + Sync`, and every
-operation takes `&self`. Each leaf has its own reader-writer lock, and the
-inner layer sits behind one interim lock; the
+operation takes `&self`. Each leaf has its own reader-writer lock, and
+inner nodes live in version-locked frames that readers never lock; the
 [concurrency design](bf-tree-concurrency.md) records the locks and the
 protocol. Leaves live behind a [page store](bf-tree-leaf-store.md). Each
 leaf is a base page in the store plus at most one in-memory
@@ -32,19 +32,23 @@ flowchart TD
     I2 --> L3["Leaf ['t', +inf)"]
 ```
 
-- The root is a `ChildRef`. A new tree is one leaf with unbounded fences, as
+- The root is a `ChildRef`, packed into one `AtomicU64` root word (bit 63
+  marks a leaf root). A new tree is one leaf with unbounded fences, as
   upstream's root-is-leaf flag allows. The first leaf split creates the first
-  inner node.
+  inner node. The root word changes only by root growth, to a new frame.
 - Every leaf is a fenced `Page`. Every leaf is at the same depth.
 - Inner nodes store no interval. Leaf fences are the only place the key-space
   partition is stored a second time, so they make the structure self-checking.
-- Inner nodes and the root live in an `InnerStore`: fixed-capacity, zeroed
-  `Box<[u8]>` buffers addressed by dense IDs that are never reused. They are
-  derived, in-memory data: nothing persists them, and `Tree::open` rebuilds
-  them from leaf fences. The tree keeps the `InnerStore` behind one
-  `RwLock` with a global `inner_version`.
-  [Plan 0016](../plans/0016-bf-tree-concurrency.md) replaces both with
-  per-node frames suited to optimistic latching.
+- Inner nodes live in frames (`crates/bf-tree/src/frames.rs`), addressed
+  by dense `InnerId`s. Each frame holds a version word and an immutable
+  4 KiB image of the node; a writer publishes a new image instead of
+  changing the old one. Frames are never freed, so an ID is never reused.
+  `Inner` (`crates/bf-tree/src/inner.rs`) holds the frames, the root word,
+  and the `root_grow` mutex. Inner nodes are derived, in-memory data:
+  nothing persists them, and `Tree::open` rebuilds them from leaf fences,
+  allocating complete frames. The
+  [concurrency design](bf-tree-concurrency.md#frames) records the frame
+  protocol ([plan 0016](../plans/0016-bf-tree-concurrency.md)).
 - Leaves live in a `PageStore` behind the `LeafMap`, described in
   [leaf storage](bf-tree-leaf-store.md). A `LeafId` is a stable slot in the
   store. A leaf's mini-page, if any, is reached through its entry. An access
@@ -56,8 +60,9 @@ flowchart TD
 
 `InnerNode::route` is right-on-equality, and leaf fences are lower-inclusive.
 A descent with any byte slice therefore reaches the one leaf whose fences
-contain it. Under concurrency a route becomes stale if the routed leaf
-splits between the descent and the leaf lock. The
+contain it. A descent takes no lock: it reads each frame optimistically and
+validates the node above it. Under concurrency a route becomes stale if the
+routed leaf splits between the descent and the leaf lock. The
 [route, lock, validate, retry protocol](bf-tree-concurrency.md#route-lock-validate-retry)
 detects this and routes again. A point read that loads the base page calls
 `Page::check_key` on it, and a failure surfaces as the internal
@@ -116,7 +121,7 @@ flowchart TD
     D -->|no| F[alloc and X-lock fresh right leaf]
     F --> G[merge_split into scratch.right]
     G --> H[write_through right then left]
-    H --> I[install under inner write lock, bump version]
+    H --> I["install: lock parent frames bottom-up, publish top-down"]
     E --> J[free the block]
     I --> J
     J --> K[buffer the record into the half that owns the key]
@@ -145,9 +150,11 @@ mini-page to the tail if it has aged into the second-chance region (see
    `scratch.page` and the right half goes to `scratch.right`.
 3. One `write_through([left, right])` call writes the right page first and
    then the left page.
-4. `install` takes the inner write lock, descends with the separator to
-   find the parent path, inserts `separator -> right`, propagates splits
-   upward, and bumps `inner_version`.
+4. `install` finds the parent frame by a lock-free descent with the
+   separator, write-locks it, and confirms that it still routes the
+   separator to the left leaf. It inserts `separator -> right` into a draft
+   image, splits full frames and continues upward, and then publishes the
+   changed frames from the top down.
 5. `merge_leaf` frees the mini-page's block, and the caller places its
    pending record, if any.
 6. The right leaf's guard drops, and then the left leaf's guard drops.
@@ -161,21 +168,26 @@ is lost.
 `install` re-descends instead of using a recorded path, so a write records
 no path. The separator is a key of the right half, so it lies in the left
 leaf's old range, which cannot change while the caller holds the left
-leaf's X lock. Propagation (`InnerStore::propagate`) is the same at every
-level. When the path is exhausted, a new inner node with `first = old root`
-receives the separator and becomes the root, so every leaf moves down one
+leaf's X lock. Propagation (`Inner::install`) is the same at every level:
+a split frame stays write-locked, and its parent is found the same way with
+the promoted separator. When the split node is the root, `install` takes
+`root_grow`, allocates a new inner node with `first = old root` that holds
+the separator, and stores it in the root word, so every leaf moves down one
 level together. Only `ChildRef` values and owned separators move between
-levels.
+levels. New frames (right halves and new roots) are allocated with their
+final image and are never locked.
 
 Splitting is *reactive*: a leaf splits only after a merge into it does not
 fit, and an inner node splits only after a separator does not fit. This is
-exact here. The leaf split runs under the leaf's X lock, and
-the whole upward propagation runs under the inner write lock, so nothing
-changes between the failed fit and the parent update. Plan 0016 replaces
-the inner lock with optimistic latching, where that gap is real; it decides
-whether to add upstream's split-on-descent variant. Whether a node is
-"full" is derived from its free space and the admission limits; node images
-carry no needs-split bit.
+exact. The leaf split runs under the leaf's X lock, and propagation locks
+each parent frame bottom-up and keeps it locked until the top-down
+publication, so nothing changes a node between its failed fit and its
+update. Frame locks wait rather than fail, and they are taken in level
+order, so the tree needs no split-on-descent: plan 0016 chose blocking
+bottom-up propagation over upstream's split-on-descent variant (see
+[concurrency](bf-tree-concurrency.md#splits-and-propagation)). Whether a
+node is "full" is derived from its free space and the admission limits;
+node images carry no needs-split bit.
 
 `remove(key)` buffers a tombstone; the next merge physically removes the
 record from the base page. Leaves are never merged and inner nodes never
@@ -315,8 +327,8 @@ states the exact guarantee.
 `check_invariants` verifies, and the tests assert after every operation, the
 following invariants. The checker is compiled only for tests: it walks every
 node and record, so it is too slow for normal operations. It copies the
-routing layer under the inner read lock, releases that lock, and then locks
-leaves one at a time, so it cannot deadlock with concurrent operations. Its
+routing layer from frame snapshots without a lock, and then locks leaves
+one at a time, so it cannot deadlock with concurrent operations. Its
 result is meaningful only at quiescence.
 
 1. Every leaf is at the same depth.
@@ -343,9 +355,12 @@ after every step.
   `create_mem_page_size_classes` conditions. peppydb differs by deriving
   the largest class from a merge-split proof, placing the pending record
   after a merge under the held locks instead of restarting, splitting
-  reactively, and storing no `should_split` bit in node images.
+  reactively with blocking bottom-up propagation instead of
+  split-on-descent, and storing no `should_split` bit in node images.
 - Plans [0007](../plans/0007-bf-tree-in-memory-tree.md) (the tree, splits,
   and the first admission rule), [0012](../plans/0012-bf-tree-shared-tree.md)
   (shared tree, owned reads, and per-leaf scans), and
   [0013](../plans/0013-bf-tree-mini-tree.md) (blind writes, merge splits,
-  the ladder admission rule, and flush merges).
+  the ladder admission rule, and flush merges), and
+  [0016](../plans/0016-bf-tree-concurrency.md) (frames, the root word, and
+  concurrent propagation).

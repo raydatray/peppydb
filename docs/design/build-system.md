@@ -111,6 +111,31 @@ do not use a configuration flag.
   `cfg(test)` applies only to the crate under test, so code in its
   dependencies would silently keep the normal behavior.
 
+## Linux runs in a pinned container
+
+Contended benchmarks and Linux test runs use a container, so that they are
+one command from any checkout ([plan 0016](../plans/0016-bf-tree-concurrency.md)):
+
+```sh
+tools/linux-run tools/buck2 test //crates/bf-tree/...
+```
+
+- **Why Linux.** The engine targets Linux, and the macOS standard
+  `RwLock` parks readers under reader contention, so contended numbers from
+  macOS misrepresent leaf locks.
+- **Pinned like every other tool.** `tools/linux/Dockerfile` starts from an
+  Ubuntu image pinned by digest. It installs the `rust-toolchain.toml`
+  toolchain with its components through rustup, and DotSlash through
+  `tools/ci/install-dotslash`, so each pin stays in one file.
+  `tools/linux-run` builds the image from those files and tags it with a
+  hash of them, so it rebuilds only when they change.
+- **Separate outputs.** `tools/linux-run` mounts the checkout and puts
+  named volumes over `buck-out/` and `target/` (and caches for the Cargo
+  registry and DotSlash), so Linux and host build outputs never mix. It
+  forwards the `PEPPYDB_BENCH_*` variables.
+- **Limit.** Benchmarks in the container see the CPUs of Docker's virtual
+  machine, not the host's. Record the machine with the numbers.
+
 ## Strict by default
 
 Warnings fail every Buck2 build, not only clippy runs, and the toolchain

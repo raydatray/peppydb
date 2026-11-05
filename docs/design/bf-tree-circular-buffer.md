@@ -102,7 +102,8 @@ freeing the slab, building slices from a `Block`, and declaring `Block`
 
 Block bytes are leaf-level data, read and written only under the owning
 leaf's lock, so no optimistic reader touches the slab. (Inner nodes, which
-readers traverse optimistically, use immutable images; see plan 0016.)
+readers traverse optimistically, use immutable images; see the
+[concurrency design](bf-tree-concurrency.md#frames).)
 
 The tests run under Miri through Buck2 (`@build/mode/miri`), including a
 threaded stress test.
