@@ -9,6 +9,7 @@ peppy_rust_library(
     ],
     visibility = [
         "//crates/bf-tree-inner:",
+        "//crates/bf-tree-mini-page:",
         "//crates/bf-tree-store:",
         "//crates/bf-tree:",
     ],
