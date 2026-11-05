@@ -8,7 +8,7 @@ scans move between leaves.
 
 The tree is single-threaded, with leaves behind a
 [page store](bf-tree-leaf-store.md). It has base leaves only: mini-pages, the
-buffer pool, concurrency, and logging are separate components that do not
+circular buffer, concurrency, and logging are separate components that do not
 exist yet.
 
 ## Shape
