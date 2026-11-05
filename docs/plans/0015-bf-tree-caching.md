@@ -1,6 +1,6 @@
 # 0015: Caching policy and full pages
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Caching policy](../design/bf-tree-caching.md)
 (created by this stack), [circular buffer](../design/bf-tree-circular-buffer.md),
@@ -185,8 +185,8 @@ flowchart TD
     U --> T{try X once, version unchanged?}
     T -->|no| D[done]
     T -->|yes| Y[relocate if aging, apply hint]
-    Y --> Z{promotion lacked room?}
-    Z -->|yes| Q[release X, finish deferred promotion]
+    Y --> Z{promotion or fill lacked room?}
+    Z -->|yes| Q[release X, finish the deferred hint]
     Z -->|no| D
     Q --> D
 ```
@@ -212,8 +212,11 @@ chance. Each hint's validity follows from the version rule:
 `buffer` with the tree's `CircularBuffer`, allocating the smallest
 class on a `Base` leaf. It follows two rules:
 
-- **It never evicts.** `BufferError::Full` drops the fill. A fill is a performance
-  hint and must not make a read pay for store writes.
+- **It never evicts under the lock.** On `BufferError::Full` the fill is
+  deferred like a promotion (below): the reader releases its lock, frees
+  room without I/O, and retries the fill once. A fill is a performance hint
+  and must not make a read pay for store writes, so deferral evicts only
+  blocks whose eviction costs no I/O.
 - **It never merges.** On `NeedsMerge` the mini-page is full. A leaf hot
   enough to fill a mini-page with records is a candidate for the whole
   page, so the fill becomes a promotion (below), which may merge.
@@ -269,24 +272,31 @@ page could never be promoted: every read would pay a base read and a failed
 merge check, and the leaf would stay that way until a write happened to
 split it.
 
-**Deferred promotion.** `promote` runs under the leaf's X lock, so it must
-not evict. When it returns `NoRoom`, `maintain` releases the lock and
-finishes the promotion with no lock held:
+**Deferred hints.** `promote` and `cache_fill` run under the leaf's X lock,
+so they must not evict. When either lacks room, `maintain` releases the lock
+and finishes the hint with no lock held:
 
 ```rust
 pub(crate) struct Deferred {
     leaf: LeafId,
     version: u32,
+    /// The hint to retry: `Promote`, or `Cache` with its owned key and value.
+    hint: Hint,
 }
 
 fn finish_deferred(&self, deferred: Deferred) -> Result<(), TreeError> {
-    while !self.leaves.circular_buffer().has_room(self.page_size) {
+    let need = match deferred.hint {
+        Hint::Promote => self.page_size,
+        _ => self.leaves.classes().as_slice()[0],
+    };
+    while !self.leaves.circular_buffer().has_room(need) {
         match self.leaves.circular_buffer().claim_victim() {
             Claim::Victim(victim) if victim.kind == Kind::Full => self.evict(victim)?,
-            // A mini-page victim needs a merge; a hint does not pay for it.
+            // A clean mini-page frees without I/O; a dirty one stops the hint.
             Claim::Victim(victim) => {
-                self.leaves.circular_buffer().unclaim(victim);
-                return Ok(());
+                if !self.evict_if_clean(victim)? {
+                    return Ok(());
+                }
             }
             // A hint does not wait for other evictors.
             Claim::Busy | Claim::Empty => return Ok(()),
@@ -296,16 +306,34 @@ fn finish_deferred(&self, deferred: Deferred) -> Result<(), TreeError> {
         return Ok(());
     };
     if leaf.version() == deferred.version {
-        with_scratch(|scratch| self.promote(&mut leaf, scratch))?; // NoRoom again: drop it
+        // No room again: drop the hint.
+        with_scratch(|scratch| self.apply_hint(&mut leaf, &deferred.hint, scratch))?;
     }
     Ok(())
 }
+
+/// Evict a claimed mini-page if it holds no dirty record: free its block
+/// with no I/O and retire the claim. Otherwise, or if its owner is busy,
+/// unclaim it and return `false`.
+fn evict_if_clean(&self, victim: Victim) -> Result<bool, TreeError>;
 ```
 
-Promotion never evicts a mini-page. A mini-page holds buffered writes,
-whose eviction costs a merge and possibly a split; spending that to make
-room for a clean copy of a page inverts the priority. The re-lock uses
-`try_lock_write`, so a reader never blocks for its own hint.
+A hint never evicts a mini-page that holds a dirty record. Such a mini-page
+holds buffered writes, whose eviction costs a merge and possibly a split;
+spending that to make room for a clean record or a clean copy of a page
+inverts the priority. A mini-page with only `Cache` and `Phantom` records
+repeats the base page, so freeing it loses nothing. `evict_if_clean` locks
+the owner with `try_lock_write`, checks that the entry still holds the
+block (`Block::is`) and that `dirty()` is empty, and unclaims otherwise. The
+re-lock of the hint's own leaf also uses `try_lock_write`, so a reader never
+blocks for its own hint.
+
+This keeps read-only workloads adapting. Without it, once the circular
+buffer filled with cache-only mini-pages, every later fill would fail and
+nothing would evict, so the cache would freeze on its first contents.
+Upstream avoids the freeze by evicting on any read whose cache insert finds
+the buffer full (`src/tree.rs`, "read promotion failed, started evict"),
+merges included; peppydb evicts only what is free to evict.
 
 ### Scans
 
@@ -321,8 +349,11 @@ leaf that is still `Base`, so its merge branch is unreachable from scans.
 When a write's mini-page needs a merge (`NeedsMerge` in the write path) and
 `write_load_full_page` is set, the merged left page stays in the circular
 buffer as `Full` if a page can be allocated without eviction; otherwise the
-leaf becomes `Base` as before. The pending record then goes into the half that
-owns the key: directly into the full page, or buffered. There is no
+leaf becomes `Base` as before. When the merge splits, the left half (the
+leaf being written) is the one kept, as upstream does: its write path merges,
+then calls `upgrade_to_full_page` on its own leaf (`src/mini_page_op.rs`).
+The pending record then goes into the half that owns the key: directly into
+the full page, or buffered. There is no
 deferral on the write path. Eviction and `flush` merges never keep a page,
 because eviction must not allocate from the circular buffer.
 
@@ -432,14 +463,20 @@ clean record. The bits are cache-policy state with no durability role.
 - **Phantoms on misses.** Upstream caches only found records on reads; the
   paper's record kinds include the phantom for exactly this negative cache.
   The cost is one small record per cached miss.
-- **Cache fills never evict or merge; promotions never evict mini-pages.**
-  Reads stay cheap and never do write I/O for someone else's buffered data.
-  See the open question on read-only workloads.
+- **Hints evict only what costs no I/O.** Cache fills never merge. A fill or
+  promotion that lacks room defers, and its deferral evicts full pages
+  (clean, or one write-back) and mini-pages with no dirty record (free), and
+  stops at a mini-page with a dirty record. Reads never do write I/O for
+  someone else's buffered data, yet the cache keeps adapting in read-only
+  workloads. Alternative: fills never evict at all, which froze the cache
+  once it filled with clean mini-pages.
 - **Promotion merges by split when it must.** Without it, promotion of an
   overgrown leaf would never succeed and every read would keep paying for
   the base page.
-- **Keep the left half on a split promotion.** It is the leaf the hint
-  validated and the entry already locked.
+- **Keep the left half on a split promotion and on a write-load split.** It
+  is the leaf the hint or write already holds, and it matches upstream.
+  Keeping the half that owns the pending record might suit append-heavy
+  workloads; plan 0023 can measure it.
 - **No scratch reuse between the read and its hint.** Scratch is per thread,
   not per tree, so a "loaded leaf" tag would need the tree identity too. One
   extra base read per applied promotion is acceptable; plan 0023 may add a
@@ -497,15 +534,17 @@ Seven diffs.
 - **Purpose:** Page caching, including the split promotion and deferral.
 - **Core changes:** `Policy` with the per-tree generator;
   `read_promotion_percent`, `read_record_cache`, `policy_seed`;
-  `Hint::Promote`; `promote`; `Deferred` and `finish_deferred`; the read
-  path rolls on base-served reads. In record mode reads leave nothing yet.
-  About 300 lines.
+  `Hint::Promote`; `promote`; `Deferred` and `finish_deferred`, which
+  evicts full pages and clean mini-pages (`evict_if_clean`); the read path
+  rolls on base-served reads. In record mode reads leave nothing yet.
+  About 320 lines.
 - **Verification:** With page mode at rate 100 the first read leaves the
   page `Full` and the second reads no base page; a `Mini` leaf promotes by
   merging in place; a `Mini` leaf whose merge does not fit splits on the
   first promoting read, keeps the left half `Full`, and agrees with the
-  oracle; with no room the deferral evicts full pages and stops at a
-  mini-page (which is unclaimed); a stale `Promote` is skipped; a fresh
+  oracle; with no room the deferral evicts full pages and clean mini-pages
+  without I/O and stops at a mini-page with a dirty record (which is
+  unclaimed); a stale `Promote` is skipped; a fresh
   tree's roll sequence depends only on its seed, not on trees the thread
   used before; rate 20 over many rolls lands near 20%.
 
@@ -513,13 +552,16 @@ Seven diffs.
 
 - **Purpose:** Record and negative caching.
 - **Core changes:** `Hint::Cache`; `cache_fill` through `buffer`;
-  `NeedsMerge` turns into a promotion; `BufferError::Full` drops the fill;
+  `NeedsMerge` turns into a promotion; `BufferError::Full` defers the fill;
     `merge_leaf` frees a mini-page with no dirty record without I/O. About
   250 lines.
 - **Verification:** At rate 100 the second read of a present key and of an
   absent key reads no base page (counting store); a hit marks the bit; a
   fill after a buffered write of the same key is `SkippedDirty`; a fill into
-  a full circular buffer changes nothing; growth and relocation drop
+  a full circular buffer changes nothing under the lock, then its deferral
+  frees clean mini-pages and the retried fill lands; a read-only workload
+  whose working set moves keeps caching the new keys (counting store: base
+  reads of the new keys stop after their first read); growth and relocation drop
   unreferenced clean records and keep referenced and dirty ones; eviction and `flush` of a
   cache-only mini-page write nothing; cached records never reach the store.
 
@@ -556,20 +598,16 @@ Seven diffs.
 
 ## Open questions
 
-- **Read-only workloads with record caching stop adapting.** Fills never
-  evict, and reads never trigger eviction. Once the circular buffer is
-  full of mini-pages that hold only clean records, every later fill fails and no
-  block is ever evicted, so the cache freezes on its first contents. Page
-  mode does not freeze, because deferral evicts full pages. Recommendation:
-  let a fill that finds no room defer like a promotion, and let deferral
-  also evict mini-pages that hold no dirty record (freeing them costs no
-  I/O); it still stops at a mini-page with a dirty record. This changes
-  diffs 3 and 4 by about 40 lines. The stack above follows the agreed rule
-  (fills never evict) until this is decided.
-- **Which half to keep on a write-load split.** This plan keeps the left
-  half, as for promotion. Keeping the half that owns the pending record
-  might suit append-heavy workloads. Recommendation: keep the left half;
-  measure in plan 0023.
+None.
+
+Resolved:
+
+- **Read-only workloads with record caching stop adapting.** Fixed: a fill
+  that lacks room defers like a promotion, and deferral also evicts
+  mini-pages with no dirty record, which costs no I/O. It still stops at a
+  mini-page with a dirty record. See "Deferred hints".
+- **Which half to keep on a write-load split.** The left half, as upstream
+  does. Plan 0023 can measure the alternative for append-heavy workloads.
 
 ## Verification strategy
 
@@ -589,7 +627,7 @@ Seven diffs.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: full pages and write-load promotion.
 - [ ] Diff 3: read promotion, split promotion, and deferral.
 - [ ] Diff 4: record and negative caching.
@@ -646,6 +684,6 @@ None yet.
   [`src/storage.rs`](https://github.com/microsoft/bf-tree/blob/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/storage.rs),
   [`src/config.rs`](https://github.com/microsoft/bf-tree/blob/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/config.rs).
   peppydb differs by caching phantoms on read misses, by never merging for
-  a scan or a cache fill, by never evicting a mini-page for a promotion,
+  a scan or a cache fill, by never evicting a dirty mini-page for a hint,
   and by applying cache maintenance after the shared lock is released,
   validated by the leaf version.
