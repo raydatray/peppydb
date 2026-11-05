@@ -1,6 +1,6 @@
 # 0016: Concurrent inner nodes with version-locked frames
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Concurrency](../design/bf-tree-concurrency.md)
 (created by plan 0012, completed by this stack),
@@ -424,13 +424,13 @@ hold at most one leaf S lock.
   ThreadSanitizer usable. The costs are one `arc-swap` load per level, a
   4 KiB copy per modified frame, and an allocation per publication. Splits
   are rare compared with descents, so the copy is not expected to show in
-  `put` throughput; diff 10 measures it.
+  `put` throughput; diff 9 measures it.
 - **No `unsafe` here, even though plan 0010 allows it in one crate.** Plan
   0010 allows `unsafe` code only in `bf-tree-circular-buffer`. The
   workspace allows `unsafe` only for a specific need that no safe design
   meets. In-place optimistic reads with atomic loads were reconsidered when
   plan 0010 changed and were rejected: `arc-swap` images are a safe design
-  that meets the requirement, and diff 10 measures their cost.
+  that meets the requirement, and diff 9 measures their cost.
 - **`arc-swap` rather than `RwLock<Arc<Image>>` or `crossbeam-epoch`.**
   `arc-swap`'s `load` writes only thread-local debt slots, so readers do not
   write a shared cache line, which is the property §3.4 wants. A lock or a
@@ -453,7 +453,7 @@ hold at most one leaf S lock.
   rather than fail, and the level order makes waiting deadlock-free, so a
   full parent can be split in the same pass. This keeps exact reactive
   splits. The tree-structure design currently expects split-on-descent;
-  diff 10 corrects it. Split-on-descent is needed when the bottom-up step is
+  diff 9 corrects it. Split-on-descent is needed when the bottom-up step is
   a non-blocking CAS that cannot wait for a full parent.
 - **Frame write lock spins.** A critical section is a copy, an insert, and
   perhaps a table growth; during a multi-level split a holder also waits for
@@ -506,17 +506,17 @@ hold at most one leaf S lock.
 
 ## Proposed commit stack
 
-Ten diffs. Benchmarks land before the swap so that before and after use the
+Nine diffs. Benchmarks land before the swap so that before and after use the
 same harness. The frame primitive, the reader protocol, and the concurrent
 writer protocol are separate diffs.
 
-### `[1/10][bf-concurrency][plan] define version-locked inner frames`
+### `[1/9][bf-concurrency][plan] define version-locked inner frames`
 
 - **Purpose:** Agree on frames, the correctness argument, and the lock order.
 - **Core changes:** This plan; link from the roadmap's milestone 8 row.
 - **Verification:** Review.
 
-### `[2/10][bf-concurrency][bench] measure routing under the interim inner lock`
+### `[2/9][bf-concurrency][bench] measure routing under the interim inner lock`
 
 - **Purpose:** Record the baseline the swap must beat.
 - **Core changes:** `crates/bf-tree/src/tests/bench.rs` with `#[ignore]`
@@ -528,9 +528,9 @@ writer protocol are separate diffs.
   from `PEPPYDB_BENCH_KEY`, `_VALUE`, `_CIRCULAR_BUFFER_MIB`. Debug-only counters, if
   any, stay out of release builds.
 - **Verification:** The benchmarks run in release mode; numbers are kept
-  for diff 10.
+  for diff 9.
 
-### `[3/10][bf-concurrency][tools] add a pinned Linux container for contended runs`
+### `[3/9][bf-concurrency][tools] add a pinned Linux container for contended runs`
 
 - **Purpose:** Contended benchmarks must run on Linux; make that one
   command from any checkout.
@@ -542,7 +542,7 @@ writer protocol are separate diffs.
 - **Verification:** `tools/linux-run tools/buck2 test //crates/bf-tree/...`
   passes; a benchmark runs and prints.
 
-### `[4/10][bf-concurrency][deps] add arc-swap`
+### `[4/9][bf-concurrency][deps] add arc-swap`
 
 - **Purpose:** The one new third-party dependency, as a mechanical diff.
 - **Core changes:** `arc-swap` in `third-party/rust/Cargo.toml`;
@@ -550,7 +550,7 @@ writer protocol are separate diffs.
   deps; `tools/autocargo`.
 - **Verification:** `tools/autocargo --check`; `cargo test --workspace --locked`.
 
-### `[5/10][bf-concurrency][frames] add version-locked image frames`
+### `[5/9][bf-concurrency][frames] add version-locked image frames`
 
 - **Purpose:** The primitive, reviewed and tested alone.
 - **Core changes:** `crates/bf-tree/src/frames.rs` (`Image`, `Frame`,
@@ -565,7 +565,7 @@ writer protocol are separate diffs.
   `n` and readers checking that no image is torn and that a validated read
   at version `v` holds the image published at `v`.
 
-### `[6/10][bf-concurrency][descent] route through frames without inner locks`
+### `[6/9][bf-concurrency][descent] route through frames without inner locks`
 
 - **Purpose:** Replace `RwLock<InnerStore>` and `inner_version` for
   readers (claims 1 to 4).
@@ -582,7 +582,7 @@ writer protocol are separate diffs.
   same for a leaf root after the first split and for an inner root after
   root growth; open tests pass with frames.
 
-### `[7/10][bf-concurrency][propagate] lock parents bottom-up and grow the root`
+### `[7/9][bf-concurrency][propagate] lock parents bottom-up and grow the root`
 
 - **Purpose:** Concurrent structural changes (claims 5 to 7).
 - **Core changes:** `lock_parent` (`find_parent`, lock, confirm, else
@@ -594,7 +594,7 @@ writer protocol are separate diffs.
   orders, reach height 4 or more under a watchdog and match the union
   oracle; existing concurrent models pass.
 
-### `[8/10][bf-concurrency][tests] verify overlapping keys, splits, and eviction under contention`
+### `[8/9][bf-concurrency][tests] verify overlapping keys, splits, and eviction under contention`
 
 - **Purpose:** Extend the 0012 concurrent model, written once, to the final
   protocol.
@@ -608,22 +608,12 @@ writer protocol are separate diffs.
 - **Verification:** Repeated runs pass with the watchdog; the circular-buffer budget
   holds; invariants hold at quiescence.
 
-### `[9/10][bf-concurrency][upstream] add the upstream comparison harness`
-
-- **Purpose:** Compare scaling with the upstream implementation on the same
-  workloads (open question 2; this diff is dropped if the answer is no).
-- **Core changes:** `bench/upstream/`: a standalone Cargo project outside
-  the Buck2 graph and the workspace, depending on upstream at revision
-  `f442e61` by git, replicating the key generator and operation mixes of
-  diff 2; run through `tools/linux-run`.
-- **Verification:** Builds and runs in the container.
-
-### `[10/10][bf-concurrency][docs] record the frame protocol and its measurements`
+### `[9/9][bf-concurrency][docs] record the frame protocol and its measurements`
 
 - **Purpose:** Complete the concurrency design and close milestone 8.
 - **Core changes:** `bf-tree-concurrency.md`: frames, the correctness
   argument, the final lock order, and Linux measurements (before and after,
-  hot set, components, upstream if diff 9 landed) with the recipe and
+  hot set, components) with the recipe and
   machine; `bf-tree-structure.md`: frames replace `InnerStore`, bottom-up
   propagation replaces the split-on-descent expectation;
   `bf-tree-inner-nodes.md`: the frame owner exists; roadmap milestone 8
@@ -632,27 +622,22 @@ writer protocol are separate diffs.
 
 ## Open questions
 
-1. **Shuttle.** `cfg(test)` applies only to the crate under test, so a
-   switch in `bf-tree-sync` would not apply when `bf-tree`'s tests run.
-   A real switch needs a Cargo-style `shuttle` feature on `bf-tree-sync`
-   and `bf-tree`, feature support in `peppy_rust_library` and
-   `tools/autocargo` (which emits no `[features]` today), and, per
-   [build modes are platforms](../design/build-system.md#build-modes-are-platforms),
-   a constraint and platform that select the feature for the whole graph,
-   as plan 0009 found. Shuttle explores interleavings, not weak memory
-   orderings, and treats each `arc-swap` call as one atomic step.
-   **Recommendation:** defer. This stack relies on deterministic
-   interleaving tests, stress tests with a watchdog, and the soak test, and
-   routes every atomic and spin through `bf-tree-sync` so that a later
-   stack can add the switch in one crate plus build support.
-2. **Upstream comparison harness.** Commit `bench/upstream/` (diff 9) as a
-   standalone Cargo project outside the Buck2 graph, or skip the
-   comparison. A third-party crate through reindeer is not recommended:
-   upstream is not a dependency of anything we ship. **Recommendation:**
-   commit it if it builds in the Linux container; otherwise record why.
-3. **Linux recipe.** Docker under `tools/` (recommended) versus a CI job on
-   shared Linux runners, whose noise makes contended numbers unreliable,
-   versus prose only. CI can run the recipe later.
+None.
+
+Resolved:
+
+1. **Shuttle: deferred.** The stack relies on deterministic interleaving
+   tests, stress tests under a watchdog, and the soak test. Every atomic
+   and spin still goes through `bf-tree-sync`, so a later stack can add a
+   Shuttle switch in one crate plus build support (a feature and a build
+   mode).
+2. **Upstream comparison harness: skipped for now.** The former diff 9
+   (`bench/upstream/`, a Cargo project outside the Buck2 graph) is dropped;
+   the stack is nine diffs. A comparison can be run by hand later and
+   recorded, without a non-Buck2 project in the repository.
+3. **Linux recipe: Docker under `tools/`.** A pinned container
+   (`tools/linux/Dockerfile`, base image by digest) and `tools/linux-run`.
+   CI may run the recipe later as a check that it works, not for numbers.
 
 ## Verification strategy
 
@@ -676,7 +661,7 @@ Single-thread component numbers may come from either platform, labelled.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: interim baselines.
 - [ ] Diff 3: Linux container recipe.
 - [ ] Diff 4: `arc-swap`.
@@ -684,8 +669,7 @@ Single-thread component numbers may come from either platform, labelled.
 - [ ] Diff 6: lock-free descent.
 - [ ] Diff 7: concurrent propagation and root growth.
 - [ ] Diff 8: concurrent model extensions and soak.
-- [ ] Diff 9: upstream harness (if agreed).
-- [ ] Diff 10: design documents, measurements, roadmap.
+- [ ] Diff 9: design documents, measurements, roadmap.
 - [ ] Stack-wide verification.
 
 ## Discoveries and plan changes
@@ -694,7 +678,7 @@ None yet.
 
 ## Agent notes
 
-- **Entry points (current crates, before 0012 to 0015 land):**
+- **Entry points (after plan 0015):**
   `crates/bf-tree/src/read.rs` (`descend` with a visitor; becomes
   `try_descend`), `crates/bf-tree/src/write.rs` (`split_and_propagate`;
   after 0012 the separator installation is `install`),
