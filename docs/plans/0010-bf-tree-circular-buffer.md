@@ -415,7 +415,8 @@ list with `retain`. The cost is amortized over the frees that created them.
 0013). With the default ladder that is
 `64, 128, 256, 512, 1024, 2048, 2688, 4096`, so the minimum capacity is the
 next power of two of `2 * (4096 + 16) = 8224`, which is 16384 bytes. `alloc`
-requires `size` to be one of the classes (`debug_assert`).
+requires `size` to be one of the classes and panics otherwise (see
+"Discoveries and plan changes").
 
 **Alignment.** The slab is 64-byte aligned, but blocks are packed after
 16-byte headers, so a block is not aligned beyond 1 in general. Pages have
@@ -724,7 +725,7 @@ asserts `used() <= capacity()`. At the end every block is returned,
 - [x] Diff 2: unsafe-code policy and `tools/check-unsafe`.
 - [x] Diff 3: Miri through Buck2.
 - [x] Diff 4: slab, bump allocation, fillers, budget.
-- [ ] Diff 5: holes and the second-chance region.
+- [x] Diff 5: holes and the second-chance region.
 - [ ] Diff 6: claims.
 - [ ] Diff 7: model, stress, Miri sizes, documentation.
 - [ ] Stack-wide verification; create `bf-tree-circular-buffer.md`; update
@@ -778,6 +779,11 @@ asserts `used() <= capacity()`. At the end every block is returned,
   `dealloc`, the two slice constructions, and the `Send`/`Sync` impls. Two
   tests leak a slab on purpose and park it in a static, because Miri
   reports unreachable leaked memory (checked by removing one).
+- **Diff 5: a non-class size is a soundness error.** The plan made the
+  class check a `debug_assert`. With hole reuse, a size that is not a class
+  could land in a smaller hole and overlap the next block, so `alloc` now
+  panics on it in every build. `free` also checks the block's span against
+  its metadata.
 
 ## Agent notes
 

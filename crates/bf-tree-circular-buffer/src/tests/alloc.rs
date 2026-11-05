@@ -181,14 +181,14 @@ fn the_head_advances_over_every_following_dead_block() {
     let b = buffer.alloc(64, Kind::Mini, leaf(2)).unwrap();
     let c = buffer.alloc(64, Kind::Mini, leaf(3)).unwrap();
 
-    // `b` is behind the head: it dies, but makes no room yet.
+    // `b` is behind the head: it becomes a hole, which makes no room yet.
     buffer.free(b);
     assert_eq!(buffer.used(), 3 * (H + 64));
 
-    // Freeing the head passes `a` and the dead `b`.
+    // Freeing the head passes `a` (a tombstone) and the dead `b`.
     buffer.free(a);
     assert_eq!(buffer.used(), H + 64);
-    assert_eq!(buffer.metrics().tombstones, 2);
+    assert_eq!(buffer.metrics().tombstones, 1);
 
     buffer.free(c);
     assert_eq!(buffer.used(), 0);
