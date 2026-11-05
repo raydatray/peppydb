@@ -1,6 +1,6 @@
 # 0014: Eviction and the second chance
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Circular buffer](../design/bf-tree-circular-buffer.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -555,8 +555,33 @@ Resolved:
 - [x] Diff 2: eviction and the retry loop; `CircularBufferFull` removed.
 - [x] Diff 3: `LeafEntry::version`, relocation, `Hint`, and `maintain`.
 - [x] Diff 4: budget, durability, and concurrent models.
-- [ ] Diff 5: design documents and roadmap.
-- [ ] Stack-wide verification.
+- [x] Diff 5: design documents and roadmap.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-05)
+
+| Check | Outcome |
+| --- | --- |
+| No circular-buffer error | `TreeError::CircularBufferFull` is removed. `thousands_of_writes_fit_a_two_page_buffer` runs 5000 writes on a 1 KiB buffer (the minimum for 256-byte leaves) without an error. |
+| Budget and durability | The single-threaded model runs with 1 KiB and 2 KiB buffers (256-byte leaves) and second-chance shares of 0, 10, and 100 percent. It asserts `circular_buffer_used() <= capacity` after every step and agrees with the oracle, including after `flush` and reopen on `MemStore` and `FileStore`. Reopen uses `Tree::open_with` to keep the tiny budget. |
+| Stale claims | `a_stale_claim_is_retired_without_a_merge`: the claimed block grows, and `evict` retires the claim without a merge; the base page is unchanged. |
+| Split on eviction | `an_eviction_whose_merge_does_not_fit_splits_the_leaf`: passes; invariants hold. |
+| I/O errors | `a_store_error_during_eviction_returns_the_claim_and_keeps_the_records`: the claim is returned and the records stay readable. |
+| Own leaf oldest | `a_writer_whose_own_leaf_is_the_oldest_block_evicts_it`: passes. |
+| `Busy` and `Empty` | `busy_and_empty_claims`: passes. |
+| Second chance | `a_hot_leaf_survives_while_cold_leaves_are_evicted` (2 KiB buffer, 50 percent): the hot block survives 3000 rounds of cold writes and its address moves toward the tail, while more than 50 cold blocks retire. It needs the `make_room` slack (see Discoveries). |
+| Hints | A hint is skipped while another S guard is held and when the version changed. `relocation_never_evicts` passes. At 100 percent every read relocates; at 0 none does. Values above 100 are rejected. |
+| Concurrency | `threads_agree_under_constant_eviction` (1 KiB with 10 percent, 2 KiB with 100 percent, 1 KiB with 0 percent; writers, readers, scanners, and a looping `flush`) and `a_writer_waits_while_every_block_is_claimed` (watchdog) pass. |
+| Repeated runs | The eviction, second-chance, model, concurrent, and buffered suites passed 20 of 20 runs in release and 5 of 5 in debug builds. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (289 tests), and `go vet` and `go test` pass. |
+
+Baseline (release, Apple M4 Pro, one million random 8-byte keys with
+16-byte values, default 32 MiB circular buffer; the benchmarks no longer
+need a 1 GiB override): in-memory put 1.57 M ops/s, get 1.65 to 1.89 M
+ops/s, scan about 19 M records/s; `FileStore` put 1.33 M ops/s, flush
+180 ms, open 26 ms, warm get 1.29 M ops/s, warm scan 25 M records/s. The
+[leaf storage design](../design/bf-tree-leaf-store.md#baselines) records
+these numbers next to the earlier baselines.
 
 ## Discoveries and plan changes
 
@@ -571,7 +596,40 @@ Resolved:
 - **2026-11-05: the version bumps live in `take_mini`.** Every block
   change (growth, merge, relocation) goes through `take_mini`, so bumping
   there covers them all; it may bump when nothing changed, which only
-  skips a hint.
+  skips a hint. There are no separate `bump_version` calls, and
+  `write_through` does not bump by itself: a merge bumps when it takes the
+  mini-page out. A relocation whose allocation fails also bumps.
+- **2026-11-05: `LeafMap::buffer` reports a full buffer as `Ok(None)`.**
+  The write path does not map `BufferError::Full`; `buffer` returns
+  `Ok(None)`, and `write_attempt` turns it into `Attempt::NeedRoom`.
+- **2026-11-05: `holds` lives on `LeafMap`.** `LeafMap::holds(&LeafWrite,
+  &Victim)` reads the entry's block through the guard, because the entry's
+  fields are private to `leaf_map.rs`.
+- **2026-11-05: `evict` locks with `LeafMap::write` and unclaims on a lock
+  error.** The plan's `lock_write(..)?` would leak the claim if the owner
+  could not be locked (for example, `UnknownLeaf`). `evict` uses the
+  blocking `LeafMap::write` and, on error, unclaims before it returns the
+  error. A claim therefore never leaks on any path.
+- **2026-11-05: `relocate` uses `take_mini` and `put_mini`.** The plan
+  proposed new `LeafWrite` methods (`block`, `replace_mini`,
+  `bump_version`) and `copy_into_block`. The code instead takes the
+  mini-page out with `take_mini`, allocates a block of the same size,
+  copies with `Mini::copy_into(&mut fresh, true)`, puts the fresh mini-page
+  back with `put_mini`, and frees the old block. If the allocation fails,
+  it puts the old mini-page back.
+- **2026-11-05: hints use `note` and `Noted`.** The plan had the leaf read
+  return `(R, Option<Hint>)` and `maintain(leaf, seen, hint)`. The code adds
+  `Tree::note(&leaf) -> Option<Noted>` (leaf ID, version, `Hint::Relocate`),
+  taken under S, and `Tree::maintain(Option<Noted>)` after the S lock is
+  dropped. The non-blocking lock is `LeafMap::try_write`, which returns
+  `Option` (busy or not live) instead of `Result<Option<_>>`. `Hint` and
+  `Noted` are `pub(super)`.
+- **2026-11-05: test coverage differs slightly from the plan.** The hot-leaf
+  test checks that the hot block moves toward the tail and that cold
+  blocks retire; it does not check the exact FIFO order of cold
+  evictions. `a_writer_waits_while_every_block_is_claimed` checks, under a
+  watchdog, that a writer finishes after the claims are evicted; it does
+  not assert that the writer observed `Busy`.
 
 ## Agent notes
 
