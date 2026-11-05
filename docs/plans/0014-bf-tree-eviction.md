@@ -554,7 +554,7 @@ Resolved:
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: eviction and the retry loop; `CircularBufferFull` removed.
 - [x] Diff 3: `LeafEntry::version`, relocation, `Hint`, and `maintain`.
-- [ ] Diff 4: budget, durability, and concurrent models.
+- [x] Diff 4: budget, durability, and concurrent models.
 - [ ] Diff 5: design documents and roadmap.
 - [ ] Stack-wide verification.
 

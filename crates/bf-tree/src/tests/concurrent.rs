@@ -168,6 +168,12 @@ fn scanner(tree: &Tree, seed: u64, stop: &AtomicBool) -> usize {
 /// Run writers, readers, and scanners on one tree; afterwards the tree must
 /// equal the union of the writers' oracles and pass its invariants.
 fn run(tree: Tree, writers: u8, readers: usize, ops: usize) -> Tree {
+    run_shared(&tree, writers, readers, ops);
+    tree
+}
+
+/// [`run`] on a shared tree, so other threads may use it meanwhile.
+fn run_shared(tree: &Tree, writers: u8, readers: usize, ops: usize) {
     let max_value = tree.config().max_value_len;
     let stop = AtomicBool::new(false);
     let oracle = std::thread::scope(|scope| {
@@ -203,7 +209,6 @@ fn run(tree: Tree, writers: u8, readers: usize, ops: usize) -> Tree {
     let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
     assert_eq!(tree.check_invariants(), Ok(()));
-    tree
 }
 
 /// Tiny nodes force frequent leaf splits and root growth.
@@ -268,5 +273,85 @@ fn many_threads_on_one_leaf_range_make_progress() {
         assert_eq!(tree.iter().count(), 4 * 8);
         assert_eq!(tree.check_invariants(), Ok(()));
         assert!(start.elapsed() < Duration::from_secs(60));
+    });
+}
+
+/// Tiny nodes and a circular buffer of about four leaf pages: writers,
+/// readers, scanners, and a looping flush all evict and race on the same
+/// leaves.
+#[test]
+fn threads_agree_under_constant_eviction() {
+    for (bytes, percent) in [(1024usize, 10u8), (2048, 100), (1024, 0)] {
+        with_watchdog(Duration::from_secs(120), move || {
+            let config = TreeConfig {
+                circular_buffer_bytes: bytes,
+                second_chance_percent: percent,
+                ..tiny()
+            };
+            let stop = AtomicBool::new(false);
+            let tree = Tree::in_memory(config).unwrap();
+            std::thread::scope(|scope| {
+                let flusher = scope.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        tree.flush().unwrap();
+                        assert!(tree.circular_buffer_used() <= bytes);
+                    }
+                });
+                run_shared(&tree, 4, 4, 1500);
+                stop.store(true, Ordering::Relaxed);
+                flusher.join().unwrap();
+            });
+            assert!(tree.height() >= 3);
+            tree.flush().unwrap();
+            let expected: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
+            let reopened = Tree::open(tree.into_store()).unwrap();
+            let actual: Vec<_> = reopened.iter().collect::<Result<_, _>>().unwrap();
+            assert_eq!(actual, expected);
+        });
+    }
+}
+
+/// With every live block claimed, a writer that needs room sees `Busy` and
+/// waits; once the claims are evicted, it finishes.
+#[test]
+fn a_writer_waits_while_every_block_is_claimed() {
+    with_watchdog(Duration::from_secs(60), || {
+        let config = TreeConfig {
+            circular_buffer_bytes: 1024,
+            ..tiny()
+        };
+        let tree = Tree::in_memory(config).unwrap();
+        // Fill the buffer with blocks of many leaves.
+        let mut i = 0u16;
+        while tree.leaves.circular_buffer.has_room(200) || tree.leaf_count() < 4 {
+            tree.put(&i.wrapping_mul(4099).to_be_bytes(), &[1; 12])
+                .unwrap();
+            i += 1;
+        }
+        let mut victims = Vec::new();
+        while let bf_tree_circular_buffer::Claim::Victim(victim) =
+            tree.leaves.circular_buffer.claim_victim()
+        {
+            victims.push(victim);
+        }
+        assert!(!victims.is_empty());
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                // Needs room: a key far from the others, in a big record.
+                for n in 0..20u8 {
+                    tree.put(&[0xfe, n], &[2; 16]).unwrap();
+                }
+                done.store(true, Ordering::Relaxed);
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            for victim in victims {
+                tree.evict(victim).unwrap();
+            }
+            writer.join().unwrap();
+        });
+        assert!(done.load(Ordering::Relaxed));
+        assert_eq!(tree.get(&[0xfe, 19]), Ok(Some(vec![2; 16])));
+        assert_eq!(tree.check_invariants(), Ok(()));
     });
 }
