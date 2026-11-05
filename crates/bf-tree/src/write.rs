@@ -6,6 +6,14 @@ use bf_tree_mini_page::{LeafMut, WriteOutcome};
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, RecordState};
 
+/// The result of one write attempt under the leaf lock.
+enum Attempt {
+    Done,
+    /// The circular buffer could not supply a block. Every guard of the
+    /// attempt has been dropped; the caller must make room and route again.
+    NeedRoom,
+}
+
 /// A completed split, its separator already installed. Holds the new right
 /// leaf's exclusive lock until dropped; drop it before the left leaf's guard.
 pub(super) struct Split<'t> {
@@ -36,26 +44,45 @@ impl Tree {
         self.write(key, RecordState::Delete)
     }
 
-    /// Buffer the record blindly in the owning leaf's mini-page. When the
-    /// mini-page is full at the largest class, merge it into the base page
-    /// (splitting the leaf if needed), then buffer the record into the half
-    /// that owns the key, under the locks still held. A fresh mini-page at
-    /// the smallest fitting class always takes the record.
+    /// Buffer the record blindly in the owning leaf's mini-page, making room
+    /// in the circular buffer when it is full. Eviction runs with no leaf
+    /// lock held, so a full buffer ends the attempt; the write then routes
+    /// again.
     fn write(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
-        self.with_leaf_write(key, |leaf| match self.leaves.buffer(leaf, key, state)? {
-            WriteOutcome::Buffered | WriteOutcome::SkippedDirty => Ok(()),
-            WriteOutcome::NeedsMerge => {
-                let split = with_scratch(|scratch| self.merge_leaf(leaf, scratch))?;
-                let outcome = match split {
-                    Some((separator, mut split)) if key >= separator.as_slice() => {
-                        self.leaves.buffer(&mut split.right, key, state)?
+        loop {
+            match self.write_attempt(key, state)? {
+                Attempt::Done => return Ok(()),
+                Attempt::NeedRoom => self.make_room(self.leaves.classes.largest())?,
+            }
+        }
+    }
+
+    /// One attempt under the owning leaf's lock. When the mini-page is full
+    /// at the largest class, merge it into the base page (splitting the leaf
+    /// if needed), then buffer the record into the half that owns the key,
+    /// under the locks still held. Every guard is dropped before it returns.
+    fn write_attempt(&self, key: &[u8], state: RecordState<'_>) -> Result<Attempt, TreeError> {
+        self.with_leaf_write(key, |leaf| {
+            let outcome = match self.leaves.buffer(leaf, key, state)? {
+                None => return Ok(Attempt::NeedRoom),
+                Some(WriteOutcome::NeedsMerge) => {
+                    let split = with_scratch(|scratch| self.merge_leaf(leaf, scratch))?;
+                    match split {
+                        Some((separator, mut split)) if key >= separator.as_slice() => {
+                            self.leaves.buffer(&mut split.right, key, state)?
+                        }
+                        _ => self.leaves.buffer(leaf, key, state)?,
                     }
-                    _ => self.leaves.buffer(leaf, key, state)?,
-                };
-                match outcome {
-                    WriteOutcome::Buffered => Ok(()),
-                    // A fresh mini-page takes any admitted record.
-                    other => unreachable!("a fresh mini-page returned {other:?}"),
+                }
+                Some(outcome) => Some(outcome),
+            };
+            match outcome {
+                // The merge is complete; a retry buffers into the owning half.
+                None => Ok(Attempt::NeedRoom),
+                Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => Ok(Attempt::Done),
+                // A fresh mini-page takes any admitted record.
+                Some(WriteOutcome::NeedsMerge) => {
+                    unreachable!("a fresh mini-page needed a merge")
                 }
             }
         })

@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 
 use super::{TreeConfig, TreeError};
-use bf_tree_circular_buffer::{Block, CircularBuffer};
-use bf_tree_mini_page::{Mini, MiniPage, RefBits, SizeClasses, WriteOutcome};
+use bf_tree_circular_buffer::{Block, CircularBuffer, Victim};
+use bf_tree_mini_page::{BufferError, Mini, MiniPage, RefBits, SizeClasses, WriteOutcome};
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::PageStore;
@@ -198,12 +198,15 @@ impl LeafMap {
     /// Buffer one record in `leaf`'s mini-page, creating or growing it. This
     /// is the only place that allocates mini-page blocks. Never reads the
     /// base page.
+    ///
+    /// `None` if the circular buffer had no room; nothing changed then, and
+    /// the caller must release its locks and make room.
     pub(super) fn buffer(
         &self,
         leaf: &mut LeafWrite<'_>,
         key: &[u8],
         state: bf_tree_page::RecordState<'_>,
-    ) -> Result<WriteOutcome, TreeError> {
+    ) -> Result<Option<WriteOutcome>, TreeError> {
         let mut slot = leaf.take_mini();
         let result = bf_tree_mini_page::buffer(
             &mut slot,
@@ -214,7 +217,19 @@ impl LeafMap {
             state,
         );
         leaf.put_mini(slot);
-        Ok(result?)
+        match result {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(BufferError::Full(_)) => Ok(None),
+            Err(BufferError::Page(error)) => Err(error.into()),
+        }
+    }
+
+    /// Whether `leaf`'s entry still holds the block that `victim` names.
+    pub(super) fn holds(&self, leaf: &LeafWrite<'_>, victim: &Victim) -> bool {
+        leaf.entry
+            .block
+            .as_ref()
+            .is_some_and(|block| block.is(victim))
     }
 
     /// Lock leaf `id` exclusively if it is a live slot.
@@ -358,7 +373,7 @@ impl LeafMap {
                 let block = self
                     .circular_buffer
                     .alloc(class, bf_tree_circular_buffer::Kind::Mini, id)
-                    .map_err(|_| TreeError::CircularBufferFull)?;
+                    .map_err(|_| TreeError::InvalidConfig("circular buffer full"))?;
                 Mini::new(block, id)
             }
         };
