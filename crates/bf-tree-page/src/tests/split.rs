@@ -283,7 +283,7 @@ fn merge_orders_pending_records_and_replaces_equal_keys() {
         live(b"e", b"new"),
         live(b"y", b"new"),
     ];
-    let merged: Vec<_> = Merge::new(page.iter(), &pending)
+    let merged: Vec<_> = Merge::new(page.iter(), pending.iter().copied())
         .map(|record| (record.key.to_vec(), record.state))
         .collect();
     let expected: Vec<(Vec<u8>, RecordState<'_>)> = [
@@ -301,7 +301,12 @@ fn merge_orders_pending_records_and_replaces_equal_keys() {
 
     // A batch can drive the same selector as a single pending record.
     let fences = page.fences().unwrap();
-    let index = choose_split(Merge::new(page.iter(), &pending), fences, 0, 256);
+    let index = choose_split(
+        Merge::new(page.iter(), pending.iter().copied()),
+        fences,
+        0,
+        256,
+    );
     assert_eq!(index, Some(3));
 }
 
@@ -348,4 +353,35 @@ fn random_pages_split_exactly_as_the_calculator_predicts() {
             }
         }
     }
+}
+
+#[test]
+fn merge_interleaves_sorted_sides_and_the_newer_side_wins_equal_keys() {
+    let older = [live(b"a", b"old"), live(b"c", b"old"), live(b"e", b"old")];
+    let newer = [
+        RecordRef {
+            key: KeyRef::from(b"c".as_slice()),
+            state: RecordState::Delete,
+        },
+        live(b"d", b"new"),
+        live(b"e", b"new"),
+        live(b"f", b"new"),
+    ];
+    let merged: Vec<_> = Merge::new(older.iter().copied(), newer.iter().copied())
+        .map(|record| (record.key.to_vec(), record.state))
+        .collect();
+    assert_eq!(
+        merged,
+        [
+            (b"a".to_vec(), RecordState::Insert(b"old")),
+            (b"c".to_vec(), RecordState::Delete),
+            (b"d".to_vec(), RecordState::Insert(b"new")),
+            (b"e".to_vec(), RecordState::Insert(b"new")),
+            (b"f".to_vec(), RecordState::Insert(b"new")),
+        ]
+    );
+
+    // Either side may be empty.
+    assert_eq!(Merge::new(older.iter().copied(), [].into_iter()).count(), 3);
+    assert_eq!(Merge::new([].into_iter(), newer.iter().copied()).count(), 4);
 }

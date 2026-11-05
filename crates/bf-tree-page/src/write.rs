@@ -38,15 +38,26 @@ impl Page {
         key: &[u8],
         state: RecordState<'_>,
     ) -> Result<UpsertOutcome, PageError> {
-        let needed = self.record_size(key, state)?;
-        let index = match self.search(key) {
-            Ok(index) => index + self.record_start(),
-            Err(index) => {
-                self.insert_at(index, key, state, needed)?;
+        self.upsert_indexed(key, state).map(|(outcome, _)| outcome)
+    }
 
-                return Ok(UpsertOutcome::Inserted);
+    /// [`Page::try_upsert`], plus the record index the key now occupies. On
+    /// `Inserted`, every record at or above that index moved up by one.
+    pub fn upsert_indexed(
+        &mut self,
+        key: &[u8],
+        state: RecordState<'_>,
+    ) -> Result<(UpsertOutcome, usize), PageError> {
+        let needed = self.record_size(key, state)?;
+        let record = match self.search(key) {
+            Ok(record) => record,
+            Err(record) => {
+                self.insert_at(record, key, state, needed)?;
+
+                return Ok((UpsertOutcome::Inserted, record));
             }
         };
+        let index = record + self.record_start();
 
         let mut slot = self.slots()[index];
 
@@ -80,7 +91,7 @@ impl Page {
         slot.set_kind(state.kind());
         self.slots_mut()[index] = slot;
 
-        Ok(UpsertOutcome::Replaced)
+        Ok((UpsertOutcome::Replaced, record))
     }
 
     /// Bytes for a new slot, stored suffix, and value. After `check_key`, the

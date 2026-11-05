@@ -1,10 +1,10 @@
+use std::fmt::Debug;
 use std::iter::{FusedIterator, Peekable};
-use std::slice;
 
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::layout::{HEADER_BYTES, SLOT_BYTES};
-use super::{Fence, Fences, Iter, KeyRef, Page, PageError, RecordRef, RecordState};
+use super::{Fence, Fences, KeyRef, Page, PageError, RecordRef, RecordState};
 
 /// The result of [`Page::split_with_insert`].
 #[derive(Debug)]
@@ -47,10 +47,10 @@ impl Page {
             state,
         }];
 
-        self.split_with_batch(right_storage, &pending)
+        self.split_with_batch(right_storage, pending.iter().copied())
     }
 
-    fn check_split_storage(&self, right_storage: &[u8]) -> Result<(), PageError> {
+    pub(super) fn check_split_storage(&self, right_storage: &[u8]) -> Result<(), PageError> {
         Self::check_capacity(right_storage.len())?;
 
         if right_storage.len() != self.capacity() {
@@ -67,19 +67,26 @@ impl Page {
     /// Split the virtual merge of this page's records and a sorted batch of
     /// in-range pending records. A pending record replaces a stored record with
     /// the same key. The caller has validated the storage and every record.
-    fn split_with_batch<'r>(
+    fn split_with_batch<'r, 'b>(
         &mut self,
         right_storage: &'r mut [u8],
-        pending: &[RecordRef<'_>],
+        pending: impl Iterator<Item = RecordRef<'b>> + Clone,
     ) -> Result<LeafSplit<'r>, PageError> {
+        let images = self.split_images(Merge::new(self.iter(), pending.map(RecordRef::shorten)))?;
+        Ok(self.commit_split(right_storage, images))
+    }
+
+    /// Build both outputs of a split of `records`, a sorted sequence that may
+    /// borrow this page, into scratch images. The page is unchanged.
+    pub(super) fn split_images<'a>(
+        &self,
+        records: impl Iterator<Item = RecordRef<'a>> + Clone,
+    ) -> Result<SplitImages, PageError> {
         let capacity = self.capacity();
         let fences = self.fences().expect("caller checked the fences");
-        let records = Merge::new(self.iter(), pending);
         let index = choose_split(records.clone(), fences, self.prefix_len(), capacity)
             .ok_or(PageError::CannotSplit)?;
 
-        // `records` borrows from `self`, which becomes the left output, so build
-        // both sides in scratch images first.
         let separator = records
             .clone()
             .nth(index)
@@ -89,29 +96,52 @@ impl Page {
 
         let lower = fences.lower.map(KeyRef::to_vec);
         let upper = fences.upper.map(KeyRef::to_vec);
-        let mut left_image = [0; 4096];
-        let mut right_image = [0; 4096];
+        let mut images = SplitImages {
+            left: [0; 4096],
+            right: [0; 4096],
+            separator,
+        };
         let left_fences = Fences {
             lower: lower.as_slice(),
-            upper: Fence::Key(separator.as_slice()),
+            upper: Fence::Key(images.separator.as_slice()),
         };
         let right_fences = Fences {
-            lower: Fence::Key(separator.as_slice()),
+            lower: Fence::Key(images.separator.as_slice()),
             upper: upper.as_slice(),
         };
-        let left = &mut left_image[..capacity];
-        let right = &mut right_image[..capacity];
-        self.build_output(left, left_fences, records.clone().take(index));
-        self.build_output(right, right_fences, records.skip(index));
+        self.build_output(
+            &mut images.left[..capacity],
+            left_fences,
+            records.clone().take(index),
+        );
+        self.build_output(
+            &mut images.right[..capacity],
+            right_fences,
+            records.skip(index),
+        );
 
-        self.as_mut_bytes().copy_from_slice(left);
-        right_storage.copy_from_slice(right);
-        let right = Page::mut_from_bytes(right_storage).expect("capacity holds the header");
-
-        Ok(LeafSplit { separator, right })
+        Ok(images)
     }
 
-    fn build_output<'a>(
+    /// Copy split outputs into `self` (left) and `right_storage` (right).
+    pub(super) fn commit_split<'r>(
+        &mut self,
+        right_storage: &'r mut [u8],
+        images: SplitImages,
+    ) -> LeafSplit<'r> {
+        let capacity = self.capacity();
+        self.as_mut_bytes()
+            .copy_from_slice(&images.left[..capacity]);
+        right_storage.copy_from_slice(&images.right[..capacity]);
+        let right = Page::mut_from_bytes(right_storage).expect("capacity holds the header");
+
+        LeafSplit {
+            separator: images.separator,
+            right,
+        }
+    }
+
+    pub(super) fn build_output<'a>(
         &self,
         image: &mut [u8],
         fences: Fences<&[u8]>,
@@ -135,6 +165,13 @@ impl Page {
     }
 }
 
+/// Both outputs of a split, built before either page changes.
+pub(super) struct SplitImages {
+    left: [u8; 4096],
+    right: [u8; 4096],
+    separator: Vec<u8>,
+}
+
 impl<K> Fence<K> {
     fn map<T>(self, f: impl FnOnce(K) -> T) -> Fence<T> {
         match self {
@@ -153,46 +190,83 @@ impl Fence<Vec<u8>> {
     }
 }
 
-/// Stored records merged in key order with a sorted pending batch. A pending
-/// record replaces a stored record with the same key.
-#[derive(Clone, Debug)]
-pub(super) struct Merge<'a> {
-    stored: Peekable<Iter<'a>>,
-    pending: Peekable<slice::Iter<'a, RecordRef<'a>>>,
+/// Two sorted record sequences in key order. On an equal key the record from
+/// `newer` is yielded and the one from `older` is skipped.
+///
+/// Both sides must yield the same `RecordRef` lifetime; a longer-lived side
+/// converts with `.map(RecordRef::shorten)`.
+pub struct Merge<A: Iterator, B: Iterator> {
+    older: Peekable<A>,
+    newer: Peekable<B>,
 }
 
-impl<'a> Merge<'a> {
-    pub(super) fn new(stored: Iter<'a>, pending: &'a [RecordRef<'a>]) -> Self {
+impl<A: Iterator + Clone, B: Iterator + Clone> Clone for Merge<A, B>
+where
+    A::Item: Clone,
+    B::Item: Clone,
+{
+    fn clone(&self) -> Self {
         Self {
-            stored: stored.peekable(),
-            pending: pending.iter().peekable(),
+            older: self.older.clone(),
+            newer: self.newer.clone(),
         }
     }
 }
 
-impl<'a> Iterator for Merge<'a> {
+impl<A: Iterator + Debug, B: Iterator + Debug> Debug for Merge<A, B>
+where
+    A::Item: Debug,
+    B::Item: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Merge")
+            .field("older", &self.older)
+            .field("newer", &self.newer)
+            .finish()
+    }
+}
+
+impl<A: Iterator, B: Iterator> Merge<A, B> {
+    pub fn new(older: A, newer: B) -> Self {
+        Self {
+            older: older.peekable(),
+            newer: newer.peekable(),
+        }
+    }
+}
+
+impl<'a, A, B> Iterator for Merge<A, B>
+where
+    A: Iterator<Item = RecordRef<'a>>,
+    B: Iterator<Item = RecordRef<'a>>,
+{
     type Item = RecordRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(pending) = self.pending.peek() else {
-            return self.stored.next();
+        let Some(newer) = self.newer.peek() else {
+            return self.older.next();
         };
 
-        match self.stored.peek() {
-            Some(stored) if stored.key < pending.key => self.stored.next(),
-            Some(stored) => {
-                if stored.key == pending.key {
-                    self.stored.next();
+        match self.older.peek() {
+            Some(older) if older.key < newer.key => self.older.next(),
+            Some(older) => {
+                if older.key == newer.key {
+                    self.older.next();
                 }
 
-                self.pending.next().copied()
+                self.newer.next()
             }
-            None => self.pending.next().copied(),
+            None => self.newer.next(),
         }
     }
 }
 
-impl FusedIterator for Merge<'_> {}
+impl<'a, A, B> FusedIterator for Merge<A, B>
+where
+    A: FusedIterator<Item = RecordRef<'a>>,
+    B: FusedIterator<Item = RecordRef<'a>>,
+{
+}
 
 /// Bytes a record occupies with an empty page prefix: its slot, full key, and
 /// logical value. Absence states store no value.
