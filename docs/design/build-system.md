@@ -127,7 +127,10 @@ disagree.
   specific need.
 - **Third-party crates are exempt.** The prelude builds them with
   `--cap-lints=allow`, so the toolchain's lint levels never reach them.
-- **Current allowlist:** none.
+- **Current allowlist:** `crates/bf-tree-circular-buffer`, whose slab hands
+  out disjoint byte ranges of one allocation
+  ([plan 0010](../plans/0010-bf-tree-circular-buffer.md)). Within it, only
+  `slab.rs` and `block.rs` lower the lint.
 
 ## Miri
 
