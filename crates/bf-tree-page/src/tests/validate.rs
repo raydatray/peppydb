@@ -294,6 +294,32 @@ fn each_check_rejects_its_targeted_corruption() {
     assert_eq!(reason(&unfenced), "prefix on an unfenced page");
 }
 
+#[test]
+fn validate_rejects_the_reserved_slot_bit() {
+    // Bit 15 of `ref_and_value_len` is the high bit of slot byte 5.
+    let mut unfenced = vec![0; 128];
+    Page::init(&mut unfenced)
+        .unwrap()
+        .try_insert(b"a", b"1")
+        .unwrap();
+    assert!(Page::validate(&unfenced).is_ok());
+    let mut image = unfenced.clone();
+    image[32 + 5] |= 0x80;
+    assert_eq!(
+        Page::validate(&image).err(),
+        Some(PageError::Corrupt("reserved slot bit is set"))
+    );
+
+    // Finite fence slots (lower at 32, upper at 40) and records at 48 and 56.
+    let valid = fenced_fixture();
+    assert!(Page::validate(&valid).is_ok());
+    for slot in [32, 40, 48, 56] {
+        let mut image = valid.clone();
+        image[slot + 5] |= 0x80;
+        assert_eq!(reason(&image), "reserved slot bit is set", "slot at {slot}");
+    }
+}
+
 /// A record whose key equals the page prefix and whose value is empty has an
 /// empty payload. It can start where its neighbour's payload starts, which is
 /// not an overlap.

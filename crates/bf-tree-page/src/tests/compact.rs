@@ -14,7 +14,6 @@ fn removal_releases_slots_and_compaction_recovers_payloads() {
         for (index, state) in states.into_iter().enumerate() {
             page.try_insert_record(&[b'a' + index as u8], state)
                 .unwrap();
-            page.set_referenced(&[b'a' + index as u8], true).unwrap();
         }
         let before = page.as_bytes().to_vec();
         assert_eq!(page.remove(b""), Err(PageError::EmptyKey));
@@ -32,7 +31,6 @@ fn removal_releases_slots_and_compaction_recovers_payloads() {
             assert_eq!(page.remove(&key), Ok(false));
             assert_eq!(page.as_bytes(), before);
             assert_eq!(page.get(&key), Ok(None));
-            assert!(page.iter().all(|record| record.referenced));
         }
         assert!(page.is_empty());
         assert_eq!(page.compact(), holes);
@@ -69,7 +67,6 @@ fn compaction_preserves_physical_tombstone_values_and_metadata() {
         (b"e", RecordState::Delete),
     ] {
         page.try_insert_record(key, state).unwrap();
-        page.set_referenced(key, true).unwrap();
     }
     // Mark `b` deleted while keeping its value bytes.
     page.as_mut_bytes()[43] |= 0x40;
@@ -86,7 +83,6 @@ fn compaction_preserves_physical_tombstone_values_and_metadata() {
                 record.key.to_vec(),
                 record.state.kind(),
                 record.state.value().map(<[u8]>::to_vec),
-                record.referenced,
             )
         })
         .collect();
@@ -104,13 +100,12 @@ fn compaction_preserves_physical_tombstone_values_and_metadata() {
                 record.key.to_vec(),
                 record.state.kind(),
                 record.state.value().map(<[u8]>::to_vec),
-                record.referenced,
             )
         })
         .collect();
     assert_eq!(actual, records);
     let offset = usize::from(read_u16(page.as_bytes(), 32));
-    assert_eq!(read_u16(page.as_bytes(), 36), 0x8008);
+    assert_eq!(read_u16(page.as_bytes(), 36), 0x0008);
     assert_eq!(&page.as_bytes()[offset..offset + 9], b"bretained");
     assert_eq!(page.get(b"b").unwrap().unwrap().state, RecordState::Delete);
     assert_eq!(page.compact(), 0);

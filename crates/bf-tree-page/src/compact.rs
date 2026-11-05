@@ -21,7 +21,7 @@ impl Page {
 
     /// Pack every stored payload and return the bytes recovered into the gap.
     ///
-    /// Preserves all record states, reference bits, retained tombstone bytes, and
+    /// Preserves all record states, retained tombstone bytes, and
     /// header metadata. Uses one bounded 4096-byte scratch image, without heap
     /// allocation. No pending write is applied and no records are discarded.
     pub fn compact(&mut self) -> usize {

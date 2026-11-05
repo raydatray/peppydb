@@ -19,7 +19,8 @@ impl Page {
     /// - fences, if present, are well formed, ordered, and consistent with
     ///   the stored prefix length;
     /// - record keys are nonempty, strictly increasing, inside the fences,
-    ///   and their slot previews match the stored bytes.
+    ///   and their slot previews match the stored bytes;
+    /// - no finite slot sets the reserved bit.
     ///
     /// The returned page keeps the ordinary trusted-bytes contract, so every
     /// other method may rely on these checks. It costs one pass over the slot
@@ -81,6 +82,10 @@ impl Page {
                 .expect("finite slots have a payload range");
             if payload.start < gap_end || payload.end > capacity {
                 return Err(corrupt("payload outside the payload area"));
+            }
+
+            if slot.reserved_bit() {
+                return Err(corrupt("reserved slot bit is set"));
             }
 
             if !is_fence {

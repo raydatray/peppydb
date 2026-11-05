@@ -23,7 +23,6 @@ fn live<'a>(key: &'a [u8], value: &'a [u8]) -> RecordRef<'a> {
     RecordRef {
         key: KeyRef::from(key),
         state: RecordState::Insert(value),
-        referenced: false,
     }
 }
 

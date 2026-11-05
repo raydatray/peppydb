@@ -15,7 +15,7 @@ impl Page {
 
     /// Insert a distinct key with any record state. Absence states store no value.
     ///
-    /// Errors match [`Page::try_insert`]. New records start unreferenced.
+    /// Errors match [`Page::try_insert`].
     pub fn try_insert_record(
         &mut self,
         key: &[u8],
@@ -31,7 +31,7 @@ impl Page {
     ///
     /// Deleting an existing entry changes only its kind and retains its value
     /// allocation. Smaller replacements leave holes; growing ones allocate a
-    /// complete new payload. Replacement preserves the reference bit. No path
+    /// complete new payload. No path
     /// compacts implicitly, and every error preserves the complete page image.
     pub fn try_upsert(
         &mut self,
@@ -146,22 +146,6 @@ impl Page {
         self.header.remaining_size.set((free - needed) as u16);
 
         Ok(())
-    }
-
-    /// Set or clear the reference bit; return whether the key has a stored entry.
-    ///
-    /// Requires a nonempty key. No bytes change for a missing key or an error.
-    pub fn set_referenced(&mut self, key: &[u8], referenced: bool) -> Result<bool, PageError> {
-        self.check_key(key)?;
-
-        let Ok(index) = self.search(key) else {
-            return Ok(false);
-        };
-
-        let index = index + self.record_start();
-        self.slots_mut()[index].set_referenced(referenced);
-
-        Ok(true)
     }
 
     /// Physically forget a stored entry of any kind; return whether it existed.

@@ -173,7 +173,6 @@ fn all_point_operations_enforce_half_open_fences_before_size() {
             Err(error)
         );
         assert_eq!(page.remove(key), Err(error));
-        assert_eq!(page.set_referenced(key, true), Err(error));
         assert_eq!(page.as_bytes(), before);
     }
     let before = page.as_bytes().to_vec();
@@ -188,7 +187,6 @@ fn all_point_operations_enforce_half_open_fences_before_size() {
     assert_eq!(page.try_insert(b"b", b""), Err(PageError::PageFull));
     assert_eq!(page.as_bytes(), before);
     page.try_upsert(b"a", RecordState::Delete).unwrap();
-    page.set_referenced(b"a", true).unwrap();
     let fences: Fences<&[u8]> = Fences {
         lower: Fence::Key(b"a"),
         upper: Fence::Key(b"z"),
@@ -196,7 +194,6 @@ fn all_point_operations_enforce_half_open_fences_before_size() {
     assert_eq!(page.compact(), 0);
     assert_eq!(page.fences(), Some(logical(fences)));
     assert_eq!(page.get(b"a").unwrap().unwrap().state, RecordState::Delete);
-    assert!(page.get(b"a").unwrap().unwrap().referenced);
     assert_eq!(page.remove(b"a"), Ok(true));
     assert!(page.is_empty());
     assert_eq!(page.reclaimable_bytes(), 6);
@@ -292,8 +289,8 @@ fn worked_example_initializes_a_compressed_page_with_golden_bytes() {
     page.try_insert(b"acct/150", b"y").unwrap();
     assert_eq!(page.free_bytes(), 45);
     let records = [
-        (b"acct/123".as_slice(), RecordState::Insert(b"x"), false),
-        (b"acct/150", RecordState::Insert(b"y"), false),
+        (b"acct/123".as_slice(), RecordState::Insert(b"x")),
+        (b"acct/150", RecordState::Insert(b"y")),
     ];
     let mut expected = [0; 128];
     super::prefix::compressed_fixture(&mut expected, b"acct/100", b"acct/200", 5, &records);
