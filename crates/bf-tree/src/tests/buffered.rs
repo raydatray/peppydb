@@ -134,3 +134,22 @@ fn writes_and_a_concurrent_flush_keep_every_pre_flush_write() {
     assert_eq!(all, expected.into_iter().collect::<Vec<_>>());
     assert_eq!(reopened.check_invariants(), Ok(()));
 }
+
+#[test]
+fn dropping_a_tree_with_buffered_records_returns_every_block() {
+    // Before the fix, the circular buffer saw outstanding blocks at drop and
+    // leaked its slab on purpose. Now the map frees them first.
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    for i in 0..50u8 {
+        tree.put(&[i], b"buffered").unwrap();
+    }
+    assert!(tree.buffered_leaves() > 0);
+    let metrics_before = tree.leaves.circular_buffer.metrics();
+    assert!(metrics_before.allocs > metrics_before.frees);
+
+    let mut leaves = tree.leaves;
+    leaves.release_blocks();
+    let metrics = leaves.circular_buffer.metrics();
+    assert_eq!(metrics.allocs + metrics.reuses, metrics.frees);
+    assert_eq!(leaves.circular_buffer.used(), 0);
+}

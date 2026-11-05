@@ -343,9 +343,9 @@ backing-leaf, LSN, and snapshot-version fields. `merge_batch_split` uses the
 split selector, so it returns `CannotSplit` under the same conditions as
 `split_with_insert`.
 
-These methods are the single merge path into a base page. A mini-page merge
-passes the mini-page's dirty records. A direct base write passes a one-record
-batch ([plan 0012](../plans/0012-bf-tree-shared-tree.md)).
+These methods are the single merge path into a base page: the tree merges a
+mini-page's dirty records through them
+([plan 0013](../plans/0013-bf-tree-mini-tree.md)).
 
 ## Prefix compression
 

@@ -107,7 +107,7 @@ succeeds.
 
 ## Reference bits
 
-Readers will hold a leaf's shared lock (plan 0012). Safe Rust cannot set a
+Readers hold a leaf's shared lock (plan 0012). Safe Rust cannot set a
 bit inside bytes that other readers are reading, so reference bits live
 beside the mini-page in `RefBits`: one `AtomicU64` bit per slot index, 512 in
 all (a page holds at most 508 slots). `mark` loads first and writes only if
@@ -125,6 +125,128 @@ reader's marks before a later writer's reads, and concurrent marks commute.
   with one split into a right page. Merging is two-phase (`merge_fits`,
   then in place or split), so the caller allocates a right leaf only when a
   split is certain. The merge borrows the mini-page and never frees it.
+
+## In the tree
+
+[Plan 0013](../plans/0013-bf-tree-mini-tree.md) puts mini-pages into the
+shared [tree](bf-tree-structure.md). Each leaf's mapping-table entry holds
+the leaf's mini-page, if any, under the leaf's reader-writer lock
+([concurrency](bf-tree-concurrency.md)).
+
+### Entry and residency
+
+```rust
+pub(super) struct LeafEntry {
+    freed: bool,
+    /// A circular-buffer block holding this leaf's mini-page.
+    block: Option<Block>,
+    /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
+    refs: Option<Box<RefBits>>,
+}
+
+pub(super) enum Residency<'e> {
+    Base,
+    Mini { page: &'e MiniPage, refs: &'e RefBits },
+}
+```
+
+- `block` and `refs` are two `Option` fields, not one enum. Each has a
+  niche, so the entry needs no discriminant, and a test keeps
+  `RwLock<LeafEntry>` within 64 bytes. Plan 0015 adds `Full` pages, which
+  hold a block without reference bits.
+- `residency()` gives a view of the entry under S or X. `Mini` views the
+  block bytes in place as a `MiniPage`.
+- `LeafWrite::take_mini` moves the two handles out of the entry into a
+  `Mini`, and `put_mini` moves them back. No block bytes are copied.
+
+### One allocation site
+
+`LeafMap::buffer` is the only place in the tree that allocates mini-page
+blocks. It runs under the leaf's X lock. It takes the leaf's `Mini` out of
+the entry, calls this crate's `buffer` with the map's circular buffer, the
+leaf's ID (the block's owner and the mini-page's backing leaf), and the
+map's `SizeClasses`, and puts the result back. It never reads the base
+page. `BufferError::Full` becomes `TreeError::CircularBufferFull`, and
+`BufferError::Page` becomes `TreeError::Page`.
+
+### Writes
+
+`put` and `remove` are blind: they buffer `Insert(value)` or `Delete`
+without reading the base page. A `Delete` of a key that the base page does
+not hold becomes a tombstone, and the merge drops it.
+
+```mermaid
+flowchart TD
+    A["route, X-lock leaf, validate route"] --> B["LeafMap::buffer"]
+    B -->|"Buffered or SkippedDirty"| Z[done]
+    B -->|Full| P["CircularBufferFull, nothing changed"]
+    B -->|NeedsMerge| C["merge_leaf: take the mini-page, load base into scratch"]
+    C --> D{merge_fits}
+    D -->|yes| E["merge_in_place, write_through leaf"]
+    D -->|no| F["split_leaf: fresh X-locked right leaf, merge_split, write_through right then left, install"]
+    E --> G["free the block"]
+    F --> G
+    G --> H["LeafMap::buffer into the half that owns the key"]
+    H -->|Buffered| Z
+```
+
+- **Merge.** `Tree::merge_leaf` runs under X on the reachable leaf. It
+  takes the mini-page out of the entry, loads the base page, and merges with
+  `LeafMut`: in place when `merge_fits`, otherwise through the tree's
+  `split_leaf`. It writes the result through, installs the separator after a
+  split, and only then frees the block. On any error it puts the mini-page
+  back into the entry, so no buffered record is lost. It returns the
+  separator and the right half, still X-locked, after a split.
+- **Placement under the held locks.** After the merge, both halves are
+  still X-locked. The pending record goes to the right half if
+  `key >= separator`, otherwise to the original leaf. There is no second
+  route and no retry. Neither half has a mini-page now, so `buffer`
+  allocates a fresh one at the smallest fitting class. The ladder check
+  `32 + 8 + K + V <= M` guarantees that it takes the record; any other
+  outcome is a bug (`unreachable!`).
+- **Why the record is not folded into the merge.** Folding it in adds one
+  record to the merge content, and the admission derivation then requires
+  `M <= L - 6K - 2V - 32`: 1600 at the defaults instead of 2688. The
+  mini-page would merge almost twice as often.
+- **A full circular buffer.** An allocation failure returns
+  `TreeError::CircularBufferFull`. The first `buffer` call changes nothing.
+  A failure in the placement after a merge leaves the merge done and the
+  record not written, so the error still means "this write did not happen".
+  This error is interim: `flush` frees every block, and
+  [plan 0014](../plans/0014-bf-tree-eviction.md) replaces the error with
+  eviction.
+
+### Reads and scans
+
+`get_with` consults the mini-page first with `lookup_marking`, which marks
+the slot's reference bit through `&RefBits` under S. `Found` and `Absent`
+answer without the store. Only `Miss` loads the base page. Both scan forms
+load the base page under S and iterate `LeafRef { base, mini }.range` for
+each leaf.
+
+### Flush and close
+
+`Tree::flush` walks leaf IDs `0..len`, with `len` read when it starts. It
+X-locks each live leaf by ID, calls `merge_leaf` if the leaf has a
+mini-page, releases the leaf, and then syncs the store. Every write that
+returned before `flush` began is in the store when `flush` returns. A
+record buffered into a leaf that `flush` already visited, or into a leaf
+created after it started, may stay buffered.
+
+Buffered records exist only in memory. Dropping a tree, or `into_store`,
+discards them and returns their blocks to the circular buffer, so the buffer
+never sees outstanding blocks at its own drop. Call `flush` first to keep
+the records.
+
+### Diagnostics and checks
+
+`Tree::buffered_leaves()` counts leaves with a block; it takes each S lock
+in turn. `Tree::circular_buffer_used()` returns the circular buffer's used
+bytes, which include dead blocks that the head has not passed.
+`check_invariants` requires each mini-page to be a valid, unfenced page
+whose backing leaf is this leaf, whose capacity is a ladder class, and
+whose keys lie within the leaf's fences. A violation is
+`InvariantError::BadMiniPage`.
 
 ## Tests
 
@@ -148,5 +270,6 @@ merge splits without `CannotSplit`.
   `src/mini_page_op.rs` (insert, merge), `src/storage.rs`
   (`copy_initialize_to`), `src/tree.rs` (`create_mem_page_size_classes`).
   peppydb derives `M` from the admission proof instead of a configured
-  record size, keeps reference bits outside the page, and never stores
-  tombstones in base pages.
+  record size, keeps reference bits outside the page, never stores
+  tombstones in base pages, and places the pending record after a merge
+  under the held locks instead of restarting the write.

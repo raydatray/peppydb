@@ -10,9 +10,12 @@ The tree is shared between threads: it is `Send + Sync`, and every
 operation takes `&self`. Each leaf has its own reader-writer lock, and the
 inner layer sits behind one interim lock; the
 [concurrency design](bf-tree-concurrency.md) records the locks and the
-protocol. Leaves live behind a [page store](bf-tree-leaf-store.md). The tree
-has base leaves only: mini-pages, the circular buffer in the tree, and
-logging are separate components that do not exist in the tree yet.
+protocol. Leaves live behind a [page store](bf-tree-leaf-store.md). Each
+leaf is a base page in the store plus at most one in-memory
+[mini-page](bf-tree-mini-page.md) in the
+[circular buffer](bf-tree-circular-buffer.md). Writes buffer into the
+mini-page, and a full mini-page merges into the base page. Eviction and
+logging do not exist in the tree yet.
 
 ## Shape
 
@@ -41,9 +44,10 @@ flowchart TD
   per-node frames suited to optimistic latching.
 - Leaves live in a `PageStore` behind the `LeafMap`, described in
   [leaf storage](bf-tree-leaf-store.md). A `LeafId` is a stable slot in the
-  store. Every access loads the leaf's base page under its lock into a
-  thread-local scratch buffer, and every write goes to the store at once.
-  `Tree::flush` only syncs the store.
+  store. A leaf's mini-page, if any, is reached through its entry. An access
+  that needs the base page loads it under the leaf's lock into a
+  thread-local scratch buffer. A merge writes the result to the store at
+  once. `Tree::flush` merges every mini-page and then syncs the store.
 
 ## Routing and fences
 
@@ -52,11 +56,14 @@ A descent with any byte slice therefore reaches the one leaf whose fences
 contain it. Under concurrency a route becomes stale if the routed leaf
 splits between the descent and the leaf lock. The
 [route, lock, validate, retry protocol](bf-tree-concurrency.md#route-lock-validate-retry)
-detects this and routes again. Point operations still call `Page::check_key` on the loaded
-leaf, and a failure surfaces as the internal `TreeError::Page` error rather
-than as wrong data.
+detects this and routes again. A point read that loads the base page calls
+`Page::check_key` on it, and a failure surfaces as the internal
+`TreeError::Page` error rather than as wrong data. Blind writes load no
+base page, so they make no such check; `check_invariants` instead checks
+that every buffered key lies within its leaf's fences.
 
-Both split primitives, `Page::merge_batch_split` for leaves and
+Both split primitives, `Page::merge_batch_split` for leaves (called through
+the mini-page crate's `LeafMut::merge_split`) and
 `InnerNode::split_with_insert` for inner nodes, write the right output into
 a separate buffer, return the separator, and leave `self` as the left
 output. A leaf split's separator is the full key of the right output's first
@@ -74,37 +81,50 @@ impl Tree {
 }
 ```
 
-A write merges a one-record batch into the leaf's base page. `put` passes
+A write buffers one record blindly in the leaf's mini-page. `put` passes
 `RecordState::Insert(value)` and `remove` passes `RecordState::Delete`.
-This is the batch-merge path of the [page design](bf-tree-pages.md) with a
-batch of one, so every write and every later merge (mini-pages, eviction,
-flush) shares one merge and one split path. Both operations return `()`: a
-blind write in plan 0013 cannot know whether the key existed, so the API
-takes its final shape now.
+Both operations return `()`: a blind write cannot know whether the key
+existed. [Plan 0013](../plans/0013-bf-tree-mini-tree.md) introduced this
+path; the [mini-page design](bf-tree-mini-page.md#in-the-tree) records it
+in detail.
 
 Under the leaf's X lock (taken by `with_leaf_write`), the write:
 
-1. Loads the base page into scratch with `LeafMap::load_base` and checks
-   that the leaf's fences contain the key.
-2. Asks `Page::merge_batch_fits` whether the merged contents fit one page.
-3. If they fit, rebuilds the page with `Page::merge_batch_in_place` and
-   writes it with `LeafMap::write_through`.
-4. Otherwise splits the leaf through `Tree::split_leaf`.
+1. Calls `LeafMap::buffer`, which creates, grows, or applies into the
+   leaf's mini-page without reading the base page. If that buffers the
+   record, the write is done.
+2. On `NeedsMerge` (the mini-page is full at the largest class), calls
+   `Tree::merge_leaf`. It loads the base page into scratch and merges the
+   mini-page's dirty records into it with the mini-page crate's `LeafMut`:
+   in place when `merge_fits`, otherwise by a split through
+   `Tree::split_leaf`. It writes the result through and then frees the
+   mini-page's block.
+3. Buffers the record into a fresh mini-page in the half that owns the key:
+   the right half if `key >= separator`, otherwise the original leaf. Both
+   halves are still X-locked, so the write needs no second route.
 
 ```mermaid
 flowchart TD
-    A[route, X-lock leaf, validate route] --> B[load_base into scratch, check_key]
-    B --> C{merge_batch_fits}
-    C -->|yes| D[merge_batch_in_place, write_through left] --> Z[unlock leaf]
-    C -->|no| E[alloc and X-lock fresh right leaf]
-    E --> F[merge_batch_split into scratch.right]
-    F --> G[write_through right then left]
-    G --> H[install under inner write lock, bump version]
-    H --> I[unlock right leaf] --> Z
+    A[route, X-lock leaf, validate route] --> B["LeafMap::buffer"]
+    B -->|buffered| Z[unlock leaf]
+    B -->|NeedsMerge| C[load_base into scratch]
+    C --> D{merge_fits}
+    D -->|yes| E[merge_in_place, write_through left]
+    D -->|no| F[alloc and X-lock fresh right leaf]
+    F --> G[merge_split into scratch.right]
+    G --> H[write_through right then left]
+    H --> I[install under inner write lock, bump version]
+    E --> J[free the block]
+    I --> J
+    J --> K[buffer the record into the half that owns the key]
+    K --> L[unlock right leaf, if any] --> Z
 ```
 
-A tombstone in the batch removes the base key and never appears in the
-output, so a `Delete` only shrinks the page and never splits.
+Every split is therefore a merge split: a leaf splits only when its base
+page plus its full mini-page do not fit one page. A merge applies a
+tombstone by removing the base key, so tombstones never reach a base page.
+A full circular buffer returns the interim `TreeError::CircularBufferFull`
+(see [the mini-page design](bf-tree-mini-page.md#in-the-tree)).
 
 ### Split and install
 
@@ -112,18 +132,23 @@ output, so a `Delete` only shrinks the page and never splits.
 
 1. `LeafMap::alloc` allocates a store slot and returns the fresh right leaf
    under X. No separator names it yet.
-2. The merge closure splits the merged contents: the left half stays in
+2. The merge closure (`LeafMut::merge_split` over the base page and the
+   mini-page) splits the merged contents: the left half stays in
    `scratch.page` and the right half goes to `scratch.right`.
 3. One `write_through([left, right])` call writes the right page first and
    then the left page.
 4. `install` takes the inner write lock, descends with the separator to
    find the parent path, inserts `separator -> right`, propagates splits
    upward, and bumps `inner_version`.
-5. The right leaf's guard drops, and then the left leaf's guard drops.
+5. `merge_leaf` frees the mini-page's block, and the caller places its
+   pending record, if any.
+6. The right leaf's guard drops, and then the left leaf's guard drops.
 
 If the merge, a write, or the install fails after step 1,
 `LeafMap::discard` frees the fresh slot. A written but unreachable right
-page would overlap its left neighbour at the next `open`.
+page would overlap its left neighbour at the next `open`. `merge_leaf` then
+puts the mini-page back into the left leaf's entry, so no buffered record
+is lost.
 
 `install` re-descends instead of using a recorded path, so a write records
 no path. The separator is a key of the right half, so it lies in the left
@@ -134,8 +159,9 @@ receives the separator and becomes the root, so every leaf moves down one
 level together. Only `ChildRef` values and owned separators move between
 levels.
 
-Splitting is *reactive*: a node splits only after a write into it does not
-fit. This is exact here. The leaf split runs under the leaf's X lock, and
+Splitting is *reactive*: a leaf splits only after a merge into it does not
+fit, and an inner node splits only after a separator does not fit. This is
+exact here. The leaf split runs under the leaf's X lock, and
 the whole upward propagation runs under the inner write lock, so nothing
 changes between the failed fit and the parent update. Plan 0016 replaces
 the inner lock with optimistic latching, where that gap is real; it decides
@@ -143,48 +169,73 @@ whether to add upstream's split-on-descent variant. Whether a node is
 "full" is derived from its free space and the admission limits; node images
 carry no needs-split bit.
 
-`remove(key)` physically removes the record from the base page. Leaves are
-never merged and inner nodes never underflow: an empty leaf keeps its
-fences and stays reachable. Base pages hold no tombstones; mini-pages will.
+`remove(key)` buffers a tombstone; the next merge physically removes the
+record from the base page. Leaves are never merged and inner nodes never
+underflow: an empty leaf keeps its fences and stays reachable. Base pages
+hold no tombstones; mini-pages do.
 
 All key and value limit checks precede any node access. Internal errors from
 nodes (`TreeError::Page` and `TreeError::Inner`) indicate tree bugs. The
 merge works on a scratch copy, so an error before `write_through` leaves the
-store unchanged. Under the admission rule a split error is unreachable.
+store unchanged, and the mini-page stays in the entry. Under the admission
+rule a split error is unreachable.
+
+### Flush
+
+`Tree::flush` walks the leaf IDs that exist when it starts. It X-locks one
+live leaf at a time by ID, calls `merge_leaf` if the leaf has a mini-page,
+and releases the leaf (the right guard of a split first). It then syncs the
+store. A split during `flush` needs no route, because `install` finds the
+parent by the separator. Writers may run meanwhile. Every write that
+returned before `flush` began is in the store when `flush` returns.
 
 ## Admission rule
 
 Splits must never fail. `TreeConfig::validate` derives the limits from the
-capacities. With leaf capacity `L`, inner capacity `I`, key limit `K`, value
-limit `V`, largest record `R = 8 + K + V`, and largest finite fence pair
-`F = 16 + 2K`:
+capacities. With leaf capacity `L`, inner capacity `I`, key limit `K`, and
+value limit `V`:
 
-- **Leaf.** A split happens because the merged contents of a one-record
-  batch do not fit. Those contents are the base records, minus a replaced
-  version of the key, plus the record: exactly the content of a full page
-  plus one pending record, for which the rule was first derived. The
-  virtual content is therefore at most `T <= (L - 48) + R`. The
-  candidate with the last left sum at most `T / 2` bounds the larger side
-  below `T / 2 + R`, and new prefixes are never shorter than the old one. The
-  larger output fits when `32 + F + T/2 + R <= L`, which simplifies to
-  `7K + 3V <= L - 72`. The same bound lets one record fit an empty fenced
-  page, so a split always has at least two virtual records.
+- **Leaf: the mini-page ladder.** Every leaf split is a merge split: the
+  base page plus a full mini-page at the largest class `M`.
+  `SizeClasses::derive(L, K, V)` computes
+  `M = floor64(L - 5K - V - 24)` and requires `M >= 64` and a maximum record
+  `32 + 8 + K + V <= M`. The
+  [mini-page design](bf-tree-mini-page.md#size-classes-and-the-admission-rule)
+  derives this `M`: one two-way split always absorbs a merge, so a merge
+  never returns `CannotSplit`. The record check lets a fresh mini-page at the
+  smallest fitting class take any record, so the write after a merge always
+  succeeds.
 - **Inner.** From the inner-node design, `entry_size(K) = 16 + max(K - 4, 0)
   <= (I - 16) / 2`. Every separator is a leaf key or a promoted separator, so
   its length is at most `K`.
 
-Defaults are `L = I = 4096`, `K = 64`, and `V = 1024`
-(`448 + 3072 = 3520 <= 4024`). The leaf rule dominates at these capacities.
-It is conservative: it assumes maximum-size records on the heavier side. At
-`K = 16` it admits records of about 1.3 KiB, where upstream's size-class
-condition C3 admits about 1.95 KiB. A `Delete` batch only shrinks the page,
-so it needs no bound. [Plan 0013](../plans/0013-bf-tree-mini-tree.md)
-revisits the rule against the mini-page size-class ladder.
+`validate` checks, in order: the leaf and inner capacities are valid page
+capacities, `K >= 1`, the ladder (with checked arithmetic), the inner-node
+rule, and the circular-buffer budget (`CircularBuffer::new` with the
+ladder classes plus `L`). The ladder runs before the inner-node rule
+because it bounds `K` and `V` by `L` without overflow; the inner-node sum
+would overflow first for limits such as `usize::MAX`.
+
+Defaults are `L = I = 4096`, `K = 64`, and `V = 1024`, which give
+`M = 2688` and the ladder 64, 128, 256, 512, 1024, 2048, 2688. At `L = 4096`
+the ladder admits `V` up to 1816 bytes at `K = 64` and 1944 bytes at
+`K = 16`, close to upstream's size-class condition C3 (about 1.95 KiB at
+`K = 16`).
+
+The ladder rule replaced the rule `7K + 3V <= L - 72` of plans 0007 and
+0012, which protected a split of a full base page plus one record. That
+path no longer exists. Neither rule implies the other, because `M` rounds
+down to a multiple of 64. A sweep test over `L = 128..=4096` in steps of
+64, `K` in {1, 8, 9, 16, 64, 255}, and `V` in {0, 16, 64, 256, 1024, 1800}
+(2268 configurations) finds: both rules accept 1337, neither accepts 766,
+only the old rule accepts 1, and only the ladder accepts 164. The one
+configuration that only the old rule accepts is `L = 192, K = 9, V = 16`:
+it gives `M = 64`, which cannot hold a 65-byte record. The ladder accepts
+larger values at normal page sizes. A store created with a configuration
+that the ladder rejects no longer opens.
 
 Byte-aware leaf split selection chooses the candidate that minimizes the
 larger output, so if any candidate fits under the bound, the split finds one.
-
-## Scans
 
 ## Reads
 
@@ -195,9 +246,11 @@ impl Tree {
 }
 ```
 
-`get_with` routes, takes the leaf's S lock, validates the route, loads the
-base page, checks the key against the fences, and calls `f` exactly once
-under the lock with the value or `None`. A retry happens only before `f`
+`get_with` routes, takes the leaf's S lock, and validates the route. If the
+leaf has a mini-page, `lookup_marking` answers first: `Found` and `Absent`
+need no store read. Only on `Miss`, or without a mini-page, does `get_with`
+load the base page and check the key against the fences. It calls `f`
+exactly once under the lock with the value or `None`. A retry happens only before `f`
 runs. `get` is `get_with(key, |v| v.map(<[u8]>::to_vec))` and returns an
 owned copy: a borrow cannot outlive the leaf lock. `f` must not call back
 into the tree (see [concurrency](bf-tree-concurrency.md#deadlock-freedom)).
@@ -225,7 +278,9 @@ Both scan forms visit one leaf at a time under its S lock:
 
 - The scan keeps a cursor, initially the start bound. It routes the cursor
   to a leaf, takes S, validates the route, loads the base page, and reads
-  `page.range(Some(cursor), end)`. It applies the lower bound to every leaf,
+  `LeafRef { base, mini }.range(Some(cursor), end)`, which merges base and
+  mini-page records, lets the mini-page win an equal key, and hides
+  tombstones and phantoms. It applies the lower bound to every leaf,
   not only the first, so a leaf that split after an earlier step can never
   contribute keys below the cursor.
 - The leaf's upper fence, read under the same lock, becomes the next
@@ -263,6 +318,12 @@ result is meaningful only at quiescence.
 5. Every allocated node is reachable exactly once, and every reference
    resolves to an allocated node. Freed leaf slots, which a reopened store
    can hold, are neither reachable nor referenced.
+6. Every mini-page is a valid, unfenced page whose backing leaf is its
+   leaf, whose capacity is a ladder class, and whose keys lie within the
+   leaf's fences (`InvariantError::BadMiniPage`).
+
+The model tests also assert `circular_buffer_used() <= circular_buffer_bytes`
+after every step.
 
 ## References
 
@@ -271,9 +332,12 @@ result is meaningful only at quiescence.
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`, `src/tree.rs`:
   root-is-leaf flag, parent-stack split propagation, high-fence scans, and the
-  `create_mem_page_size_classes` conditions. peppydb differs by sizing leaf
-  splits exactly including the pending record, splitting reactively, and
-  storing no `should_split` bit in node images.
+  `create_mem_page_size_classes` conditions. peppydb differs by deriving
+  the largest class from a merge-split proof, placing the pending record
+  after a merge under the held locks instead of restarting, splitting
+  reactively, and storing no `should_split` bit in node images.
 - Plans [0007](../plans/0007-bf-tree-in-memory-tree.md) (the tree, splits,
-  and the admission rule) and [0012](../plans/0012-bf-tree-shared-tree.md)
-  (shared tree, one-record batch writes, owned reads, and per-leaf scans).
+  and the first admission rule), [0012](../plans/0012-bf-tree-shared-tree.md)
+  (shared tree, owned reads, and per-leaf scans), and
+  [0013](../plans/0013-bf-tree-mini-tree.md) (blind writes, merge splits,
+  the ladder admission rule, and flush merges).
