@@ -55,9 +55,14 @@ impl Page {
         Ok(())
     }
 
-    /// Split this fenced page with `batch` applied: `self` becomes the left
-    /// output and `right` the right output, as in
-    /// [`Page::split_with_insert`]. Errors leave both buffers unchanged.
+    /// Split this fenced page with `batch` applied. `self` becomes the left
+    /// output with fences `[lower, separator)` and `right` the right output
+    /// with `[separator, upper)`; each output gets the prefix its fences
+    /// imply. The separator is the full key of the right output's first
+    /// record, each output keeps at least one record, and the split point
+    /// balances used bytes. Both outputs inherit this page's header metadata.
+    /// Errors, including [`PageError::CannotSplit`], leave both buffers
+    /// unchanged.
     pub fn merge_batch_split<'r, 'b>(
         &mut self,
         right: &'r mut [u8],

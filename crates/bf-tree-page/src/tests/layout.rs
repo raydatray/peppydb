@@ -90,7 +90,7 @@ fn the_backing_leaf_round_trips_and_survives_rebuilds() {
         page.try_insert(key, b"0123456789").unwrap();
     }
     let split = page
-        .split_with_insert(&mut right, b"d", RecordState::Insert(b"0123456789"))
+        .merge_batch_split(&mut right, [live(b"d", b"0123456789")].into_iter())
         .unwrap();
     assert_eq!(split.right.backing_leaf(), Some(leaf));
     assert_eq!(page.backing_leaf(), Some(leaf));

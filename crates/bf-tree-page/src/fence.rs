@@ -143,7 +143,7 @@ impl Page {
     }
 
     /// Reject empty and out-of-range keys. Out-of-range keys are errors, not misses.
-    pub(super) fn check_key(&self, key: &[u8]) -> Result<(), PageError> {
+    pub fn check_key(&self, key: &[u8]) -> Result<(), PageError> {
         if key.is_empty() {
             return Err(PageError::EmptyKey);
         }

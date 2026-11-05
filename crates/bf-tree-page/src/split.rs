@@ -4,9 +4,9 @@ use std::iter::{FusedIterator, Peekable};
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::layout::{HEADER_BYTES, SLOT_BYTES};
-use super::{Fence, Fences, KeyRef, Page, PageError, RecordRef, RecordState};
+use super::{Fence, Fences, KeyRef, Page, PageError, RecordRef};
 
-/// The result of [`Page::split_with_insert`].
+/// The result of [`Page::merge_batch_split`].
 #[derive(Debug)]
 pub struct LeafSplit<'r> {
     /// The full key of the right output's first record. It is the right
@@ -18,38 +18,6 @@ pub struct LeafSplit<'r> {
 }
 
 impl Page {
-    /// Split a fenced page together with one pending record.
-    ///
-    /// `self` becomes the left output with fences `[lower, separator)` and
-    /// `right_storage` the right output with `[separator, upper)`; each output
-    /// gets the prefix its fences imply. The separator is the full key of the
-    /// right output's first record, each output keeps at least one record, and
-    /// the split point balances used bytes.
-    ///
-    /// Record kinds are preserved; tombstones lose their
-    /// retained value bytes, as in any rebuild. Both outputs inherit this page's
-    /// backing-leaf, LSN, and snapshot-version fields. Errors, including
-    /// [`PageError::CannotSplit`], leave both buffers unchanged.
-    pub fn split_with_insert<'r>(
-        &mut self,
-        right_storage: &'r mut [u8],
-        key: &[u8],
-        state: RecordState<'_>,
-    ) -> Result<LeafSplit<'r>, PageError> {
-        self.check_split_storage(right_storage)?;
-        self.record_size(key, state)?;
-        if self.search(key).is_ok() {
-            return Err(PageError::DuplicateKey);
-        }
-
-        let pending = [RecordRef {
-            key: KeyRef::from(key),
-            state,
-        }];
-
-        self.split_with_batch(right_storage, pending.iter().copied())
-    }
-
     pub(super) fn check_split_storage(&self, right_storage: &[u8]) -> Result<(), PageError> {
         Self::check_capacity(right_storage.len())?;
 
@@ -62,18 +30,6 @@ impl Page {
         }
 
         Ok(())
-    }
-
-    /// Split the virtual merge of this page's records and a sorted batch of
-    /// in-range pending records. A pending record replaces a stored record with
-    /// the same key. The caller has validated the storage and every record.
-    fn split_with_batch<'r, 'b>(
-        &mut self,
-        right_storage: &'r mut [u8],
-        pending: impl Iterator<Item = RecordRef<'b>> + Clone,
-    ) -> Result<LeafSplit<'r>, PageError> {
-        let images = self.split_images(Merge::new(self.iter(), pending.map(RecordRef::shorten)))?;
-        Ok(self.commit_split(right_storage, images))
     }
 
     /// Build both outputs of a split of `records`, a sorted sequence that may

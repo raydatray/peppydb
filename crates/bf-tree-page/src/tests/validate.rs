@@ -76,8 +76,14 @@ fn model_pages(seed: u64) -> Vec<Vec<u8>> {
                 let in_range = lower.is_none_or(|lower| pending.as_slice() >= lower)
                     && upper.is_none_or(|upper| pending.as_slice() < upper);
                 if in_range
-                    && let Ok(split) =
-                        left_page.split_with_insert(&mut right, &pending, RecordState::Insert(b"p"))
+                    && let Ok(split) = left_page.merge_batch_split(
+                        &mut right,
+                        [RecordRef {
+                            key: KeyRef::from(pending.as_slice()),
+                            state: RecordState::Insert(b"p"),
+                        }]
+                        .into_iter(),
+                    )
                 {
                     drop(split);
                     pages.push(left);
@@ -350,9 +356,97 @@ fn zero_length_payloads_may_share_an_offset() {
         page.try_insert(key, b"").unwrap();
     }
     let split = page
-        .split_with_insert(&mut right, b"ka", RecordState::Insert(b""))
+        .merge_batch_split(&mut right, [live(b"ka", b"")].into_iter())
         .unwrap();
     let right = split.right.as_bytes().to_vec();
     Page::validate(&right).unwrap();
     assert!(Page::validate(&left).is_ok());
+}
+
+#[test]
+fn check_header_accepts_every_fenced_model_page() {
+    let pages: Vec<_> = model_pages(0x5eed)
+        .into_iter()
+        .chain(model_pages(0xabcdef))
+        .chain([fenced_fixture()])
+        .filter(|bytes| Page::validate(bytes).unwrap().fences().is_some())
+        .collect();
+    assert!(pages.len() > 20);
+    for bytes in &pages {
+        let page = Page::check_header(bytes, bytes.len()).unwrap();
+        assert_eq!(page.as_bytes(), bytes.as_slice());
+    }
+}
+
+#[test]
+fn check_header_rejects_bad_headers_without_panicking() {
+    let header_error = |bytes: &[u8], capacity: usize| match Page::check_header(bytes, capacity) {
+        Err(PageError::Corrupt(reason)) => reason,
+        other => panic!("expected a corrupt header, got {other:?}"),
+    };
+    let valid = fenced_fixture();
+    assert!(Page::check_header(&valid, 128).is_ok());
+
+    assert_eq!(
+        header_error(&[0; 128], 128),
+        "capacity field differs from the buffer length"
+    );
+    assert_eq!(
+        header_error(&valid, 256),
+        "buffer length differs from the page size"
+    );
+    assert_eq!(
+        header_error(&valid[..64], 128),
+        "buffer length differs from the page size"
+    );
+    assert_eq!(header_error(&valid[..100], 100), "illegal capacity");
+
+    let mut image = valid.clone();
+    set_u16(&mut image, 2, 256);
+    assert_eq!(
+        header_error(&image, 128),
+        "capacity field differs from the buffer length"
+    );
+
+    let mut unfenced = vec![0; 128];
+    Page::init(&mut unfenced)
+        .unwrap()
+        .try_insert(b"a", b"1")
+        .unwrap();
+    assert_eq!(header_error(&unfenced, 128), "page has no fences");
+
+    let mut image = valid.clone();
+    let flags = read_u16(&image, 0) | 1 << 12;
+    set_u16(&mut image, 0, flags);
+    assert_eq!(header_error(&image, 128), "unknown header flags");
+
+    let mut image = valid.clone();
+    set_u16(&mut image, 0, HAS_FENCES | 13);
+    assert_eq!(
+        header_error(&image, 128),
+        "slot directory and free gap do not fit"
+    );
+}
+
+#[test]
+fn check_header_never_panics_on_corrupted_fenced_pages() {
+    let mut rng = Rng(0xfeed);
+    let valid = fenced_fixture();
+    let mut accepted = 0;
+    for _ in 0..10_000 {
+        let mut image = valid.clone();
+        for _ in 0..1 + rng.below(4) {
+            // Favor the header, where every checked field lives.
+            let index = if rng.below(2) == 0 {
+                rng.below(32)
+            } else {
+                rng.below(image.len())
+            };
+            image[index] ^= 1 << rng.below(8);
+        }
+        if Page::check_header(&image, 128).is_ok() {
+            accepted += 1;
+        }
+    }
+    assert!(accepted > 0, "flips outside the checked fields pass");
 }
