@@ -6,7 +6,9 @@ version = 4
 name = "bf-tree"
 version = "0.1.0"
 dependencies = [
+ "bf-tree-circular-buffer",
  "bf-tree-inner",
+ "bf-tree-mini-page",
  "bf-tree-node-id",
  "bf-tree-page",
  "bf-tree-store",

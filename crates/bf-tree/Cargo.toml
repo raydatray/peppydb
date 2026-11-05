@@ -7,7 +7,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+bf-tree-circular-buffer = { path = "../bf-tree-circular-buffer" }
 bf-tree-inner = { path = "../bf-tree-inner" }
+bf-tree-mini-page = { path = "../bf-tree-mini-page" }
 bf-tree-node-id = { path = "../bf-tree-node-id" }
 bf-tree-page = { path = "../bf-tree-page" }
 bf-tree-store = { path = "../bf-tree-store" }
