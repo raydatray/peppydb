@@ -23,8 +23,6 @@
 //! operation of the default strategy, `load` included, contains at least one
 //! `SeqCst` read-modify-write (its `docs` module, "Atomic orderings").
 
-#![cfg_attr(not(test), expect(dead_code, reason = "used from diff 6"))]
-
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -52,6 +50,7 @@ impl Image {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn bytes(&self) -> &[u8; IMAGE_BYTES] {
         &self.bytes
     }
@@ -234,6 +233,12 @@ impl Snapshot {
     pub(super) fn node(&self) -> &InnerNode {
         self.image.node(self.capacity)
     }
+
+    /// The node's bytes.
+    #[cfg(test)]
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.image.bytes()[..self.capacity]
+    }
 }
 
 /// A frame held for writing. Dropping it publishes the draft, if any, and
@@ -260,6 +265,10 @@ impl FrameWrite<'_> {
 
     /// The node as this guard sees it: the draft if it changed anything,
     /// else the current image.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by lock_parent from diff 7")
+    )]
     pub(super) fn node(&self) -> &InnerNode {
         self.draft
             .as_ref()

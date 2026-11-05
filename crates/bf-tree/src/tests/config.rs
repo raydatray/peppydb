@@ -1,5 +1,4 @@
 use super::*;
-use crate::store::InnerStore;
 use bf_tree_mini_page::SizeClasses;
 
 #[test]
@@ -231,32 +230,4 @@ fn new_tree_is_one_unbounded_leaf() {
         Tree::in_memory(config(64, 64, 1, 0)),
         Err(TreeError::InvalidConfig(_))
     ));
-}
-
-#[test]
-fn store_allocates_distinct_zeroed_disjoint_buffers() {
-    let mut store = InnerStore::new(64, ChildRef::Leaf(LeafId::new(0).unwrap()));
-    let ids: Vec<_> = (0..4).map(|_| store.alloc()).collect();
-    let indices: Vec<_> = ids.iter().map(|id| id.index()).collect();
-    assert_eq!(indices, [0, 1, 2, 3]);
-    assert_eq!(store.len(), 4);
-    assert!(ids.iter().all(|&id| store.get(id) == [0; 64]));
-
-    store.get_mut(ids[1]).fill(1);
-    let (a, b) = store.pair_mut(ids[3], ids[1]);
-    assert_eq!(b, [1; 64]);
-    a.fill(3);
-    b.fill(2);
-    assert_eq!(store.get(ids[0]), [0; 64]);
-    assert_eq!(store.get(ids[1]), [2; 64]);
-    assert_eq!(store.get(ids[3]), [3; 64]);
-    assert_eq!(InnerId::from_index(5).raw(), 5);
-}
-
-#[test]
-#[should_panic(expected = "distinct allocated IDs")]
-fn store_pair_rejects_aliasing() {
-    let mut store = InnerStore::new(64, ChildRef::Leaf(LeafId::new(0).unwrap()));
-    let id = store.alloc();
-    store.pair_mut(id, id);
 }

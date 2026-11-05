@@ -40,17 +40,16 @@ impl Tree {
     /// 5. Every allocated node is reachable exactly once. Freed leaf slots
     ///    are neither reachable nor referenced.
     ///
-    /// It copies the routing layer under the inner read lock, releases it,
-    /// then locks leaves one at a time, so it never holds the inner lock while
-    /// waiting for a leaf. It needs quiescence for a meaningful result.
+    /// It copies the routing layer from frame snapshots, then locks leaves
+    /// one at a time. It needs quiescence for a meaningful result.
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
-        let (root, nodes) = {
-            let inner = self.inner.read();
-            let nodes: Vec<Vec<u8>> = (0..inner.len())
-                .map(|index| inner.get(InnerId::from_index(index)).to_vec())
-                .collect();
-            (inner.root, nodes)
-        };
+        let root = self.inner.root();
+        let nodes: Vec<Vec<u8>> = (0..self.inner.len())
+            .map(|index| {
+                let snapshot = self.inner.snapshot(InnerId::from_index(index));
+                snapshot.bytes().to_vec()
+            })
+            .collect();
         let mut checker = Checker {
             tree: self,
             nodes: &nodes,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::Path;
+use crate::inner::Path;
 use bf_tree_node_id::InnerId;
 
 mod bench;
@@ -60,7 +60,7 @@ fn empty_tree() -> Tree {
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     Tree::assemble(
         config,
-        InnerStore::new(
+        Inner::new(
             config.inner_capacity,
             ChildRef::Leaf(LeafId::new(0).unwrap()),
         ),
@@ -72,15 +72,15 @@ fn empty_tree() -> Tree {
 impl Tree {
     /// Route `key` to its leaf and record the path, ignoring concurrency.
     fn locate(&self, key: &[u8]) -> (LeafId, Path) {
-        self.inner.read().locate(key)
+        self.inner.locate(key)
     }
 
     fn root(&self) -> ChildRef {
-        self.inner.read().root
+        self.inner.root()
     }
 
     fn set_root(&mut self, root: ChildRef) {
-        self.inner.get_mut().root = root;
+        self.inner.set_root(root);
     }
 }
 
@@ -110,12 +110,15 @@ fn add_leaf(
 }
 
 fn add_inner(tree: &mut Tree, first: ChildRef, entries: &[(&[u8], ChildRef)]) -> ChildRef {
-    let inner = tree.inner.get_mut();
-    let id = inner.alloc();
-    let node = InnerNode::init(inner.get_mut(id), first).unwrap();
-    for &(key, child) in entries {
-        node.try_insert(key, child).unwrap();
-    }
+    let id = tree
+        .inner
+        .alloc_with(|bytes| {
+            let node = InnerNode::init(bytes, first)?;
+            entries
+                .iter()
+                .try_for_each(|&(key, child)| node.try_insert(key, child))
+        })
+        .unwrap();
     ChildRef::Inner(id)
 }
 

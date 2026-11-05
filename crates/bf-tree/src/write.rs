@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
 use super::maintain::has_clean_mini;
 use super::{Tree, TreeError};
@@ -281,16 +279,10 @@ impl Tree {
     }
 
     /// Insert `separator -> right` above `left`. The caller holds the
-    /// exclusive locks of both leaves. The parent is found by descending with
-    /// the separator: it is a key of the right half, so it lies in the left
-    /// leaf's old range, which cannot change while the caller holds `left`.
-    /// The version is bumped before the caller releases `left`.
+    /// exclusive locks of both leaves; see [`Inner::install`].
+    ///
+    /// [`Inner::install`]: super::inner::Inner::install
     fn install(&self, left: LeafId, separator: Vec<u8>, right: LeafId) -> Result<(), TreeError> {
-        let mut inner = self.inner.write();
-        let (leaf, path) = inner.locate(&separator);
-        debug_assert_eq!(leaf, left, "the separator lies in the left leaf's range");
-        inner.propagate(&path, separator, right)?;
-        self.inner_version.fetch_add(1, Ordering::Release);
-        Ok(())
+        self.inner.install(left, separator, right)
     }
 }

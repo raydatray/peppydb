@@ -30,14 +30,11 @@
 //! assert_eq!(tree.iter().count(), 999);
 //! ```
 
-use std::sync::atomic::AtomicU64;
-
 use bf_tree_circular_buffer::CircularBuffer;
 use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
 use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
-use bf_tree_sync::RwLock;
 
 // Types from the internal crates that appear in this crate's public API, so
 // that callers need no other dependency. Other items stay internal.
@@ -48,6 +45,7 @@ pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
 
 mod evict;
 mod frames;
+mod inner;
 #[cfg(test)]
 mod invariants;
 mod leaf_map;
@@ -56,15 +54,14 @@ mod open;
 mod policy;
 mod read;
 mod scan;
-mod store;
 mod write;
 
+use inner::Inner;
 #[cfg(test)]
 pub use invariants::InvariantError;
 use leaf_map::{LeafMap, Locked, Residency, with_scratch};
 use policy::Policy;
 pub use scan::Scan;
-use store::InnerStore;
 
 /// Node capacities and the key and value limits they must support.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,13 +286,12 @@ pub enum TreeError {
 ///
 /// Leaves live in a [`PageStore`] behind a leaf mapping table with one
 /// reader-writer lock per leaf; inner nodes are in-memory data derived from
-/// leaf fences, behind one reader-writer lock. Every operation takes `&self`.
+/// leaf fences, in version-locked frames that readers never lock. Every
+/// operation takes `&self`.
 #[derive(Debug)]
 pub struct Tree {
     config: TreeConfig,
-    inner: RwLock<InnerStore>,
-    /// Bumped, under the inner write lock, by every structural change.
-    inner_version: AtomicU64,
+    inner: Inner,
     leaves: LeafMap,
     policy: Policy,
 }
@@ -379,7 +375,7 @@ impl Tree {
 
     /// Number of inner nodes.
     pub fn inner_count(&self) -> usize {
-        self.inner.read().len()
+        self.inner.len()
     }
 
     /// Number of leaf slots in the store, live or freed.
@@ -416,16 +412,15 @@ impl Tree {
 
         Ok(Self::assemble(
             config,
-            InnerStore::new(config.inner_capacity, ChildRef::Leaf(root)),
+            Inner::new(config.inner_capacity, ChildRef::Leaf(root)),
             leaves,
         ))
     }
 
-    fn assemble(config: TreeConfig, inner: InnerStore, leaves: LeafMap) -> Self {
+    fn assemble(config: TreeConfig, inner: Inner, leaves: LeafMap) -> Self {
         Self {
             config,
-            inner: RwLock::new(inner),
-            inner_version: AtomicU64::new(0),
+            inner,
             leaves,
             policy: Policy::new(config.policy_seed),
         }
