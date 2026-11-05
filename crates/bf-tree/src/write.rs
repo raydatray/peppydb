@@ -4,14 +4,7 @@ use super::read::Path;
 use super::{Tree, TreeError};
 use bf_tree_inner::{InnerError, InnerNode};
 use bf_tree_node_id::{ChildRef, LeafId};
-use bf_tree_page::{Page, PageError, RecordState};
-
-/// The result of writing into one leaf without splitting it.
-enum LeafWrite {
-    Done,
-    /// The leaf must split with the record.
-    MustSplit,
-}
+use bf_tree_page::{KeyRef, Page, RecordRef, RecordState};
 
 impl Tree {
     /// Insert `key` with `value`, or replace its current value.
@@ -24,12 +17,7 @@ impl Tree {
             return Err(TreeError::ValueTooLarge);
         }
 
-        let (leaf, path) = self.locate(key);
-        let state = RecordState::Insert(value);
-        match self.try_upsert_in_leaf(leaf, key, state)? {
-            LeafWrite::Done => Ok(()),
-            LeafWrite::MustSplit => self.split_and_propagate(leaf, &path, key, state),
-        }
+        self.write(key, RecordState::Insert(value))
     }
 
     /// Remove `key` if it is present.
@@ -39,60 +27,44 @@ impl Tree {
     pub fn remove(&mut self, key: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
 
-        let leaf = self.find_leaf(key);
-        self.leaf_mut(leaf)?.remove(key)?;
-        Ok(())
+        self.write(key, RecordState::Delete)
     }
 
-    /// Write `key` into `leaf` without splitting, compacting if its holes make
-    /// room. If it returns `MustSplit`, any old version of `key` has already
-    /// been removed.
-    fn try_upsert_in_leaf(
-        &mut self,
-        leaf: LeafId,
-        key: &[u8],
-        state: RecordState<'_>,
-    ) -> Result<LeafWrite, TreeError> {
+    /// Merge a one-record batch into the leaf that owns `key`: in place if
+    /// the rebuilt leaf fits, otherwise split it. A `Delete` removes the key
+    /// and never splits.
+    fn write(&mut self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
+        let (leaf, path) = self.locate(key);
+        let batch = [RecordRef {
+            key: KeyRef::from(key),
+            state,
+        }];
+        // The batch check rejects a key outside the leaf's fences, which
+        // would mean a routing bug.
         let page = self.leaf_mut(leaf)?;
-        match page.try_upsert(key, state) {
-            Err(PageError::PageFull) => {}
-            result => {
-                result?;
-                return Ok(LeafWrite::Done);
-            }
+        if page.merge_batch_fits(batch.iter().copied())? {
+            page.merge_batch_in_place(batch.iter().copied())?;
+            return Ok(());
         }
 
-        // Removing first frees the old version's bytes for the space check, and
-        // turns a replacement during a split into an insert.
-        page.remove(key)?;
-        let needed = page.record_size(key, state)?;
-        if needed <= page.free_bytes() + page.reclaimable_bytes() {
-            if needed > page.free_bytes() {
-                page.compact();
-            }
-
-            page.try_insert_record(key, state)?;
-
-            return Ok(LeafWrite::Done);
-        }
-
-        Ok(LeafWrite::MustSplit)
+        self.split_and_propagate(leaf, &path, &batch)
     }
 
-    /// Split `leaf` with the pending record, then insert each new separator
+    /// Split `leaf` with `batch` merged in, then insert each new separator
     /// into the parent recorded on `path`, splitting full parents in turn.
     /// When the path is exhausted, grow a new root over the old one.
     fn split_and_propagate(
         &mut self,
         leaf: LeafId,
         path: &Path,
-        key: &[u8],
-        state: RecordState<'_>,
+        batch: &[RecordRef<'_>],
     ) -> Result<(), TreeError> {
         let right = self.leaves.alloc()?;
         let (left_bytes, right_bytes) = self.leaves.pair_mut(leaf, right)?;
         let page = Page::mut_from_bytes(left_bytes).expect("leaf buffers hold a page header");
-        let mut separator = page.split_with_insert(right_bytes, key, state)?.separator;
+        let mut separator = page
+            .merge_batch_split(right_bytes, batch.iter().copied())?
+            .separator;
         let mut child = ChildRef::Leaf(right);
 
         for &(parent, _) in path.iter().rev() {
