@@ -138,32 +138,38 @@ the leaf's mini-page, if any, under the leaf's reader-writer lock
 ```rust
 pub(super) struct LeafEntry {
     freed: bool,
-    /// A circular-buffer block holding this leaf's mini-page.
+    /// A circular-buffer block holding this leaf's mini-page, or, without
+    /// `refs`, its full page (plan 0015).
     block: Option<Block>,
-    /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
+    /// Reference bits for the mini-page's slots; `Some` exactly when the
+    /// block is a mini-page.
     refs: Option<Box<RefBits>>,
     /// Changes (wrapping) on every block change. A read's hint applies
     /// only if it is unchanged (plan 0014).
     version: u32,
+    /// A full page is newer than the store (plan 0015).
+    dirty: bool,
 }
 
 pub(super) enum Residency<'e> {
     Base,
     Mini { page: &'e MiniPage, refs: &'e RefBits },
+    Full(&'e Page),
 }
 ```
 
 - `block` and `refs` are two `Option` fields, not one enum. Each has a
   niche, so the entry needs no discriminant, and a test keeps
-  `RwLock<LeafEntry>` within 64 bytes. Plan 0015 adds `Full` pages, which
-  hold a block without reference bits.
+  `RwLock<LeafEntry>` within 64 bytes. A `Full` leaf holds a block without
+  reference bits; the [caching design](bf-tree-caching.md#residency)
+  describes it.
 - `residency()` gives a view of the entry under S or X. `Mini` views the
   block bytes in place as a `MiniPage`.
 - `LeafWrite::take_mini` moves the two handles out of the entry into a
   `Mini`, and `put_mini` moves them back. No block bytes are copied.
   `take_mini` also bumps `version`. Growth, merges, and relocation all go
-  through it, so one bump covers every block change. A bump without a
-  change only makes a read's hint skip.
+  through it; full-page changes go through `take_full` and `set_full`,
+  which bump it too. A bump without a change only makes a read's hint skip.
 
 ### Allocation sites
 
@@ -204,7 +210,9 @@ flowchart TD
     H -->|Buffered| Z
 ```
 
-- **Merge.** `Tree::merge_leaf` runs under X on the reachable leaf. It
+- **Merge.** `Tree::merge_leaf` runs under X on the reachable leaf. A
+  mini-page with no dirty record only repeats the base page, so its block
+  is freed without reading or writing the base page. Otherwise it
   takes the mini-page out of the entry, loads the base page, and merges with
   `LeafMut`: in place when `merge_fits`, otherwise through the tree's
   `split_leaf`. It writes the result through, installs the separator after a
@@ -215,7 +223,10 @@ flowchart TD
   still X-locked. The pending record goes to the right half if
   `key >= separator`, otherwise to the original leaf. There is no second
   route and no retry. Neither half has a mini-page now, so `buffer`
-  allocates a fresh one at the smallest fitting class. The ladder check
+  allocates a fresh one at the smallest fitting class. With
+  `write_load_full_page` (plan 0015), the merged left half may instead be
+  kept as a full page, and a record for it is written into that page
+  directly ([write-load promotion](bf-tree-caching.md#write-load-promotion)). The ladder check
   `32 + 8 + K + V <= M` guarantees that it takes the record; any other
   outcome is a bug (`unreachable!`).
 - **Why the record is not folded into the merge.** Folding it in adds one
@@ -240,15 +251,19 @@ flowchart TD
 
 `get_with` consults the mini-page first with `lookup_marking`, which marks
 the slot's reference bit through `&RefBits` under S. `Found` and `Absent`
-answer without the store. Only `Miss` loads the base page. Both scan forms
-load the base page under S and iterate `LeafRef { base, mini }.range` for
-each leaf.
+answer without the store. Only `Miss` loads the base page, and such a read
+may leave a `Cache` or `Phantom` record behind
+([caching policy](bf-tree-caching.md#record-and-negative-caching)). Both
+scan forms iterate `LeafRef { base, mini }.range` for each leaf under S;
+the base page is the leaf's full page if it has one, and is loaded from
+the store otherwise.
 
 ### Flush and close
 
 `Tree::flush` walks leaf IDs `0..len`, with `len` read when it starts. It
 X-locks each live leaf by ID, calls `merge_leaf` if the leaf has a
-mini-page, releases the leaf, and then syncs the store. Every write that
+mini-page or writes back its full page if that page is dirty, releases the
+leaf, and then syncs the store. Every write that
 returned before `flush` began is in the store when `flush` returns. A
 record buffered into a leaf that `flush` already visited, or into a leaf
 created after it started, may stay buffered.
@@ -260,8 +275,8 @@ the records.
 
 ### Diagnostics and checks
 
-`Tree::buffered_leaves()` counts leaves with a block; it takes each S lock
-in turn. `Tree::circular_buffer_used()` returns the circular buffer's used
+`Tree::buffered_leaves()` counts leaves with a mini-page; it takes each S
+lock in turn. `Tree::circular_buffer_used()` returns the circular buffer's used
 bytes, which include dead blocks that the head has not passed.
 `check_invariants` requires each mini-page to be a valid, unfenced page
 whose backing leaf is this leaf, whose capacity is a ladder class, and

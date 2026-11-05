@@ -9,6 +9,9 @@ every key operation follows, and the guarantees that result.
 circular buffer under the same leaf locks, and
 [plan 0014](../plans/0014-bf-tree-eviction.md) added eviction and
 access-time relocation without a new lock rank.
+[Plan 0015](../plans/0015-bf-tree-caching.md) added caching hints, full
+pages, and deferred eviction, also without a new lock rank
+([caching policy](bf-tree-caching.md)).
 [Plan 0016](../plans/0016-bf-tree-concurrency.md) replaces the interim
 routing lock described below with per-node frames.
 
@@ -23,10 +26,11 @@ flowchart LR
     Tree --> Inner["RwLock&lt;InnerStore&gt; (root + inner nodes)"]
     Tree --> V["inner_version: AtomicU64"]
     Tree --> Map["LeafMap"]
-    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
+    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version, dirty"]
     Map --> CB["CircularBuffer: Mutex&lt;State&gt; + slab"]
     Map --> PS["Box&lt;dyn PageStore&gt; (Send + Sync, &amp;self)"]
     Tree -. per thread .-> S["thread-local Scratch: page, right"]
+    Tree -. per thread .-> G["thread-local policy generator"]
 ```
 
 ```rust
@@ -36,6 +40,8 @@ pub struct Tree {
     /// Bumped, under the inner write lock, by every structural change.
     inner_version: AtomicU64,
     leaves: LeafMap,
+    /// Promotion rolls: a seed, a tree identity, and a stream counter.
+    policy: Policy,
 }
 ```
 
@@ -43,7 +49,7 @@ pub struct Tree {
 
 | Lock | Type | Protects | Taken by |
 | --- | --- | --- | --- |
-| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`), the mini-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), `flush` and eviction (X, by ID), `maintain` (X, by ID, `try_write` only) |
+| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`, `dirty`), the mini-page or full-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), `flush` and eviction (X, by ID), `maintain`, the deferred retry, and `evict_if_clean` (X, by ID, `try_write` only) |
 | Inner lock | `RwLock<InnerStore>` | the inner-node buffers and the root | `route` (read), `install` (write), `height`, `inner_count`, `check_invariants` (read) |
 | Routing version | `AtomicU64` (not a lock) | detects structural changes since a route was taken | written only under the inner write lock |
 | Circular-buffer mutex | `Mutex<State>` inside `CircularBuffer` | block metadata: head, tail, free lists, claims | `alloc`, `free`, `used`, `has_room`, `claim_victim`, `retire`, `unclaim` |
@@ -60,6 +66,12 @@ that the caller holds the lock.
 Per-thread scratch buffers (`with_scratch`) are not shared, so they need no
 lock. A nested call, for example from a user callback, gets a temporary
 scratch instead of a `RefCell` panic.
+
+The policy generator is thread-local too: a `Cell` that holds the tree it
+belongs to and its state. A roll writes only that cell. A thread touches
+the tree's shared atomic stream counter only when it rolls for a different
+tree than last time, so reads write no shared cache line for their rolls
+([the policy generator](bf-tree-caching.md#the-policy-generator)).
 
 ## Lock order
 
@@ -89,7 +101,9 @@ flowchart LR
 - The circular-buffer mutex is innermost too. Allocation and free take it
   only under a leaf's X lock: `LeafMap::buffer` allocates and grows
   mini-pages, `Tree::relocate` allocates a copy and frees the old block,
-  `merge_leaf` frees a block, and `into_store` frees the rest.
+  `Tree::promote` and `keep_merged` allocate full pages,
+  `merge_leaf`, `release_full`, and `evict_if_clean` free a block, and
+  `into_store` frees the rest.
   `has_room`, `claim_victim`, `retire`, `unclaim`, and
   `circular_buffer_used` take it while the caller holds no leaf lock. The
   buffer calls nothing while it holds the mutex, so its holder never waits
@@ -98,8 +112,9 @@ flowchart LR
   full buffer ends the write attempt (`Attempt::NeedRoom`), every guard is
   dropped, and only then does the writer evict.
 
-Plan 0014 added no rank. Eviction and `maintain` take a leaf lock by ID
-while they hold no other leaf lock, exactly as `flush` does.
+Plans 0014 and 0015 added no rank. Eviction, `maintain`, and the deferred
+path take a leaf lock by ID while they hold no other leaf lock, exactly as
+`flush` does.
 
 ## Route, lock, validate, retry
 
@@ -197,7 +212,11 @@ has no cycle. The cases:
    both before it retires or unclaims the claim.
 5. **`maintain`** applies a read's hint after the read drops its S lock.
    It holds no leaf lock and calls `LeafMap::try_write`, which never
-   waits. If the lock is busy, the hint is skipped.
+   waits. If the lock is busy, the hint is skipped. A promotion under that
+   X lock may merge and split exactly as a write does. A deferred hint
+   releases the X lock first, so the deferred path holds no leaf lock
+   while it evicts: a full-page victim is evicted through `Tree::evict` as
+   in case 4, and `evict_if_clean` and the final retry use `try_write`.
 6. **`install`** takes the inner write lock while it holds leaf locks.
    Under the write lock it only edits `InnerStore` and allocates inner
    buffers. It never touches a leaf. No thread waits for a leaf lock while
@@ -217,22 +236,46 @@ so iterator users are not affected.
 
 ## Hints and `maintain`
 
-A read or scan holds only an S lock, which cannot change the entry. When
-the leaf's block is in the second-chance region, `Tree::note` returns a
-`Noted` value under S: the leaf ID, `LeafEntry::version`, and
-`Hint::Relocate`. After it drops the S lock, the reader calls
-`Tree::maintain`:
+A read or scan holds only an S lock, which cannot change the entry. Under
+S, `Tree::note` returns a `Noted` value: the leaf ID, `LeafEntry::version`,
+an `aging` flag (the block is in the second-chance region), and an
+optional caching hint (`Hint::Cache` or `Hint::Promote`). The reader
+releases the S lock, then calls `Tree::maintain`:
 
-1. `LeafMap::try_write(leaf)`. If the lock is busy or the slot is not
-   live, skip the hint.
-2. If the version differs from the noted one, skip the hint. The block it
-   named may be gone.
-3. Otherwise call `Tree::relocate` under X.
+1. If there is nothing to do, return.
+2. `LeafMap::try_write(leaf)`, once. If the lock is busy or the slot is not
+   live, drop everything.
+3. If the version differs from the noted one, drop everything. The block
+   or base page that the hint relied on may have changed.
+4. Otherwise, under X, call `Tree::relocate` if the block is aging, then
+   apply the hint.
+5. If the hint lacked room, note the current version, release X, and call
+   `Tree::finish_deferred` with no lock held.
 
-`LeafWrite::take_mini` bumps the version, and every block change goes
-through it. A stale hint therefore never passes the check. A reader never
-blocks on maintenance, so readers of one leaf do not serialize. See the
-[circular buffer design](bf-tree-circular-buffer.md#the-second-chance).
+`finish_deferred` makes room without merging:
+
+- It claims victims with `claim_victim`. A full-page victim goes through
+  `Tree::evict`, which locks the owner with the blocking `LeafMap::write`.
+  This is safe for the same reason as a writer's eviction: the thread holds
+  no leaf lock. The owner may write back a dirty page under that lock.
+- A mini-page victim goes through `Tree::evict_if_clean`, which locks the
+  owner with `try_write`. If the lock is busy, or the mini-page holds a
+  dirty record, it unclaims the block and the deferral stops. If the owner
+  no longer holds the block, it retires the claim. Otherwise it frees the
+  block and retires the claim.
+- `Claim::Busy` or `Claim::Empty` stops the deferral; a hint never waits
+  for other evictors.
+- Finally it locks the hint's leaf again with `try_write`, checks the
+  version once more, and applies the hint once.
+
+`take_mini`, `take_full`, and `set_full` bump the version, and every block
+change goes through one of them. A stale hint therefore never passes the
+check. A reader never waits for its own leaf's X lock, so readers of one
+leaf do not serialize. The only wait on the read path is the deferred
+eviction of a full-page victim, which locks that victim's owner while the
+reader holds nothing. See the
+[circular buffer design](bf-tree-circular-buffer.md#the-second-chance) and
+the [caching design](bf-tree-caching.md#deferral).
 
 ## Routing correctness
 
@@ -273,8 +316,9 @@ plan 0012 and with blind writes.
 - **Writes on one key are linearizable.** Each operation on key `k` runs
   under the lock of the leaf that owns `k` at that moment, and a split moves
   `k` under the same lock. A `put` or `remove` returns after it has
-  buffered its record in the leaf's mini-page under X (after a merge, if one
-  was needed), so every later operation on `k` observes it. A key's value is
+  buffered its record in the leaf's mini-page, or written it into the
+  leaf's full page, under X (after a merge, if one was needed), so every
+  later operation on `k` observes it. A key's value is
   the value of its last completed write.
 - **Flush.** Every write that returned before `flush` began is in the store
   when `flush` returns, even with concurrent writers.
@@ -418,7 +462,15 @@ bytes back.
   second-chance shares of 10 and 0 percent, 2 KiB with 100 percent), so
   every thread evicts and relocates. `a_writer_waits_while_every_block_is_claimed`
   claims every live block, starts a writer that needs room, and then
-  evicts the claims; under a watchdog, the writer must finish.
+  evicts the claims; under a watchdog, the writer must finish. Since plan
+  0015, `threads_agree_under_constant_eviction` runs five cases: page mode
+  with full pages at 1 KiB with 10 percent and 2 KiB with 100 percent
+  second chance; record mode at 1 KiB with 0 percent; record mode with full
+  pages at 2 KiB with 10 percent; and no caching at 1 KiB with 10 percent.
+  Caching cases use read and scan rates of 30 percent, so promotions,
+  fills, deferrals, direct writes, and full-page write-backs race with
+  writers, eviction, and `flush`. The concurrent suite passed 10 of 10
+  release runs after each plan 0015 implementation diff.
 - `crates/bf-tree/src/tests/buffered.rs` runs four writers on a
   `FileStore` while another thread calls `flush` in a loop. After a final
   `flush` and a reopen, the tree must hold every write. Plan 0013 ran the
