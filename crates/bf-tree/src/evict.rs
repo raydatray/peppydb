@@ -22,15 +22,21 @@ pub(super) enum Eviction {
 }
 
 impl Tree {
-    /// Evict until a block of `need` bytes fits at the tail. The caller holds
-    /// no leaf lock.
+    /// Evict until a block of `need` bytes, plus a slack, fits at the tail.
+    /// The caller holds no leaf lock.
     ///
     /// Room appears only when the head advances, so an eviction behind a
     /// slow claim at the head makes no room until that claim retires; the
     /// loop then sees `Busy` and yields. `Empty` means no live block is left,
     /// and the capacity rule guarantees that any allocation then fits.
     pub(super) fn make_room(&self, need: usize) -> Result<(), TreeError> {
-        while !self.leaves.circular_buffer.has_room(need) {
+        // Evict a batch: room for `need` plus a slack of 1/16 of the
+        // capacity. Without slack, the buffer runs full under write pressure
+        // and relocations, which never evict, find no room, so the second
+        // chance never happens. Upstream gets slack the same way, by freeing
+        // about 1 KiB per eviction round (`TARGET_EVICT_SIZE`).
+        let target = need + self.leaves.circular_buffer.capacity() / 16;
+        while !self.leaves.circular_buffer.has_room(target) {
             match self.evict_one()? {
                 Eviction::Evicted => {}
                 Eviction::Busy => std::thread::yield_now(),

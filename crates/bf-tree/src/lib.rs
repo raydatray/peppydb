@@ -50,6 +50,7 @@ mod evict;
 #[cfg(test)]
 mod invariants;
 mod leaf_map;
+mod maintain;
 mod open;
 mod read;
 mod scan;
@@ -78,14 +79,23 @@ pub struct TreeConfig {
     /// least `2 * (leaf_capacity + 16)`. A runtime setting: the superblock
     /// does not record it.
     pub circular_buffer_bytes: usize,
+    /// Share of the circular buffer, in percent, nearest the head in which
+    /// an accessed block is copied to the tail instead of being left for
+    /// eviction. 0 disables relocation; values near 100 relocate on almost
+    /// every access and tombstone almost every freed block. A runtime
+    /// setting.
+    pub second_chance_percent: u8,
 }
+
+/// The default second-chance share, 10 percent, as upstream.
+pub const DEFAULT_SECOND_CHANCE_PERCENT: u8 = 10;
 
 /// The default circular-buffer budget, 32 MiB.
 pub const DEFAULT_CIRCULAR_BUFFER_BYTES: usize = 32 << 20;
 
 impl Default for TreeConfig {
-    /// 4096-byte nodes, 64-byte keys, 1024-byte values, and a 32 MiB
-    /// circular buffer.
+    /// 4096-byte nodes, 64-byte keys, 1024-byte values, a 32 MiB circular
+    /// buffer, and a 10 percent second-chance region.
     fn default() -> Self {
         Self {
             leaf_capacity: 4096,
@@ -93,6 +103,7 @@ impl Default for TreeConfig {
             max_key_len: 64,
             max_value_len: 1024,
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
+            second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
         }
     }
 }
@@ -131,6 +142,11 @@ impl TreeConfig {
             ));
         }
 
+        if self.second_chance_percent > 100 {
+            return Err(TreeError::InvalidConfig(
+                "second_chance_percent must be at most 100",
+            ));
+        }
         CircularBuffer::new(
             self.circular_buffer_bytes,
             &self.buffer_classes(&classes),
@@ -187,6 +203,7 @@ impl From<&Superblock> for TreeConfig {
             max_key_len: superblock.max_key_len,
             max_value_len: superblock.max_value_len,
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
+            second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
         }
     }
 }

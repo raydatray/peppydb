@@ -13,6 +13,7 @@ mod overlay;
 mod read;
 mod route;
 mod scan;
+mod second_chance;
 mod store;
 mod write;
 
@@ -31,6 +32,7 @@ fn config(
         max_key_len,
         max_value_len,
         circular_buffer_bytes: TEST_BUFFER_BYTES,
+        second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
     }
 }
 
