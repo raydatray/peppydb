@@ -2,6 +2,7 @@ use super::*;
 use crate::store::Path;
 use bf_tree_node_id::InnerId;
 
+mod bench;
 mod buffered;
 mod concurrent;
 mod config;

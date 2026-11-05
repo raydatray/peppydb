@@ -662,7 +662,7 @@ Single-thread component numbers may come from either platform, labelled.
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: interim baselines.
+- [x] Diff 2: interim baselines.
 - [ ] Diff 3: Linux container recipe.
 - [ ] Diff 4: `arc-swap`.
 - [ ] Diff 5: frame primitive.
