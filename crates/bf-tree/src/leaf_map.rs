@@ -1,48 +1,59 @@
-use std::cell::{Cell, OnceCell};
-
-use zerocopy::FromBytes;
+use std::cell::RefCell;
 
 use super::TreeError;
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::PageStore;
+use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 
-/// The leaf mapping table: resolves a stable [`LeafId`] to the leaf's
-/// current bytes, loading them from the [`PageStore`] on first access.
+/// The leaf mapping table: one reader-writer lock per stable [`LeafId`].
 ///
-/// Entries are dense and indexed by the ID. A resident copy, once loaded, is
-/// never dropped in this stack, so shared borrows of a page stay valid for as
-/// long as the map does. Eviction is a later milestone and will need `&mut`
-/// access or a latch.
+/// The lock is the paper's per-leaf reader-writer lock (§3.3). It covers the
+/// entry and the leaf's base page in the store: every base write happens
+/// under the exclusive lock, so a base page read under the shared lock is
+/// consistent. No page stays resident; each access loads the base page into
+/// a thread-local scratch buffer.
+#[derive(Debug)]
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
-    entries: Vec<LeafEntry>,
+    entries: Table<RwLock<LeafEntry>>,
 }
 
-#[derive(Default)]
-struct LeafEntry {
-    /// Full-page copy, loaded on first access.
-    resident: OnceCell<Box<[u8]>>,
-    /// The resident copy is newer than the store.
-    dirty: Cell<bool>,
-    /// The slot is on the store's free list; never true in this stack's tree.
+#[derive(Debug, Default)]
+pub(super) struct LeafEntry {
+    /// The slot holds no page.
     freed: bool,
+    // Later plans add fields: `block` and `refs` (0013), `version` (0014),
+    // `dirty` (0015). The size test guards them.
 }
 
-impl LeafEntry {
-    fn resident_mut(&mut self) -> &mut [u8] {
-        self.resident
-            .get_mut()
-            .expect("the leaf was made resident before mutation")
+/// A leaf held under its shared lock.
+pub(super) struct LeafRead<'m> {
+    id: LeafId,
+    _entry: RwLockReadGuard<'m, LeafEntry>,
+}
+
+/// A leaf held under its exclusive lock.
+pub(super) struct LeafWrite<'m> {
+    id: LeafId,
+    _entry: RwLockWriteGuard<'m, LeafEntry>,
+}
+
+/// A held leaf lock, shared or exclusive. Base pages are read only through
+/// one.
+pub(super) trait Locked {
+    fn id(&self) -> LeafId;
+}
+
+impl Locked for LeafRead<'_> {
+    fn id(&self) -> LeafId {
+        self.id
     }
 }
 
-impl std::fmt::Debug for LeafMap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LeafMap")
-            .field("slots", &self.store.slots())
-            .field("entries", &self.entries.len())
-            .finish()
+impl Locked for LeafWrite<'_> {
+    fn id(&self) -> LeafId {
+        self.id
     }
 }
 
@@ -50,13 +61,11 @@ impl LeafMap {
     /// Map the store's existing slots without loading any of them.
     /// `freed` marks the slots that hold no page.
     pub(super) fn new(store: Box<dyn PageStore>, freed: impl IntoIterator<Item = bool>) -> Self {
-        let entries = freed
-            .into_iter()
-            .map(|freed| LeafEntry {
-                freed,
-                ..LeafEntry::default()
-            })
-            .collect();
+        let entries: Table<RwLock<LeafEntry>> = Table::new();
+        for (index, freed) in freed.into_iter().enumerate() {
+            entries.grow_to(index + 1);
+            entries.get(index).expect("just grown").write().freed = freed;
+        }
 
         Self { store, entries }
     }
@@ -70,131 +79,168 @@ impl LeafMap {
         self.store.as_ref()
     }
 
-    /// Give up the map and return its store. Unflushed changes are lost.
+    /// Give up the map and return its store.
     pub(super) fn into_store(self) -> Box<dyn PageStore> {
         self.store
     }
 
-    /// Whether `id` is an allocated slot that holds a page. A slot can be
-    /// allocated but freed after a reopen of a store whose last allocations
-    /// were never flushed.
-    pub(super) fn is_live(&self, id: LeafId) -> bool {
+    fn entry(&self, id: LeafId) -> Result<&RwLock<LeafEntry>, TreeError> {
         self.entries
             .get(id.index())
-            .is_some_and(|entry| !entry.freed)
+            .ok_or(TreeError::UnknownLeaf(id))
     }
 
-    pub(super) fn resident_count(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|entry| entry.resident.get().is_some())
-            .count()
+    /// Whether `id` is an allocated slot that holds a page. Takes the entry's
+    /// shared lock briefly.
+    #[cfg(test)]
+    pub(super) fn is_live(&self, id: LeafId) -> bool {
+        self.entry(id).is_ok_and(|entry| !entry.read().freed)
     }
 
-    pub(super) fn dirty_count(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|entry| entry.dirty.get())
-            .count()
+    /// Lock leaf `id` shared. `UnknownLeaf` if it is not a live slot.
+    pub(super) fn read(&self, id: LeafId) -> Result<LeafRead<'_>, TreeError> {
+        let entry = self.entry(id)?.read();
+        if entry.freed {
+            return Err(TreeError::UnknownLeaf(id));
+        }
+        Ok(LeafRead { id, _entry: entry })
     }
 
-    /// Allocate a slot whose resident copy is zeroed and dirty. The caller
-    /// initializes the page before the next flush.
-    pub(super) fn alloc(&mut self) -> Result<LeafId, TreeError> {
+    /// Lock leaf `id` exclusively. `UnknownLeaf` if it is not a live slot.
+    pub(super) fn write(&self, id: LeafId) -> Result<LeafWrite<'_>, TreeError> {
+        let entry = self.entry(id)?.write();
+        if entry.freed {
+            return Err(TreeError::UnknownLeaf(id));
+        }
+        Ok(LeafWrite { id, _entry: entry })
+    }
+
+    /// Allocate a fresh slot and return it locked exclusively. It is
+    /// unreachable until a separator names it.
+    pub(super) fn alloc(&self) -> Result<LeafWrite<'_>, TreeError> {
         let id = self.store.alloc()?;
-        let entry = LeafEntry {
-            resident: OnceCell::from(vec![0; self.store.page_size()].into_boxed_slice()),
-            dirty: Cell::new(true),
-            freed: false,
-        };
-
-        let index = id.index();
-        if index == self.entries.len() {
-            self.entries.push(entry);
-        } else {
-            self.entries[index] = entry;
-        }
-
-        Ok(id)
+        self.entries.grow_to(id.index() + 1);
+        let mut entry = self.entry(id)?.write();
+        *entry = LeafEntry::default();
+        Ok(LeafWrite { id, _entry: entry })
     }
 
-    /// Borrow a leaf page, loading and validating it on first access.
-    pub(super) fn page(&self, id: LeafId) -> Result<&Page, TreeError> {
-        let bytes = self.bytes(id)?;
-
-        Ok(Page::ref_from_bytes(bytes).expect("resident leaves hold a page header"))
-    }
-
-    /// Borrow a leaf page for mutation and mark it dirty.
-    pub(super) fn page_mut(&mut self, id: LeafId) -> Result<&mut Page, TreeError> {
-        let bytes = self.bytes_mut(id)?;
-
-        Ok(Page::mut_from_bytes(bytes).expect("resident leaves hold a page header"))
-    }
-
-    /// Borrow a leaf's raw bytes for mutation and mark it dirty. Used to
-    /// initialize a freshly allocated leaf.
-    pub(super) fn bytes_mut(&mut self, id: LeafId) -> Result<&mut [u8], TreeError> {
-        self.bytes(id)?;
-        let entry = &mut self.entries[id.index()];
-        entry.dirty.set(true);
-
-        Ok(entry.resident_mut())
-    }
-
-    /// Borrow two distinct leaves mutably at once and mark both dirty.
-    pub(super) fn pair_mut(
-        &mut self,
-        a: LeafId,
-        b: LeafId,
-    ) -> Result<(&mut [u8], &mut [u8]), TreeError> {
-        self.bytes(a)?;
-        self.bytes(b)?;
-        let [a, b] = self
-            .entries
-            .get_disjoint_mut([a.index(), b.index()])
-            .expect("distinct allocated IDs");
-        a.dirty.set(true);
-        b.dirty.set(true);
-
-        Ok((a.resident_mut(), b.resident_mut()))
-    }
-
-    /// Write every dirty leaf to the store, then sync. A failed write leaves
-    /// that leaf and every later dirty leaf still dirty.
-    pub(super) fn flush(&mut self) -> Result<(), TreeError> {
-        for (index, entry) in self.entries.iter().enumerate() {
-            if !entry.dirty.get() {
-                continue;
-            }
-
-            let bytes = entry.resident.get().expect("dirty leaves are resident");
-            self.store.write(LeafId::from_index(index), bytes)?;
-            entry.dirty.set(false);
-        }
-        self.store.sync()?;
-
+    /// Return a fresh, never-reachable slot to the store, for a split that
+    /// failed after `alloc`.
+    pub(super) fn discard(&self, mut leaf: LeafWrite<'_>) -> Result<(), TreeError> {
+        leaf._entry.freed = true;
+        self.store.free(leaf.id)?;
         Ok(())
     }
 
-    /// The resident bytes of `id`, loaded through `&self` on first access.
-    fn bytes(&self, id: LeafId) -> Result<&[u8], TreeError> {
-        if !self.is_live(id) {
-            return Err(TreeError::UnknownLeaf(id));
+    /// Read leaf's base page into `buf` and check its header. This is the
+    /// only function that reads a base page; the guard proves the caller
+    /// holds the leaf's lock.
+    ///
+    /// `open` validated every page fully. Pages written since were produced
+    /// by this process, so loads check only the O(1) header, and debug builds
+    /// validate fully so that tests exercise it.
+    pub(super) fn load_base<'s>(
+        &self,
+        leaf: &impl Locked,
+        buf: &'s mut [u8],
+    ) -> Result<&'s mut Page, TreeError> {
+        let id = leaf.id();
+        self.store.read(id, buf)?;
+        let corrupt = |error| match error {
+            PageError::Corrupt(reason) => TreeError::CorruptLeaf { id, reason },
+            other => TreeError::Page(other),
+        };
+        if cfg!(debug_assertions) {
+            Page::validate(buf).map_err(corrupt)?;
         }
-        let entry = &self.entries[id.index()];
+        Page::check_header(buf, buf.len()).map_err(corrupt)?;
 
-        if entry.resident.get().is_none() {
-            let mut bytes = vec![0; self.store.page_size()].into_boxed_slice();
-            self.store.read(id, &mut bytes)?;
-            Page::validate(&bytes).map_err(|error| match error {
-                PageError::Corrupt(reason) => TreeError::CorruptLeaf { id, reason },
-                other => TreeError::Page(other),
-            })?;
-            // Only this call initializes the cell, and nothing clears it.
-            let _ = entry.resident.set(bytes);
-        }
-
-        Ok(entry.resident.get().expect("set above"))
+        Ok(zerocopy::FromBytes::mut_from_bytes(buf).expect("checked above"))
     }
+
+    /// Write base pages to the store. The caller must hold the exclusive lock
+    /// of every leaf in `pages` and pass the reachable leaf first. The others
+    /// are written before it, so an error before the last write leaves the
+    /// reachable leaf's stored page unchanged. Takes no tree-level lock.
+    pub(super) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<(), TreeError> {
+        let (first, rest) = pages.split_first_mut().expect("at least one page");
+        for (id, bytes) in rest.iter_mut().chain([first]) {
+            debug_assert!(
+                self.entry(*id)?.try_read().is_none(),
+                "the caller holds the leaf's exclusive lock"
+            );
+            self.store.write(*id, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Make every completed write durable.
+    pub(super) fn sync(&self) -> Result<(), TreeError> {
+        self.store.sync()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl LeafMap {
+    /// A copy of leaf `id`'s base page, read under its shared lock.
+    pub(super) fn page_copy(&self, id: LeafId) -> Result<Vec<u8>, TreeError> {
+        let leaf = self.read(id)?;
+        let mut bytes = vec![0; self.store.page_size()];
+        self.load_base(&leaf, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Overwrite leaf `id`'s base page under its exclusive lock, without
+    /// checking the bytes. Test fixtures build pages this way.
+    pub(super) fn overwrite(&self, id: LeafId, bytes: &mut [u8]) -> Result<(), TreeError> {
+        let leaf = self.write(id)?;
+        self.write_through(&mut [(leaf.id(), bytes)])
+    }
+
+    /// Allocate a slot and return its ID, unlocked and unreachable.
+    pub(super) fn alloc_id(&self) -> Result<LeafId, TreeError> {
+        Ok(self.alloc()?.id())
+    }
+}
+
+/// The largest legal page; scratch buffers are sliced to the tree's size.
+pub(super) const MAX_PAGE: usize = 4096;
+
+/// One thread's buffers for loading base pages.
+pub(super) struct Scratch {
+    pub(super) page: Box<[u8; MAX_PAGE]>,
+    /// The right half of a split.
+    pub(super) right: Box<[u8; MAX_PAGE]>,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            page: Box::new([0; MAX_PAGE]),
+            right: Box::new([0; MAX_PAGE]),
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: RefCell<Option<Scratch>> = const { RefCell::new(None) };
+}
+
+/// Lend this thread's scratch to `f`. Tree code does not nest calls; a
+/// nested call from a user callback gets a temporary scratch instead of a
+/// panic, and the outer scratch goes back to the thread afterwards.
+pub(super) fn with_scratch<R>(f: impl FnOnce(&mut Scratch) -> R) -> R {
+    let mut scratch = SCRATCH
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_else(Scratch::new);
+    let result = f(&mut scratch);
+    SCRATCH.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(scratch);
+        }
+    });
+    result
 }

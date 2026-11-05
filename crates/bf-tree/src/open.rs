@@ -27,7 +27,7 @@ impl Tree {
     /// [`Page::validate`], carry fences, and respect the configured key and
     /// value limits. The leaves must tile the key space, so a store with a
     /// missing, duplicated, or torn leaf is rejected rather than opened.
-    /// Open is `O(leaves)` in I/O and memory; no leaf stays resident.
+    /// Open is `O(leaves)` in I/O and memory.
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         let config = TreeConfig::from(store.superblock());
         config.validate()?;

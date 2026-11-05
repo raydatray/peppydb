@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use zerocopy::IntoBytes;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
@@ -12,7 +11,13 @@ fn assert_model(tree: &Tree, model: &Model) {
         assert_eq!(tree.get(key), Ok(Some(value.clone())), "{key:?}");
     }
     let records: usize = (0..tree.leaf_count())
-        .map(|index| tree.leaf(LeafId::new(index as u64).unwrap()).unwrap().len())
+        .map(|index| {
+            let bytes = tree
+                .leaves
+                .page_copy(LeafId::new(index as u64).unwrap())
+                .unwrap();
+            Page::validate(&bytes).unwrap().len()
+        })
         .sum();
     assert_eq!(records, model.len());
 }
@@ -62,7 +67,8 @@ fn replacement_can_force_a_split() {
         put(&mut tree, &mut model, &key(i), &[1; 16]);
     }
     put(&mut tree, &mut model, &key(7), &[]);
-    assert_eq!(tree.leaf(LeafId::new(0).unwrap()).unwrap().free_bytes(), 0);
+    let bytes = tree.leaves.page_copy(LeafId::new(0).unwrap()).unwrap();
+    assert_eq!(Page::validate(&bytes).unwrap().free_bytes(), 0);
     assert_eq!(tree.height(), 1);
     put(&mut tree, &mut model, &key(7), &[2; 16]);
     assert_eq!(tree.height(), 2);
@@ -122,18 +128,14 @@ fn removal_empties_leaves_without_merging() {
 fn limits_are_checked_before_touching_nodes() {
     let mut tree = small();
     tree.put(b"a", b"1").unwrap();
-    let snapshot = tree
-        .leaf(LeafId::new(0).unwrap())
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let snapshot = tree.leaves.page_copy(LeafId::new(0).unwrap()).unwrap();
     assert_eq!(tree.put(b"", b"1"), Err(TreeError::EmptyKey));
     assert_eq!(tree.put(&[1; 9], b"1"), Err(TreeError::KeyTooLarge));
     assert_eq!(tree.put(b"b", &[1; 17]), Err(TreeError::ValueTooLarge));
     assert_eq!(tree.remove(b""), Err(TreeError::EmptyKey));
     assert_eq!(tree.remove(&[1; 9]), Err(TreeError::KeyTooLarge));
     assert_eq!(
-        tree.leaf(LeafId::new(0).unwrap()).unwrap().as_bytes(),
+        tree.leaves.page_copy(LeafId::new(0).unwrap()).unwrap(),
         snapshot
     );
     assert_eq!(tree.get(b"b"), Ok(None));
@@ -182,7 +184,8 @@ fn removing_from_a_full_leaf_never_splits() {
         put(&mut tree, &mut model, &key(i), &[1; 16]);
     }
     put(&mut tree, &mut model, &key(7), &[]);
-    assert_eq!(tree.leaf(LeafId::new(0).unwrap()).unwrap().free_bytes(), 0);
+    let bytes = tree.leaves.page_copy(LeafId::new(0).unwrap()).unwrap();
+    assert_eq!(Page::validate(&bytes).unwrap().free_bytes(), 0);
 
     for i in [3, 9, 0] {
         tree.remove(&key(i)).unwrap();

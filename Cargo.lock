@@ -10,6 +10,7 @@ dependencies = [
  "bf-tree-node-id",
  "bf-tree-page",
  "bf-tree-store",
+ "bf-tree-sync",
  "tempfile",
  "thiserror",
  "zerocopy",

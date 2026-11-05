@@ -11,6 +11,7 @@ bf-tree-inner = { path = "../bf-tree-inner" }
 bf-tree-node-id = { path = "../bf-tree-node-id" }
 bf-tree-page = { path = "../bf-tree-page" }
 bf-tree-store = { path = "../bf-tree-store" }
+bf-tree-sync = { path = "../bf-tree-sync" }
 thiserror.workspace = true
 zerocopy.workspace = true
 

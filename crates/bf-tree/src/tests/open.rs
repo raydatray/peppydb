@@ -3,7 +3,6 @@
 use super::*;
 use crate::open::{LeafBounds, build_inner, tile};
 use bf_tree_store::FileStore;
-use zerocopy::IntoBytes;
 
 fn leaf(raw: u64) -> LeafId {
     LeafId::new(raw).unwrap()
@@ -121,18 +120,19 @@ fn built(n: u32, inner_capacity: usize) -> Tree {
     };
     let leaves = tile(tiling(n)).unwrap();
     for _ in 0..n {
-        tree.leaves.alloc().unwrap();
+        tree.leaves.alloc_id().unwrap();
     }
     for bounds in &leaves {
         let fences = Fences {
             lower: bounds.lower.as_deref().map_or(Fence::Unbounded, Fence::Key),
             upper: bounds.upper.as_deref().map_or(Fence::Unbounded, Fence::Key),
         };
-        let bytes = tree.leaves.bytes_mut(bounds.id).unwrap();
-        let page = Page::init_with_fences(bytes, fences).unwrap();
+        let mut bytes = vec![0; config.leaf_capacity];
+        let page = Page::init_with_fences(&mut bytes, fences).unwrap();
         if let Some(lower) = &bounds.lower {
             page.try_insert(lower, b"v").unwrap();
         }
+        tree.leaves.overwrite(bounds.id, &mut bytes).unwrap();
     }
     tree.root = build_inner(&mut tree.inner, &leaves).unwrap();
     tree
@@ -264,10 +264,7 @@ fn reopened_memory_trees_match_the_oracle_at_every_height() {
         assert!(reopened.height() <= height, "{count} records");
         assert!(reopened.height() >= height.min(3), "{count} records");
         assert_eq!(reopened.leaf_count(), leaves);
-        assert_eq!(reopened.resident_leaves(), 0, "open keeps nothing resident");
-        assert_eq!(reopened.dirty_leaves(), 0);
         assert_matches_model(&reopened, &model);
-        assert_eq!(reopened.resident_leaves(), leaves);
     }
 }
 
@@ -300,35 +297,27 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
 }
 
 #[test]
-fn unflushed_changes_are_lost_and_the_store_stays_consistent() {
+fn a_dropped_trees_store_holds_every_write() {
     let config = config(256, 128, 8, 16);
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 100);
     tree.flush().unwrap();
-    let mut later = Model::new();
-    fill(&mut tree, &mut later, 300);
-    assert!(tree.dirty_leaves() > 0);
-
+    // A second batch, including splits, with no flush before the drop.
+    let leaves_before = tree.leaf_count();
+    fill(&mut tree, &mut model, 300);
     let leaves_after = tree.leaf_count();
+    assert!(leaves_after > leaves_before);
+
     let mut reopened = Tree::open(tree.into_store()).unwrap();
-    // The store never saw the second batch; it holds the first flush exactly.
+    // Writes go through to the store at once, so it holds both batches.
     assert_matches_model(&reopened, &model);
-    // Slots allocated for the lost batch were never written: they are free,
-    // and the next allocations reuse them before the store grows.
-    let freed = (0..leaves_after)
-        .filter(|&index| !reopened.leaves.is_live(leaf(index as u64)))
-        .count();
-    assert!(freed > 0);
+    // Every allocated slot was written, so none reopens as free.
     assert_eq!(reopened.leaf_count(), leaves_after);
-    let mut later = Model::new();
-    fill(&mut reopened, &mut later, 300);
-    let still_freed = (0..leaves_after)
-        .filter(|&index| !reopened.leaves.is_live(leaf(index as u64)))
-        .count();
-    assert_eq!(still_freed, 0);
-    assert_eq!(reopened.check_invariants(), Ok(()));
+    assert!((0..leaves_after).all(|index| reopened.leaves.is_live(leaf(index as u64))));
+    fill(&mut reopened, &mut model, 300);
+    assert_matches_model(&reopened, &model);
 }
 
 /// A flushed store of a small multi-leaf tree plus the leaf images, for
@@ -342,7 +331,7 @@ fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>) {
     tree.flush().unwrap();
     assert!(tree.leaf_count() >= 4);
     let images = (0..tree.leaf_count())
-        .map(|index| tree.leaf(leaf(index as u64)).unwrap().as_bytes().to_vec())
+        .map(|index| tree.leaves.page_copy(leaf(index as u64)).unwrap())
         .collect();
     (tree.into_store(), images)
 }

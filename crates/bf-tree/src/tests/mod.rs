@@ -51,15 +51,17 @@ fn add_leaf(
     upper: Option<&[u8]>,
     keys: &[&[u8]],
 ) -> ChildRef {
-    let id = tree.leaves.alloc().unwrap();
+    let id = tree.leaves.alloc_id().unwrap();
     let fences = Fences {
         lower: lower.map_or(Fence::Unbounded, Fence::Key),
         upper: upper.map_or(Fence::Unbounded, Fence::Key),
     };
-    let page = Page::init_with_fences(tree.leaves.bytes_mut(id).unwrap(), fences).unwrap();
+    let mut bytes = vec![0; tree.config.leaf_capacity];
+    let page = Page::init_with_fences(&mut bytes, fences).unwrap();
     for key in keys {
         page.try_insert(key, &value_of(key)).unwrap();
     }
+    tree.leaves.overwrite(id, &mut bytes).unwrap();
     ChildRef::Leaf(id)
 }
 
