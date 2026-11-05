@@ -135,3 +135,15 @@ impl AtomicCounter {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+#[test]
+fn spin_counts_attempts_and_saturates() {
+    let mut attempt = 0;
+    for _ in 0..100 {
+        spin(&mut attempt);
+    }
+    assert_eq!(attempt, 100);
+    let mut attempt = u32::MAX;
+    spin(&mut attempt);
+    assert_eq!(attempt, u32::MAX);
+}
