@@ -182,7 +182,7 @@ the completed concurrent, larger-than-memory engine.
 - [x] Draft the stack plans for milestones 5 to 9 together, so that each
   chooses final interface shapes: [0010](0010-bf-tree-circular-buffer.md) through
   [0023](0023-bf-tree-io-perf.md).
-- [ ] Agree on plan 0010's circular buffer, unsafe-code policy, and stack.
+- [x] Agree on plan 0010's circular buffer, unsafe-code policy, and stack.
 - [ ] Agree on plan 0011's page changes, mini-page interfaces, and stack.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete

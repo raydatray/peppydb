@@ -1,6 +1,6 @@
 # 0010: Bounded circular buffer component
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [leaf store](../design/bf-tree-leaf-store.md),
 [build system](../design/build-system.md) (crate boundaries, the unsafe-code
@@ -720,7 +720,7 @@ asserts `used() <= capacity()`. At the end every block is returned,
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: unsafe-code policy and `tools/check-unsafe`.
 - [ ] Diff 3: Miri through Buck2.
 - [ ] Diff 4: slab, bump allocation, fillers, budget.
