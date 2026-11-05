@@ -39,6 +39,7 @@ mod compact;
 mod fence;
 mod key;
 mod layout;
+mod merge;
 mod read;
 mod record;
 mod split;
@@ -82,6 +83,9 @@ pub enum PageError {
     CapacityMismatch,
     #[error("records cannot form two fenced pages that fit and each keep a record")]
     CannotSplit,
+    /// A merge batch is unsorted or holds a clean record.
+    #[error("invalid merge batch: {0}")]
+    InvalidBatch(&'static str),
     /// Stored bytes failed [`Page::validate`]; the reason names the first
     /// check that failed.
     #[error("corrupt page: {0}")]
