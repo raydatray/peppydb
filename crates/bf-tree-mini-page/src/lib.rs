@@ -7,8 +7,12 @@
 //! a block of the circular buffer.
 
 mod class;
+mod mini;
+mod refs;
 
 pub use class::SizeClasses;
+pub use mini::{Lookup, MiniPage};
+pub use refs::RefBits;
 
 /// Leaf limits from which no size-class ladder can be derived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
