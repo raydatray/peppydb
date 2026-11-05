@@ -5,6 +5,11 @@
 //! head and tail are the budget in use. A block never crosses the end of the
 //! slab: when it would, a dead filler block covers the rest of the slab first.
 //!
+//! A freed block becomes a hole that a later allocation of the same size class
+//! reuses in place, unless it lies in the **second-chance region**: the oldest
+//! part of the buffer, near the head. Blocks freed there become tombstones,
+//! and an evictor can copy a hot block out of it instead of evicting it.
+//!
 //! A [`Block`] is the only handle to its bytes. Metadata lives behind one
 //! mutex, which is never held while block bytes are read, written, or zeroed.
 //!
@@ -36,6 +41,7 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bf_tree_node_id::LeafId;
@@ -96,9 +102,14 @@ pub struct Metrics {
 pub struct CircularBuffer {
     slab: Slab,
     state: Mutex<State>,
+    /// Copy of the state's tail for `in_second_chance` without the mutex.
+    tail: AtomicUsize,
     capacity: usize,
     /// Allocation sizes, strictly ascending.
     classes: Box<[usize]>,
+    /// A block at least this far behind the tail is in the second-chance
+    /// region; `usize::MAX` when the region is empty.
+    second_chance: usize,
 }
 
 // Compile-time check: the buffer and its blocks can be shared between threads.
@@ -155,33 +166,58 @@ impl CircularBuffer {
             return Err(CircularBufferError::InvalidPercent(second_chance_percent));
         }
 
+        // capacity * (100 - p) / 100, exactly; p = 0 means no region.
+        let second_chance = match second_chance_percent {
+            0 => usize::MAX,
+            p => {
+                let share = capacity as u128 * u128::from(100 - p) / 100;
+                usize::try_from(share).expect("at most capacity")
+            }
+        };
+
         Ok(Self {
             slab: Slab::new(capacity),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State::new(classes.len())),
+            tail: AtomicUsize::new(0),
             capacity,
             classes: classes.into(),
+            second_chance,
         })
     }
 
-    /// Allocate a zeroed block of exactly `size` bytes, which must be one of
-    /// the classes, for `owner`.
+    /// Allocate a zeroed block of exactly `size` bytes for `owner`. Panics if
+    /// `size` is not one of the classes.
+    ///
+    /// A hole of the same class outside the second-chance region is reused
+    /// first, as upstream does; holes of larger classes are not used. Otherwise
+    /// the block is placed at the tail.
     pub fn alloc(
         &self,
         size: usize,
         kind: Kind,
         owner: LeafId,
     ) -> Result<Block, CircularBufferFull> {
-        debug_assert!(self.classes.contains(&size), "size {size} is not a class");
+        let class = self.class(size);
         let _ = (kind, owner);
         let len = u32::try_from(size).expect("classes fit in u32");
 
         let (seq, addr) = {
             let mut state = self.lock_state();
-            let reserved = state
-                .bump(self.capacity, BLOCK_HEADER_BYTES + size)
-                .ok_or(CircularBufferFull)?;
+            let reserved = match state.take_hole(class, self.second_chance) {
+                Some(hole) => {
+                    state.metrics.reuses += 1;
+                    hole
+                }
+                None => {
+                    let bumped = state
+                        .bump(self.capacity, BLOCK_HEADER_BYTES + size)
+                        .ok_or(CircularBufferFull)?;
+                    state.metrics.allocs += 1;
+                    self.tail.store(state.tail, Ordering::Relaxed);
+                    bumped
+                }
+            };
             state.outstanding += 1;
-            state.metrics.allocs += 1;
             reserved
         };
 
@@ -194,8 +230,9 @@ impl CircularBuffer {
 
     /// Return a block. Panics if it does not belong to this buffer.
     ///
-    /// The block becomes a tombstone, and the head moves past every dead
-    /// block at the front.
+    /// A block at the head or in the second-chance region becomes a tombstone;
+    /// any other block becomes a hole for its class. The head then moves past
+    /// every dead block at the front.
     pub fn free(&self, block: Block) {
         assert!(
             self.slab.contains(block.ptr(), block.span()),
@@ -206,22 +243,34 @@ impl CircularBuffer {
         let mut state = self.lock_state();
         let meta = state
             .get(block.seq())
-            .filter(|meta| meta.addr == block.addr());
+            .filter(|meta| meta.addr == block.addr() && meta.span == block.span());
         assert!(
             meta.is_some_and(|meta| meta.state == BlockState::Live),
             "block is not a live block of this circular buffer"
         );
 
-        let meta = state.get_mut(block.seq()).expect("checked above");
-        meta.state = BlockState::Tombstone;
+        let class = self.class(block.as_ref().len());
+        let seq = block.seq();
+        if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
+            state.get_mut(seq).expect("checked above").state = BlockState::Tombstone;
+            state.metrics.tombstones += 1;
+        } else {
+            state.add_hole(seq, class);
+        }
         state.outstanding -= 1;
         state.metrics.frees += 1;
-        state.metrics.tombstones += 1;
         state.advance_head();
     }
 
+    /// Whether the block at logical address `addr` is in the second-chance
+    /// region. Reads the tail without the mutex, so the answer may be a few
+    /// allocations stale, which only shifts which block gets a second chance.
+    pub fn in_second_chance(&self, addr: usize) -> bool {
+        self.tail.load(Ordering::Relaxed).saturating_sub(addr) >= self.second_chance
+    }
+
     /// Whether a block of `size` bytes fits at the tail now, including a
-    /// possible filler.
+    /// possible filler. Holes are not counted.
     pub fn has_room(&self, size: usize) -> bool {
         self.lock_state()
             .fits(self.capacity, BLOCK_HEADER_BYTES + size)
@@ -238,6 +287,15 @@ impl CircularBuffer {
 
     pub fn metrics(&self) -> Metrics {
         self.lock_state().metrics
+    }
+
+    /// The index of the class `size`. Panics if `size` is not a class: a
+    /// reused hole has exactly its class's size, so any other size could
+    /// overlap the next block.
+    fn class(&self, size: usize) -> usize {
+        self.classes
+            .binary_search(&size)
+            .unwrap_or_else(|_| panic!("size {size} is not a class"))
     }
 
     /// The slab offset of a logical address.
