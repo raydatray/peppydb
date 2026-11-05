@@ -120,6 +120,38 @@ impl Page {
         Ok(page)
     }
 
+    /// Check, in O(1), that bytes look like a page this process wrote for a
+    /// tree of page size `capacity`: the capacity matches, only known flags
+    /// are set, fences are present, and the slot directory and free gap fit.
+    ///
+    /// This is the cheap check for pages read back after
+    /// [`Page::validate`] accepted the store at open. It never panics, but it
+    /// does not prove the full trusted-bytes contract.
+    pub fn check_header(bytes: &[u8], capacity: usize) -> Result<&Self, PageError> {
+        let corrupt = PageError::Corrupt;
+        if bytes.len() != capacity {
+            return Err(corrupt("buffer length differs from the page size"));
+        }
+        Self::check_capacity(capacity).map_err(|_| corrupt("illegal capacity"))?;
+        let page = Self::ref_from_bytes(bytes).map_err(|_| corrupt("header does not fit"))?;
+        if page.capacity() != capacity {
+            return Err(corrupt("capacity field differs from the buffer length"));
+        }
+        let flags = page.header.count_and_flags.get() & !COUNT_MASK;
+        if flags & !HAS_FENCES != 0 {
+            return Err(corrupt("unknown header flags"));
+        }
+        if flags & HAS_FENCES == 0 || page.slot_count() < 2 {
+            return Err(corrupt("page has no fences"));
+        }
+        let gap_end = HEADER_BYTES + page.slot_count() * SLOT_BYTES + page.free_bytes();
+        if gap_end > capacity {
+            return Err(corrupt("slot directory and free gap do not fit"));
+        }
+
+        Ok(page)
+    }
+
     /// With fences, the first two slots must be the fence pair; each fence is
     /// either its infinity sentinel with no key, or a finite key with no value.
     fn check_fence_slots(&self) -> Result<(), PageError> {

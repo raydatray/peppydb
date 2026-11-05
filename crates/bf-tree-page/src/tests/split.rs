@@ -69,9 +69,11 @@ fn fences<'a>(lower: Option<&'a [u8]>, upper: Option<&'a [u8]>) -> Fences<&'a [u
     }
 }
 
-/// Split `page` with a pending record and check the outputs against the
-/// independent calculator, the fences, and record conservation. Return the
-/// separator and the right output's bytes.
+/// Split `page` with a one-record batch and check the outputs against the
+/// independent calculator, the fences, and record conservation under the
+/// merge rules: the batch record replaces an equal key, a `Delete` removes
+/// its key, and only `Insert` records survive. Return the separator and the
+/// right output's bytes.
 fn split_and_check(page: &mut Page, key: &[u8], state: RecordState<'_>) -> (Vec<u8>, Vec<u8>) {
     let capacity = page.capacity();
     let (lower, upper) = owned_fences(page);
@@ -82,13 +84,22 @@ fn split_and_check(page: &mut Page, key: &[u8], state: RecordState<'_>) -> (Vec<
         state.kind(),
         state.value().map(<[u8]>::to_vec),
     );
-    expected.insert(position, pending);
+    if expected.get(position).is_some_and(|record| record.0 == key) {
+        expected[position] = pending;
+    } else {
+        expected.insert(position, pending);
+    }
+    expected.retain(|record| record.1 == RecordKind::Insert);
     let (index, left_used, right_used) =
         expected_split(lower.as_deref(), upper.as_deref(), &expected, capacity).unwrap();
 
     let mut right_storage = vec![0xa5; capacity];
+    let batch = [RecordRef {
+        key: KeyRef::from(key),
+        state,
+    }];
     let split = page
-        .split_with_insert(&mut right_storage, key, state)
+        .merge_batch_split(&mut right_storage, batch.into_iter())
         .unwrap();
     assert_eq!(split.separator, expected[index].0);
     assert_eq!(owned(page), expected[..index]);
@@ -106,6 +117,15 @@ fn split_and_check(page: &mut Page, key: &[u8], state: RecordState<'_>) -> (Vec<
     assert_eq!(page.reclaimable_bytes(), 0);
     assert_eq!(split.right.reclaimable_bytes(), 0);
     (split.separator, right_storage)
+}
+
+/// A one-record batch for direct calls to `merge_batch_split`.
+fn one<'a>(key: &'a [u8], state: RecordState<'a>) -> impl Iterator<Item = RecordRef<'a>> + Clone {
+    [RecordRef {
+        key: KeyRef::from(key),
+        state,
+    }]
+    .into_iter()
 }
 
 #[test]
@@ -133,7 +153,7 @@ fn separator_is_right_lower_fence_and_routes_agree() {
     }
     let mut right_storage = [0; 128];
     let split = page
-        .split_with_insert(&mut right_storage, b"e", RecordState::Insert(&[0; 12]))
+        .merge_batch_split(&mut right_storage, one(b"e", RecordState::Insert(&[0; 12])))
         .unwrap();
     let separator = split.separator.clone();
     // Every key routes to exactly the side whose fences accept it.
@@ -176,7 +196,10 @@ fn prefixes_are_recomputed_for_each_output() {
         );
         let mut right_storage = [0; 128];
         let split = page
-            .split_with_insert(&mut right_storage, b"acct/180", RecordState::Insert(b"x"))
+            .merge_batch_split(
+                &mut right_storage,
+                one(b"acct/180", RecordState::Insert(b"x")),
+            )
             .unwrap();
         assert_eq!(split.separator, b"acct/170");
         // `[acct/100, acct/170)` shares `acct/1`; `[acct/170, acct/200)` shares `acct/`.
@@ -186,7 +209,7 @@ fn prefixes_are_recomputed_for_each_output() {
 }
 
 #[test]
-fn record_kinds_and_header_metadata_are_preserved() {
+fn non_insert_records_are_dropped_and_header_metadata_is_inherited() {
     let mut storage = [0; 256];
     let page = Page::init_with_fences(&mut storage, fences(Some(b"a"), None)).unwrap();
     let states = [
@@ -205,9 +228,49 @@ fn record_kinds_and_header_metadata_are_preserved() {
     page.try_upsert(b"f", RecordState::Delete).unwrap();
     page.as_mut_bytes()[8..32].fill(0x5a);
 
-    let (_, right) = split_and_check(page, b"g", RecordState::Phantom);
+    let (separator, right) = split_and_check(page, b"g", RecordState::Insert(b"new"));
+    // Only the `Insert` records `b` and `g` survive the merge.
+    assert_eq!(separator, b"g");
+    assert_eq!(
+        owned(page),
+        [(b"b".to_vec(), RecordKind::Insert, Some(b"live".to_vec()))]
+    );
+    let right_page = Page::validate(&right).unwrap();
+    assert_eq!(
+        owned(right_page),
+        [(b"g".to_vec(), RecordKind::Insert, Some(b"new".to_vec()))]
+    );
     assert_eq!(&page.as_bytes()[8..32], [0x5a; 24]);
     assert_eq!(&right[8..32], [0x5a; 24]);
+}
+
+#[test]
+fn an_existing_key_in_the_batch_replaces_the_record() {
+    let mut storage = [0; 128];
+    let page = Page::init_with_fences(&mut storage, fences(Some(b"b"), Some(b"y"))).unwrap();
+    for key in [b"c", b"e", b"g"] {
+        page.try_insert(key, b"old").unwrap();
+    }
+    let (_, right) = split_and_check(page, b"e", RecordState::Insert(b"replacement"));
+    let right = Page::validate(&right).unwrap();
+    let values: Vec<_> = owned(page)
+        .into_iter()
+        .chain(owned(right))
+        .filter(|record| record.0 == b"e")
+        .map(|record| record.2)
+        .collect();
+    assert_eq!(values, [Some(b"replacement".to_vec())]);
+}
+
+#[test]
+fn a_delete_in_the_batch_removes_its_key() {
+    let mut storage = [0; 128];
+    let page = Page::init_with_fences(&mut storage, fences(None, None)).unwrap();
+    for key in [b"b", b"d", b"f", b"h"] {
+        page.try_insert(key, b"value").unwrap();
+    }
+    split_and_check(page, b"d", RecordState::Delete);
+    assert_eq!(page.get(b"d"), Ok(None));
 }
 
 #[test]
@@ -218,23 +281,54 @@ fn errors_follow_precedence_and_preserve_both_buffers() {
     page.try_insert(b"x", b"2").unwrap();
     let snapshot = page.as_bytes().to_vec();
     let too_large = [7; 128];
+    let clean = PageError::InvalidBatch("batch holds a clean record");
 
-    let cases: [(usize, &[u8], &[u8], PageError); 7] = [
-        (96, b"", b"", PageError::InvalidCapacity),
-        (64, b"", b"", PageError::CapacityMismatch),
-        (128, b"", b"", PageError::EmptyKey),
-        (128, b"a", b"", PageError::KeyOutOfRange),
-        (128, b"y", b"", PageError::KeyOutOfRange),
-        (128, b"d", &too_large, PageError::RecordTooLarge),
-        (128, b"c", b"", PageError::DuplicateKey),
+    let cases: [(usize, &[u8], RecordState<'_>, PageError); 9] = [
+        (96, b"", RecordState::Phantom, PageError::InvalidCapacity),
+        (64, b"", RecordState::Phantom, PageError::CapacityMismatch),
+        (128, b"", RecordState::Phantom, PageError::EmptyKey),
+        (128, b"a", RecordState::Phantom, PageError::KeyOutOfRange),
+        (
+            128,
+            b"y",
+            RecordState::Insert(b""),
+            PageError::KeyOutOfRange,
+        ),
+        (
+            128,
+            b"d",
+            RecordState::Insert(&too_large),
+            PageError::RecordTooLarge,
+        ),
+        (128, b"d", RecordState::Cache(b"v"), clean),
+        (128, b"c", RecordState::Phantom, clean),
+        (
+            128,
+            b"c",
+            RecordState::Cache(&too_large),
+            PageError::RecordTooLarge,
+        ),
     ];
-    for (capacity, key, value, error) in cases {
+    for (capacity, key, state, error) in cases {
         let mut right_storage = vec![0xa5; capacity];
-        let result = page.split_with_insert(&mut right_storage, key, RecordState::Insert(value));
-        assert_eq!(result.err(), Some(error), "{key:?}");
+        let result = page.merge_batch_split(&mut right_storage, one(key, state));
+        assert_eq!(result.err(), Some(error), "{key:?} {state:?}");
         assert_eq!(page.as_bytes(), snapshot);
         assert_eq!(right_storage, vec![0xa5; capacity]);
     }
+
+    // Batch checks see every record, and run before the split.
+    let unsorted = [live(b"e", b""), live(b"d", b"")];
+    let mut right_storage = [0xa5; 128];
+    let result = page.merge_batch_split(&mut right_storage, unsorted.iter().copied());
+    assert_eq!(
+        result.err(),
+        Some(PageError::InvalidBatch(
+            "batch keys are not strictly increasing"
+        ))
+    );
+    assert_eq!(page.as_bytes(), snapshot);
+    assert_eq!(right_storage, [0xa5; 128]);
 
     // An unfenced page has no bounds to divide.
     let mut storage = [0; 128];
@@ -242,7 +336,7 @@ fn errors_follow_precedence_and_preserve_both_buffers() {
     page.try_insert(b"a", b"1").unwrap();
     let snapshot = page.as_bytes().to_vec();
     let mut right_storage = [0xa5; 128];
-    let result = page.split_with_insert(&mut right_storage, b"b", RecordState::Insert(b""));
+    let result = page.merge_batch_split(&mut right_storage, one(b"b", RecordState::Insert(b"")));
     assert_eq!(result.err(), Some(PageError::InvalidFences));
     assert_eq!(page.as_bytes(), snapshot);
     assert_eq!(right_storage, [0xa5; 128]);
@@ -250,11 +344,11 @@ fn errors_follow_precedence_and_preserve_both_buffers() {
 
 #[test]
 fn cannot_split_one_record_or_oversized_outputs() {
-    // A single virtual record cannot leave a record on each side.
+    // A single merged record cannot leave a record on each side.
     let mut storage = [0; 64];
     let page = Page::init_with_fences(&mut storage, fences(None, None)).unwrap();
     let mut right_storage = [0xa5; 64];
-    let result = page.split_with_insert(&mut right_storage, b"a", RecordState::Insert(b""));
+    let result = page.merge_batch_split(&mut right_storage, one(b"a", RecordState::Insert(b"")));
     assert_eq!(result.err(), Some(PageError::CannotSplit));
     assert_eq!(right_storage, [0xa5; 64]);
 
@@ -263,8 +357,21 @@ fn cannot_split_one_record_or_oversized_outputs() {
     let page = Page::init_with_fences(&mut storage, fences(None, None)).unwrap();
     page.try_insert(&[b'a'; 8], b"").unwrap();
     let snapshot = page.as_bytes().to_vec();
-    let result = page.split_with_insert(&mut right_storage, &[b'b'; 8], RecordState::Insert(b""));
+    let result = page.merge_batch_split(
+        &mut right_storage,
+        one(&[b'b'; 8], RecordState::Insert(b"")),
+    );
     // Right output: 32 + 16 + 8 (low fence) + 8 + 8 = 72 bytes.
+    assert_eq!(result.err(), Some(PageError::CannotSplit));
+    assert_eq!(page.as_bytes(), snapshot);
+    assert_eq!(right_storage, [0xa5; 64]);
+
+    // Replacing the only record still leaves one record.
+    let mut storage = [0; 64];
+    let page = Page::init_with_fences(&mut storage, fences(None, None)).unwrap();
+    page.try_insert(b"a", b"1").unwrap();
+    let snapshot = page.as_bytes().to_vec();
+    let result = page.merge_batch_split(&mut right_storage, one(b"a", RecordState::Insert(b"2")));
     assert_eq!(result.err(), Some(PageError::CannotSplit));
     assert_eq!(page.as_bytes(), snapshot);
     assert_eq!(right_storage, [0xa5; 64]);
@@ -344,12 +451,14 @@ fn random_pages_split_exactly_as_the_calculator_predicts() {
                         Err(error) => panic!("{error}"),
                     }
                 };
-                let state = match next(4) {
-                    0 => RecordState::Delete,
-                    1 => RecordState::Cache(&value),
-                    _ => RecordState::Insert(&value),
+                // Mostly insert the new key; sometimes replace or delete an
+                // existing record instead.
+                let existing = page.iter().nth(next(page.len())).unwrap().key.to_vec();
+                match next(4) {
+                    0 if page.len() >= 3 => split_and_check(page, &existing, RecordState::Delete),
+                    1 => split_and_check(page, &existing, RecordState::Insert(&value)),
+                    _ => split_and_check(page, &key, RecordState::Insert(&value)),
                 };
-                split_and_check(page, &key, state);
             }
         }
     }
