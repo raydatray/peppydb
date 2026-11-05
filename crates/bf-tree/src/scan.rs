@@ -51,6 +51,7 @@ impl Tree {
         let mut key = Vec::new();
         loop {
             let leaf = self.read_leaf(&cursor)?;
+            let noted = self.note(&leaf);
             let next = with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
                 let view = LeafRef {
@@ -72,6 +73,8 @@ impl Tree {
                     end,
                 ))
             })?;
+            drop(leaf);
+            self.maintain(noted)?;
             match next {
                 Some(next) => cursor = next,
                 None => return Ok(()),
@@ -85,7 +88,8 @@ impl Tree {
     fn scan_leaf(&self, cursor: &[u8], end: Option<&[u8]>) -> Result<LeafRecords, TreeError> {
         let n = self.config.leaf_capacity;
         let leaf = self.read_leaf(cursor)?;
-        with_scratch(|scratch| {
+        let noted = self.note(&leaf);
+        let result = with_scratch(|scratch| {
             let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
             let view = LeafRef {
                 base: page,
@@ -101,7 +105,10 @@ impl Tree {
             let next = next_leaf(page.fences().expect("tree leaves are fenced").upper, end);
 
             Ok((records, next))
-        })
+        });
+        drop(leaf);
+        self.maintain(noted)?;
+        result
     }
 }
 

@@ -34,23 +34,31 @@ impl Tree {
 
         let n = self.config.leaf_capacity;
         let leaf = self.read_leaf(key)?;
+        let noted = self.note(&leaf);
         // The mini-page answers first; the base page only on a miss.
-        if let Residency::Mini { page, refs } = leaf.residency() {
-            match page.lookup_marking(refs, key) {
-                Lookup::Found(value) => return Ok(f(Some(value))),
-                Lookup::Absent => return Ok(f(None)),
-                Lookup::Miss => {}
-            }
-        }
-        with_scratch(|scratch| {
-            let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
-            page.check_key(key)?;
-            let record = page.get(key)?;
-            Ok(f(record.and_then(|record| match record.state {
-                RecordState::Insert(value) => Some(value),
-                _ => None,
-            })))
-        })
+        let buffered = match leaf.residency() {
+            Residency::Mini { page, refs } => match page.lookup_marking(refs, key) {
+                Lookup::Found(value) => Some(Some(value)),
+                Lookup::Absent => Some(None),
+                Lookup::Miss => None,
+            },
+            Residency::Base => None,
+        };
+        let result = match buffered {
+            Some(value) => f(value),
+            None => with_scratch(|scratch| -> Result<_, TreeError> {
+                let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+                page.check_key(key)?;
+                let record = page.get(key)?;
+                Ok(f(record.and_then(|record| match record.state {
+                    RecordState::Insert(value) => Some(value),
+                    _ => None,
+                })))
+            })?,
+        };
+        drop(leaf);
+        self.maintain(noted)?;
+        Ok(result)
     }
 
     /// Number of levels, counting the leaf level: a single-leaf tree has

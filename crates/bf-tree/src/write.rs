@@ -79,7 +79,12 @@ impl Tree {
             match outcome {
                 // The merge is complete; a retry buffers into the owning half.
                 None => Ok(Attempt::NeedRoom),
-                Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => Ok(Attempt::Done),
+                Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => {
+                    // After buffering: a write that grew the mini-page has
+                    // already moved it to the tail.
+                    self.relocate(leaf);
+                    Ok(Attempt::Done)
+                }
                 // A fresh mini-page takes any admitted record.
                 Some(WriteOutcome::NeedsMerge) => {
                     unreachable!("a fresh mini-page needed a merge")

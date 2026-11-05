@@ -35,8 +35,10 @@ pub(super) struct LeafEntry {
     /// Reference bits for the mini-page's slots; `Some` exactly when `block`
     /// is.
     refs: Option<Box<RefBits>>,
-    // Later plans add `version` (0014) and `dirty` (0015). The size test
-    // guards the entry.
+    /// Changes (wrapping) on every block change: allocation, growth,
+    /// relocation, merge. A read's hint applies only if it is unchanged.
+    version: u32,
+    // Plan 0015 adds `dirty`. The size test guards the entry.
 }
 
 /// What a leaf holds in memory besides its base page in the store.
@@ -77,6 +79,9 @@ pub(super) struct LeafWrite<'m> {
 pub(super) trait Locked {
     fn id(&self) -> LeafId;
     fn residency(&self) -> Residency<'_>;
+    fn version(&self) -> u32;
+    /// The logical address of the leaf's block, if it has one.
+    fn block_addr(&self) -> Option<usize>;
 }
 
 impl Locked for LeafRead<'_> {
@@ -86,6 +91,14 @@ impl Locked for LeafRead<'_> {
 
     fn residency(&self) -> Residency<'_> {
         self.entry.residency()
+    }
+
+    fn version(&self) -> u32 {
+        self.entry.version
+    }
+
+    fn block_addr(&self) -> Option<usize> {
+        self.entry.block.as_ref().map(Block::addr)
     }
 }
 
@@ -97,11 +110,21 @@ impl Locked for LeafWrite<'_> {
     fn residency(&self) -> Residency<'_> {
         self.entry.residency()
     }
+
+    fn version(&self) -> u32 {
+        self.entry.version
+    }
+
+    fn block_addr(&self) -> Option<usize> {
+        self.entry.block.as_ref().map(Block::addr)
+    }
 }
 
 impl LeafWrite<'_> {
     /// Move the mini-page's two handles out of the entry; no bytes move.
+    /// Bumps the version: whatever goes back may be a different block.
     pub(super) fn take_mini(&mut self) -> Option<Mini> {
+        self.entry.version = self.entry.version.wrapping_add(1);
         match (self.entry.block.take(), self.entry.refs.take()) {
             (Some(block), Some(refs)) => Some(Mini { block, refs }),
             (None, None) => None,
@@ -153,7 +176,7 @@ impl LeafMap {
         let circular_buffer = CircularBuffer::new(
             config.circular_buffer_bytes,
             &config.buffer_classes(&classes),
-            0,
+            u32::from(config.second_chance_percent),
         )
         .map_err(|_| TreeError::InvalidConfig("invalid circular-buffer budget"))?;
         Ok(Self::new(store, freed, circular_buffer, classes))
@@ -230,6 +253,13 @@ impl LeafMap {
             .block
             .as_ref()
             .is_some_and(|block| block.is(victim))
+    }
+
+    /// Lock leaf `id` exclusively without waiting; `None` if it is busy or
+    /// not a live slot.
+    pub(super) fn try_write(&self, id: LeafId) -> Option<LeafWrite<'_>> {
+        let entry = self.entry(id).ok()?.try_write()?;
+        (!entry.freed).then_some(LeafWrite { id, entry })
     }
 
     /// Lock leaf `id` exclusively if it is a live slot.

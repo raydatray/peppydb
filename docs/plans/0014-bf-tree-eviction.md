@@ -552,15 +552,26 @@ Resolved:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: eviction and the retry loop; `CircularBufferFull` removed.
-- [ ] Diff 3: `LeafEntry::version`, relocation, `Hint`, and `maintain`.
+- [x] Diff 2: eviction and the retry loop; `CircularBufferFull` removed.
+- [x] Diff 3: `LeafEntry::version`, relocation, `Hint`, and `maintain`.
 - [ ] Diff 4: budget, durability, and concurrent models.
 - [ ] Diff 5: design documents and roadmap.
 - [ ] Stack-wide verification.
 
 ## Discoveries and plan changes
 
-None yet.
+- **2026-11-05: `make_room` evicts a batch with slack.** Evicting only
+  until the largest class fits left the buffer full under write pressure.
+  Relocation never evicts, so it found no room, and a hot block in the
+  second-chance region was evicted at the head anyway: the second chance
+  never happened (found by the hot-leaf test). `make_room` now evicts
+  until the needed block plus 1/16 of the capacity fits. Upstream gets the
+  same slack by freeing about 1 KiB per eviction round. If no live block is
+  left, the loop still stops (`Empty`), so the slack never blocks a write.
+- **2026-11-05: the version bumps live in `take_mini`.** Every block
+  change (growth, merge, relocation) goes through `take_mini`, so bumping
+  there covers them all; it may bump when nothing changed, which only
+  skips a hint.
 
 ## Agent notes
 
