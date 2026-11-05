@@ -1,6 +1,6 @@
 # 0013: Mini-pages in the shared tree
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Mini-pages](../design/bf-tree-mini-page.md),
 [circular buffer](../design/bf-tree-circular-buffer.md),
@@ -457,11 +457,12 @@ machinery is tested on hand-built mini-pages before any write creates one.
 
 ## Open questions
 
-1. **Admission change.** Confirm that dropping `7K + 3V` for the ladder rule
-   is acceptable, including that a few tiny configurations become invalid.
-   Recommendation: accept; the sweep test lists them.
-2. **Default budget.** Confirm 32 MiB as the final default and the interim
-   `CircularBufferFull` behaviour on larger workloads until 0014.
+None.
+
+Resolved: the ladder rule replaces `7K + 3V`, and the few tiny
+configurations it rejects are acceptable (the sweep test lists them). The
+default circular-buffer budget is 32 MiB, and larger workloads get the
+interim `CircularBufferFull` until plan 0014 adds eviction.
 
 ## Verification strategy
 
@@ -480,7 +481,7 @@ machinery is tested on hand-built mini-pages before any write creates one.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: configuration.
 - [ ] Diff 3: reads, scans, flush merges.
 - [ ] Diff 4: blind writes.
