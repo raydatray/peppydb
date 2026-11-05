@@ -98,6 +98,11 @@ fn run_on(
     let mut model = Model::new();
     let max_key = config.max_key_len;
     let mut max_height = 1;
+    // With no promotion and no second chance, reads and scans never
+    // allocate from the circular buffer.
+    let read_only_reads = config.read_promotion_percent == 0
+        && config.scan_promotion_percent == 0
+        && config.second_chance_percent == 0;
     for step in 0..steps {
         let key = generate_key(&mut rng, keys, max_key);
         let context = format!("{backend:?} {config:?} {keys:?} seed {seed:#x} step {step}");
@@ -114,7 +119,9 @@ fn run_on(
             };
             assert_eq!(tree.check_invariants(), Ok(()), "{context}");
         }
-        match rng.below(10) {
+        let used = tree.circular_buffer_used();
+        let op = rng.below(10);
+        match op {
             0..=4 => {
                 let value_len = match rng.below(4) {
                     0 => config.max_value_len,
@@ -152,6 +159,9 @@ fn run_on(
                     .collect();
                 assert_eq!(actual, expected, "{context}");
             }
+        }
+        if read_only_reads && op >= 7 {
+            assert_eq!(tree.circular_buffer_used(), used, "{context}");
         }
         assert_eq!(tree.check_invariants(), Ok(()), "{context}");
         assert!(
@@ -250,6 +260,46 @@ fn tiny_circular_buffers_match_the_oracle_through_eviction() {
             run_on(Backend::FileReopen, config, Keys::Maximum, 0xf11e, 400, 2);
         }
     }
+}
+
+/// Every caching policy against the oracle: read rates of 0, 20, and 100
+/// percent in record and page mode, scan rates of 0 and 100, write-load
+/// full pages off and on, and circular buffers of about four, eight, and
+/// sixteen leaf pages. Backends rotate so every policy also meets reopens.
+#[test]
+fn every_caching_policy_matches_the_oracle() {
+    let mut runs = 0u64;
+    for read in [0u8, 20, 100] {
+        for record in [true, false] {
+            if read == 0 && !record {
+                continue; // The mode is irrelevant at rate 0.
+            }
+            for scan in [0u8, 100] {
+                for full in [false, true] {
+                    for bytes in [1024, 2048, 4096] {
+                        let config = TreeConfig {
+                            circular_buffer_bytes: bytes,
+                            read_promotion_percent: read,
+                            read_record_cache: record,
+                            scan_promotion_percent: scan,
+                            write_load_full_page: full,
+                            second_chance_percent: if runs.is_multiple_of(2) { 0 } else { 10 },
+                            policy_seed: runs,
+                            ..config(256, 128, 8, 16)
+                        };
+                        let (backend, keys) = match runs % 3 {
+                            0 => (Backend::Memory, Keys::Uniform),
+                            1 => (Backend::MemoryReopen, Keys::Narrow),
+                            _ => (Backend::FileReopen, Keys::Maximum),
+                        };
+                        run_on(backend, config, keys, 0xcac4e + runs, 500, 2);
+                        runs += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(runs, 60);
 }
 
 #[test]

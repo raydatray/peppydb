@@ -278,18 +278,26 @@ fn many_threads_on_one_leaf_range_make_progress() {
 
 /// Tiny nodes and a circular buffer of about four leaf pages: writers,
 /// readers, scanners, and a looping flush all evict and race on the same
-/// leaves.
+/// leaves. Caching is `Some(record_mode)`, or `None` for no caching.
 #[test]
 fn threads_agree_under_constant_eviction() {
-    for (bytes, percent, full) in [(1024usize, 10u8, true), (2048, 100, true), (1024, 0, false)] {
+    let cases = [
+        (1024usize, 10u8, true, Some(false)),
+        (2048, 100, true, Some(false)),
+        (1024, 0, false, Some(true)),
+        (2048, 10, true, Some(true)),
+        (1024, 10, false, None),
+    ];
+    for (bytes, percent, full, caching) in cases {
         with_watchdog(Duration::from_secs(120), move || {
+            let rate = if caching.is_some() { 30 } else { 0 };
             let config = TreeConfig {
                 circular_buffer_bytes: bytes,
                 second_chance_percent: percent,
                 write_load_full_page: full,
-                // Page promotion where full pages are on, else record caching.
-                read_promotion_percent: 30,
-                read_record_cache: !full,
+                read_promotion_percent: rate,
+                read_record_cache: caching.unwrap_or(true),
+                scan_promotion_percent: rate,
                 ..tiny()
             };
             let stop = AtomicBool::new(false);
