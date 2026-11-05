@@ -9,6 +9,7 @@ pub(super) const HEADER_BYTES: usize = 32;
 pub(super) const SLOT_BYTES: usize = 8;
 pub(super) const PREVIEW_BYTES: usize = 2;
 
+/// Raw value for "no backing leaf"; equal to `LeafId`'s reserved raw value.
 pub(super) const NO_BACKING_LEAF: u64 = u64::MAX;
 // Fence slot offsets that encode unbounded lower and upper fences.
 pub(super) const LOW_INFINITY: u16 = u16::MAX - 1;
@@ -40,7 +41,7 @@ pub(super) struct Header {
     /// Length of the key prefix stored once in the low fence and omitted from
     /// the high fence and every record. Zero unless both fences are finite.
     pub(super) prefix_len: U16,
-    /// Location of the backing leaf, or `NO_BACKING_LEAF`.
+    /// The `LeafId` a mini-page overlays, or `NO_BACKING_LEAF`.
     pub(super) backing_leaf: U64,
     /// Log sequence number (LSN); inactive.
     pub(super) lsn: U64,
