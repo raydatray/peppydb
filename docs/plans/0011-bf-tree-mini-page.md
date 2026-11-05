@@ -1,6 +1,6 @@
 # 0011: Single-leaf mini-page component
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Shared pages](../design/bf-tree-pages.md) (roles
 table, reference bit, splitting), [tree structure](../design/bf-tree-structure.md#admission-rule)
@@ -624,9 +624,10 @@ Twelve diffs. Page changes come first, each buildable with the existing tree.
 
 ## Open questions
 
-- **`InvalidBatch` versus `debug_assert`.** The plan checks batch arguments
-  at run time. If the merge shows up in profiles (0023), the sortedness check
-  could become a `debug_assert`. Recommendation: keep the checks.
+None.
+
+Resolved: `InvalidBatch` stays a run-time check. If the merge shows up in
+profiles (plan 0023), the sortedness check can become a `debug_assert`.
 
 ## Verification strategy
 
@@ -667,7 +668,7 @@ empty and maximum values. After each checked step:
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: zero-length payload validation fix.
 - [ ] Diff 3: backing leaf as `LeafId`.
 - [ ] Diff 4: retire the in-slot reference bit.
