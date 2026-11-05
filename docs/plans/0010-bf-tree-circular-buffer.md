@@ -1,6 +1,6 @@
 # 0010: Bounded circular buffer component
 
-**Status:** Agreed
+**Status:** In progress
 
 **Design references:** [leaf store](../design/bf-tree-leaf-store.md),
 [build system](../design/build-system.md) (crate boundaries, the unsafe-code
@@ -721,9 +721,9 @@ asserts `used() <= capacity()`. At the end every block is returned,
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: unsafe-code policy and `tools/check-unsafe`.
-- [ ] Diff 3: Miri through Buck2.
-- [ ] Diff 4: slab, bump allocation, fillers, budget.
+- [x] Diff 2: unsafe-code policy and `tools/check-unsafe`.
+- [x] Diff 3: Miri through Buck2.
+- [x] Diff 4: slab, bump allocation, fillers, budget.
 - [ ] Diff 5: holes and the second-chance region.
 - [ ] Diff 6: claims.
 - [ ] Diff 7: model, stress, Miri sizes, documentation.
@@ -767,6 +767,17 @@ asserts `used() <= capacity()`. At the end every block is returned,
   under `/tmp`, because under `buck-out` Cargo treated the generated sysroot
   package as part of the repository's workspace. Pins live in
   `build/toolchains/miri_nightly.bzl`, written by `tools/update-miri`.
+- **Diff 4: implementation details.** Only `slab.rs` and `block.rs` carry
+  `#![allow(unsafe_code)]`; the crate root does not, so the compiler rejects
+  `unsafe` code elsewhere in the crate. A `Block`'s pointer covers its
+  16 header bytes and the payload, so the debug canary needs no extra
+  raw-pointer code; `as_ref` and `as_mut` return the payload. The slab is
+  leaked through a flag on `Slab` (whose `Drop` frees it) rather than
+  `ManuallyDrop`. Block pointers come from safe `wrapping_add` after a
+  bounds check, so the only `unsafe` operations are `alloc_zeroed`,
+  `dealloc`, the two slice constructions, and the `Send`/`Sync` impls. Two
+  tests leak a slab on purpose and park it in a static, because Miri
+  reports unreachable leaked memory (checked by removing one).
 
 ## Agent notes
 

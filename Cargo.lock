@@ -16,6 +16,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bf-tree-circular-buffer"
+version = "0.1.0"
+dependencies = [
+ "bf-tree-node-id",
+ "thiserror",
+]
+
+[[package]]
 name = "bf-tree-inner"
 version = "0.1.0"
 dependencies = [
