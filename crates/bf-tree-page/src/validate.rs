@@ -15,7 +15,7 @@ impl Page {
     /// - the capacity is legal and equals the buffer length;
     /// - only known flags are set, and the slot directory and free gap fit;
     /// - every payload lies after the free gap, inside the buffer, and
-    ///   payloads do not overlap;
+    ///   nonempty payloads do not overlap;
     /// - fences, if present, are well formed, ordered, and consistent with
     ///   the stored prefix length;
     /// - record keys are nonempty, strictly increasing, inside the fences,
@@ -93,7 +93,11 @@ impl Page {
                 }
             }
 
-            payloads.push(payload);
+            // An empty payload (a key equal to the prefix with an empty
+            // value) may start where its neighbour starts; it overlaps nothing.
+            if !payload.is_empty() {
+                payloads.push(payload);
+            }
         }
 
         payloads.sort_unstable_by_key(|payload| payload.start);

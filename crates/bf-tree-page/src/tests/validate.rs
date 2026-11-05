@@ -293,3 +293,40 @@ fn each_check_rejects_its_targeted_corruption() {
     set_u16(&mut unfenced, 6, 1);
     assert_eq!(reason(&unfenced), "prefix on an unfenced page");
 }
+
+/// A record whose key equals the page prefix and whose value is empty has an
+/// empty payload. It can start where its neighbour's payload starts, which is
+/// not an overlap.
+#[test]
+fn zero_length_payloads_may_share_an_offset() {
+    let fences = Fences {
+        lower: Fence::Key(b"k".as_slice()),
+        upper: Fence::Key(b"kz".as_slice()),
+    };
+    for order in [[&b"kb"[..], b"k"], [b"k", b"kb"]] {
+        let mut bytes = vec![0; 128];
+        let page = Page::init_with_fences(&mut bytes, fences).unwrap();
+        for key in order {
+            page.try_insert(key, b"").unwrap();
+        }
+        assert!(Page::validate(&bytes).is_ok(), "insertion order {order:?}");
+    }
+
+    // A split with V = 0 produces such a right page.
+    let mut left = vec![0; 128];
+    let mut right = vec![0; 128];
+    let unbounded = Fences {
+        lower: Fence::Unbounded,
+        upper: Fence::Unbounded,
+    };
+    let page = Page::init_with_fences(&mut left, unbounded).unwrap();
+    for key in [&b"a"[..], b"k", b"kb", b"kc"] {
+        page.try_insert(key, b"").unwrap();
+    }
+    let split = page
+        .split_with_insert(&mut right, b"ka", RecordState::Insert(b""))
+        .unwrap();
+    let right = split.right.as_bytes().to_vec();
+    Page::validate(&right).unwrap();
+    assert!(Page::validate(&left).is_ok());
+}
