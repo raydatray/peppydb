@@ -199,10 +199,7 @@ fn built_trees_accept_further_writes_and_splits() {
     }
     assert!(tree.height() >= height);
     assert_eq!(tree.check_invariants(), Ok(()));
-    assert_eq!(
-        tree.get(&(11 * 7u32).to_be_bytes()),
-        Ok(Some([2; 16].as_slice()))
-    );
+    assert_eq!(tree.get(&(11 * 7u32).to_be_bytes()), Ok(Some(vec![2; 16])));
 }
 
 #[test]
@@ -243,7 +240,7 @@ fn fill(tree: &mut Tree, model: &mut Model, count: u32) {
 fn assert_matches_model(tree: &Tree, model: &Model) {
     assert_eq!(tree.check_invariants(), Ok(()));
     for (key, value) in model {
-        assert_eq!(tree.get(key), Ok(Some(value.as_slice())), "{key:?}");
+        assert_eq!(tree.get(key), Ok(Some(value.clone())), "{key:?}");
     }
     let expected: Vec<_> = model.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     assert_eq!(collect(tree.iter()), expected);

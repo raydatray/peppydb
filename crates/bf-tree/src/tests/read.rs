@@ -17,7 +17,7 @@ fn single_leaf_tree_serves_lookups() {
     assert_eq!(tree.locate(b"a"), (leaf(0), vec![]));
     let root = tree.find_leaf(b"");
     tree.leaf_mut(root).unwrap().try_insert(b"a", b"1").unwrap();
-    assert_eq!(tree.get(b"a"), Ok(Some(b"1".as_slice())));
+    assert_eq!(tree.get(b"a"), Ok(Some(b"1".to_vec())));
     assert_eq!(tree.check_invariants(), Ok(()));
 }
 
@@ -54,7 +54,7 @@ fn two_level_routes_at_and_between_separators() {
         assert_eq!(tree.find_leaf(key), leaf(expected_leaf));
     }
     for key in [&b"a"[..], b"c", b"e", b"f", b"h", b"m", b"q", b"z"] {
-        assert_eq!(tree.get(key), Ok(Some(value_of(key).as_slice())), "{key:?}");
+        assert_eq!(tree.get(key), Ok(Some(value_of(key))), "{key:?}");
     }
     for key in [&b"b"[..], b"d", b"g", b"l", b"n", b"zz"] {
         assert_eq!(tree.get(key), Ok(None), "{key:?}");
@@ -81,7 +81,7 @@ fn three_level_records_the_full_path() {
         assert_eq!(tree.locate(key), (leaf(expected_leaf), path), "{key:?}");
     }
     for key in [&b"a"[..], b"e", b"f", b"lz", b"m", b"s", b"t", b"zz"] {
-        assert_eq!(tree.get(key), Ok(Some(value_of(key).as_slice())), "{key:?}");
+        assert_eq!(tree.get(key), Ok(Some(value_of(key))), "{key:?}");
     }
     assert_eq!(tree.get(b"n"), Ok(None));
 }

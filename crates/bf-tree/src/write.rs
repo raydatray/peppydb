@@ -4,13 +4,13 @@ use super::read::Path;
 use super::{Tree, TreeError};
 use bf_tree_inner::{InnerError, InnerNode};
 use bf_tree_node_id::{ChildRef, LeafId};
-use bf_tree_page::{Page, PageError, RecordState, UpsertOutcome};
+use bf_tree_page::{Page, PageError, RecordState};
 
 /// The result of writing into one leaf without splitting it.
 enum LeafWrite {
-    Done(UpsertOutcome),
-    /// The leaf must split with the record; report this outcome afterward.
-    MustSplit(UpsertOutcome),
+    Done,
+    /// The leaf must split with the record.
+    MustSplit,
 }
 
 impl Tree {
@@ -18,7 +18,7 @@ impl Tree {
     ///
     /// Rejects an empty key, and keys or values beyond the configured limits,
     /// before touching any node.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<UpsertOutcome, TreeError> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
         if value.len() > self.config.max_value_len {
             return Err(TreeError::ValueTooLarge);
@@ -27,23 +27,21 @@ impl Tree {
         let (leaf, path) = self.locate(key);
         let state = RecordState::Insert(value);
         match self.try_upsert_in_leaf(leaf, key, state)? {
-            LeafWrite::Done(outcome) => Ok(outcome),
-            LeafWrite::MustSplit(outcome) => {
-                self.split_and_propagate(leaf, &path, key, state)?;
-                Ok(outcome)
-            }
+            LeafWrite::Done => Ok(()),
+            LeafWrite::MustSplit => self.split_and_propagate(leaf, &path, key, state),
         }
     }
 
-    /// Physically remove `key`; return whether it was present.
+    /// Remove `key` if it is present.
     ///
     /// Leaves are never merged: an empty leaf keeps its fences and stays
     /// reachable.
-    pub fn remove(&mut self, key: &[u8]) -> Result<bool, TreeError> {
+    pub fn remove(&mut self, key: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
 
         let leaf = self.find_leaf(key);
-        Ok(self.leaf_mut(leaf)?.remove(key)?)
+        self.leaf_mut(leaf)?.remove(key)?;
+        Ok(())
     }
 
     /// Write `key` into `leaf` without splitting, compacting if its holes make
@@ -58,16 +56,15 @@ impl Tree {
         let page = self.leaf_mut(leaf)?;
         match page.try_upsert(key, state) {
             Err(PageError::PageFull) => {}
-            result => return Ok(LeafWrite::Done(result?)),
+            result => {
+                result?;
+                return Ok(LeafWrite::Done);
+            }
         }
 
         // Removing first frees the old version's bytes for the space check, and
         // turns a replacement during a split into an insert.
-        let replaced = page.remove(key)?;
-        let outcome = match replaced {
-            true => UpsertOutcome::Replaced,
-            false => UpsertOutcome::Inserted,
-        };
+        page.remove(key)?;
         let needed = page.record_size(key, state)?;
         if needed <= page.free_bytes() + page.reclaimable_bytes() {
             if needed > page.free_bytes() {
@@ -76,10 +73,10 @@ impl Tree {
 
             page.try_insert_record(key, state)?;
 
-            return Ok(LeafWrite::Done(outcome));
+            return Ok(LeafWrite::Done);
         }
 
-        Ok(LeafWrite::MustSplit(outcome))
+        Ok(LeafWrite::MustSplit)
     }
 
     /// Split `leaf` with the pending record, then insert each new separator
