@@ -28,7 +28,7 @@ and milestone progress here current.
 | Base leaf pages and page I/O | Hold the base records in fixed-size disk pages, normally 4 KiB. | §3.3 |
 | Leaf mapping table | Resolve stable leaf IDs to their current locations; associate a lock with each logical leaf and its mini-page. | §3.3 |
 | Mini-page overlay | Buffer mutations and cache records for one base leaf; grow and merge as needed. Each leaf has at most one mini-page. | §§3.1, 5 |
-| Variable-length buffer pool | Bound mini-page memory; allocate, reclaim, resize, and evict through a circular buffer and size-class free lists. | §4 |
+| Bounded circular buffer | Bound mini-page memory; allocate, reclaim, resize, and evict through a circular buffer and size-class free lists. | §4 |
 | Point and range operations | Combine traversal, mapping, mini-pages, and base pages into get/insert/update/delete/scan behavior. | §5 |
 | Logging, checkpoints, and recovery | Preserve recoverable state across crashes, coordinated with the embedded engine. | §5.7 |
 
@@ -37,7 +37,7 @@ optimize searches and space use (§3.5). These features build on the page format
 
 ## How the components compose
 
-The diagram shows lookup routing and the buffer pool's allocation role.
+The diagram shows lookup routing and the circular buffer's allocation role.
 
 ```mermaid
 flowchart TD
@@ -46,7 +46,7 @@ flowchart TD
     Mapping --> Mini[Mini-page or full-page cache]
     Mapping --> Base[Base leaf through page I/O]
     Mini -->|Read fallback or merge| Base
-    Pool[Bounded circular buffer] -.->|Provides storage| Mini
+    CircularBuffer[Bounded circular buffer] -.->|Provides storage| Mini
 ```
 
 - **Get:** Traverse to a leaf ID and inspect its mini-page first. A partial-cache
@@ -84,11 +84,11 @@ The milestones below are not individual commits or reserved plan numbers.
 | 2. Page mutation and ranges | 1 | Replacement/reclamation, record kinds, fences, and incremental layout optimizations. [Completed plan 0004](0004-bf-tree-page-mutation.md) delivers mutation, ranges, and preview search. [Completed plan 0005](0005-bf-tree-page-prefix.md) delivers fence-derived prefix compression and borrowed logical keys. Milestone complete. |
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Completed plan 0006](0006-bf-tree-inner-node.md) delivers the local routing-node primitive; [completed plan 0007](0007-bf-tree-in-memory-tree.md) composes a single-threaded tree with leaf splits, propagation, and scans. Milestone complete. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. [Completed plan 0008](0008-bf-tree-leaf-store.md) delivers the page-store boundary with memory and file backends, stored-page validation, the leaf mapping table, flush, and reopen from leaf fences. Milestone complete. |
-| 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. |
-| 6. Bounded buffer pool | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. |
-| 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. |
-| 8. Concurrency | Integrated operations and pool | Optimistic inner-node traversal, leaf locks, and safe concurrent allocation/reclamation. |
-| 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. |
+| 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. Draft plans: [0011](0011-bf-tree-mini-page.md) (single-leaf overlay; its write loop allocates from the circular buffer of plan 0010, so plan 0010 lands first), [0012](0012-bf-tree-shared-tree.md) (shared tree foundation: `&self` operations, leaf locks, one write-through path), and [0013](0013-bf-tree-mini-tree.md) (tree integration). |
+| 6. Bounded circular buffer | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. Draft plans: [0010](0010-bf-tree-circular-buffer.md) (circular buffer component; lands before plan 0011, ahead of the rest of milestone 5) and [0014](0014-bf-tree-eviction.md) (eviction and the second chance). |
+| 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. Draft plan: [0015](0015-bf-tree-caching.md). |
+| 8. Concurrency | Integrated operations and circular buffer | Optimistic inner-node traversal, leaf locks, and safe concurrent allocation/reclamation. Draft plan: [0016](0016-bf-tree-concurrency.md) (version-locked inner frames; leaf locks and circular-buffer concurrency arrive earlier, in 0010 to 0014). |
+| 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. Draft plans: [0017](0017-bf-tree-store-format.md) (store format), [0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, recovery), [0019](0019-bf-tree-apply.md) (apply, log hook, snapshots), [0020](0020-engine-wal.md) (WAL), [0021](0021-engine-db.md) (`Db`), [0022](0022-engine-external.md) (external-log mode), and [0023](0023-bf-tree-io-perf.md) (direct I/O and measurements). |
 
 Some work can be developed independently: a single-leaf overlay does not need a
 complete tree, and the allocator can be tested before integrating eviction.
@@ -100,6 +100,26 @@ applying mutations, recording durable history, and creating/restoring checkpoint
 The current unsafe-code prohibition is sufficient for the first page stack;
 revisit representation and synchronization choices when planning concurrency.
 
+From milestone 5 on, each plan chooses the final shape of the interfaces it
+introduces, so that later milestones add mechanisms rather than reshape
+earlier code:
+
+- Interim behavior must be a special case of the final behavior, not a
+  separate path that a later plan deletes. For example, before caching
+  exists the tree behaves like the final tree with caching rates of zero.
+- The tree is `Send + Sync` with `&self` operations and one lock per leaf
+  from its first integration with mini-pages (plan 0012). Milestone 8 then
+  replaces only the interim inner-node lock.
+- Every page write goes through one write-through function and every
+  base-page load through one load function, so persistence changes only
+  their internals.
+- Components that do not need the tree (the mini-page overlay, the circular buffer) are
+  built and tested on their own first, in their final concurrent form.
+- Each plan states its extension points: what later plans add to its types,
+  and what they must not need to change. Each test oracle is written once
+  and extended.
+- Planned replacements are named in the plan that makes them.
+
 ## Fidelity and staged implementation
 
 - Preserve the paper's core design: sorted mini-pages, a shared page layout,
@@ -109,7 +129,10 @@ revisit representation and synchronization choices when planning concurrency.
 - Use upstream code to investigate behavior and edge cases. Prefer clear ownership
   and explicit invariants in our implementation over reproducing its organization.
 - Tune policies and platform-specific I/O after a correct baseline. The initial
-  page work is portable to macOS; the paper's I/O evaluation targets Linux/NVMe.
+  page work is portable to macOS; the paper's I/O evaluation targets Linux/NVMe,
+  and so does this engine. Measure contended paths on Linux: the macOS standard
+  reader-writer lock parks readers under reader contention and misrepresents
+  them.
 
 ### Paper and implementation notes
 
@@ -156,9 +179,11 @@ the completed concurrent, larger-than-memory engine.
 - [x] Draft [leaf mapping table and page store](0008-bf-tree-leaf-store.md).
 - [x] Agree on plan 0008's store boundary, validation, and open path.
 - [x] Implement and verify the leaf-store stack, completing milestone 4.
-- [x] Draft [single-leaf mini-page overlay](0009-bf-tree-mini-page.md), the
-  first milestone 5 stack.
-- [ ] Agree on plan 0009's roles, write rules, and merge contract.
+- [x] Draft the stack plans for milestones 5 to 9 together, so that each
+  chooses final interface shapes: [0010](0010-bf-tree-circular-buffer.md) through
+  [0023](0023-bf-tree-io-perf.md).
+- [ ] Agree on plan 0010's circular buffer, unsafe-code policy, and stack.
+- [ ] Agree on plan 0011's page changes, mini-page interfaces, and stack.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -176,8 +201,10 @@ complete. [Plan 0008](0008-bf-tree-leaf-store.md) delivered the page-store
 boundary with memory and file backends, a leaf mapping table with
 load-on-access, and reopen by rebuilding inner nodes from leaf fences,
 recorded in the [leaf storage design](../design/bf-tree-leaf-store.md).
-Milestone 4 is complete. Next, review [plan 0009](0009-bf-tree-mini-page.md):
-the single-leaf mini-page overlay, the first of two milestone 5 stacks.
+Milestone 4 is complete. Next, review [plan 0010](0010-bf-tree-circular-buffer.md):
+the circular buffer component, which the single-leaf mini-page overlay
+([plan 0011](0011-bf-tree-mini-page.md)) allocates from. Plans 0010 to 0023
+are drafts in build order and are agreed one at a time.
 
 ## Sources
 
