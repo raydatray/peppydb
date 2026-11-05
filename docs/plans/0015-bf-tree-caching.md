@@ -631,7 +631,7 @@ Resolved:
 - [x] Diff 2: full pages and write-load promotion.
 - [x] Diff 3: read promotion, split promotion, and deferral.
 - [x] Diff 4: record and negative caching.
-- [ ] Diff 5: scan promotion.
+- [x] Diff 5: scan promotion.
 - [ ] Diff 6: policy models.
 - [ ] Diff 7: caching design document and roadmap.
 - [ ] Stack-wide verification.

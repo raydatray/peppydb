@@ -41,6 +41,7 @@ fn config(
         write_load_full_page: false,
         // Off in tests unless they test caching, for the same reason.
         read_promotion_percent: 0,
+        scan_promotion_percent: 0,
         read_record_cache: true,
         policy_seed: 0x5eed,
     }

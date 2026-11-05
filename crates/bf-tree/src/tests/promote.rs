@@ -227,3 +227,85 @@ fn a_rate_of_twenty_lands_near_twenty_percent() {
     assert!(!(0..100).any(|_| tree.policy.roll(0)));
     assert!((0..100).all(|_| tree.policy.roll(100)));
 }
+
+fn scanning(percent: u8) -> TreeConfig {
+    TreeConfig {
+        scan_promotion_percent: percent,
+        read_promotion_percent: 0,
+        ..config(512, 256, 8, 16)
+    }
+}
+
+/// A tree over a counting store with flushed keys spread over many leaves,
+/// and an empty circular buffer.
+fn flushed(config: TreeConfig) -> (Tree, super::store::Io) {
+    let (store, io) = counting(config);
+    let tree = Tree::create(config, store).unwrap();
+    for i in 0..300 {
+        tree.put(&key(i), &[1; 8]).unwrap();
+    }
+    tree.flush().unwrap();
+    while tree.evict_one() == Ok(crate::evict::Eviction::Evicted) {}
+    io.take();
+    (tree, io)
+}
+
+fn leaves(tree: &Tree) -> Vec<LeafId> {
+    let mut leaves: Vec<_> = (0..300).map(|i| leaf_of(tree, &key(i))).collect();
+    leaves.dedup();
+    leaves
+}
+
+#[test]
+fn at_scan_rate_100_every_scanned_leaf_ends_full() {
+    let (tree, io) = flushed(scanning(100));
+    assert_eq!(tree.iter().count(), 300);
+    let leaves = leaves(&tree);
+    assert!(leaves.len() > 2);
+    assert!(leaves.iter().all(|&leaf| residency(&tree, leaf) == "full"));
+    io.take();
+    // The second scan (and both scan forms) read no base page.
+    assert_eq!(tree.iter().count(), 300);
+    let mut seen = 0;
+    tree.scan_with(None, None, |_, _| {
+        seen += 1;
+        std::ops::ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert_eq!(seen, 300);
+    assert_eq!(io.take(), (0, vec![]));
+    assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+#[test]
+fn at_scan_rate_0_a_scan_allocates_nothing() {
+    let (tree, _io) = flushed(scanning(0));
+    let before = tree.circular_buffer_used();
+    assert_eq!(tree.iter().count(), 300);
+    assert_eq!(tree.circular_buffer_used(), before);
+    assert!(
+        leaves(&tree)
+            .iter()
+            .all(|&leaf| residency(&tree, leaf) == "base")
+    );
+}
+
+#[test]
+fn a_scan_over_mini_page_leaves_writes_nothing_and_leaves_them_mini() {
+    let (tree, io) = flushed(scanning(100));
+    let leaves = leaves(&tree);
+    // Buffer one write in every leaf.
+    for i in (0..300).step_by(7) {
+        tree.put(&key(i), &[2; 8]).unwrap();
+    }
+    let minis: Vec<_> = leaves
+        .iter()
+        .filter(|&&leaf| residency(&tree, leaf) == "mini")
+        .collect();
+    assert!(!minis.is_empty());
+    io.take();
+    assert_eq!(tree.iter().count(), 300);
+    assert_eq!(io.take().1, Vec::<LeafId>::new(), "no store write");
+    assert!(minis.iter().all(|&&leaf| residency(&tree, leaf) == "mini"));
+    assert_eq!(tree.check_invariants(), Ok(()));
+}

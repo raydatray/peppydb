@@ -51,7 +51,7 @@ impl Tree {
         let mut key = Vec::new();
         loop {
             let leaf = self.read_leaf(&cursor)?;
-            let noted = self.note(&leaf);
+            let noted = self.note(&leaf).with_hint(self.scan_hint(&leaf));
             let next = with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.base_of(&leaf, &mut scratch.page[..n])?;
                 let view = LeafRef {
@@ -88,7 +88,7 @@ impl Tree {
     fn scan_leaf(&self, cursor: &[u8], end: Option<&[u8]>) -> Result<LeafRecords, TreeError> {
         let n = self.config.leaf_capacity;
         let leaf = self.read_leaf(cursor)?;
-        let noted = self.note(&leaf);
+        let noted = self.note(&leaf).with_hint(self.scan_hint(&leaf));
         let result = with_scratch(|scratch| {
             let page = self.base_of(&leaf, &mut scratch.page[..n])?;
             let view = LeafRef {

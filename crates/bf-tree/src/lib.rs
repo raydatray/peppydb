@@ -93,6 +93,9 @@ pub struct TreeConfig {
     /// Chance, in percent, that a read served by the base page leaves
     /// something behind: a cached record, or the whole page. Default 20.
     pub read_promotion_percent: u8,
+    /// Chance, in percent, that a scan over a leaf with no buffered state
+    /// keeps its page in the circular buffer. Default 20.
+    pub scan_promotion_percent: u8,
     /// A promoting read caches the record (`true`) or keeps the whole page.
     /// Default `true`.
     pub read_record_cache: bool,
@@ -119,6 +122,7 @@ impl Default for TreeConfig {
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
             write_load_full_page: true,
             read_promotion_percent: 20,
+            scan_promotion_percent: 20,
             read_record_cache: true,
             policy_seed: 0x5eed,
         }
@@ -162,6 +166,11 @@ impl TreeConfig {
         if self.read_promotion_percent > 100 {
             return Err(TreeError::InvalidConfig(
                 "read_promotion_percent must be at most 100",
+            ));
+        }
+        if self.scan_promotion_percent > 100 {
+            return Err(TreeError::InvalidConfig(
+                "scan_promotion_percent must be at most 100",
             ));
         }
         if self.second_chance_percent > 100 {
@@ -228,6 +237,7 @@ impl From<&Superblock> for TreeConfig {
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
             write_load_full_page: true,
             read_promotion_percent: 20,
+            scan_promotion_percent: 20,
             read_record_cache: true,
             policy_seed: 0x5eed,
         }
