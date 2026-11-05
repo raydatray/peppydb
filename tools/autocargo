@@ -165,7 +165,7 @@ def render(targets):
         "[workspace.dependencies]",
     ]
     workspace += [f"{k} = {toml_value(v)}" for k, v in sorted(third_party.items())]
-    workspace += ["", "[workspace.lints.rust]", 'unsafe_code = "forbid"', ""]
+    workspace += ["", "[workspace.lints.rust]", 'unsafe_code = "deny"', ""]
     files["Cargo.toml"] = "\n".join(workspace)
     files["Cargo.lock"] = derive_lock(files, targets)
     return files

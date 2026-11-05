@@ -193,6 +193,16 @@ Example:
 [3/3][bf-tree-insert][insert] implement leaf insertion
 ```
 
+## Unsafe code
+- `unsafe` code is allowed only for a specific need that no safe design
+  meets. The toolchain denies the `unsafe_code` lint in every crate, and
+  `tools/check-unsafe` (run by `tools/clippy.sh`) fails if a crate outside its
+  allowlist opts out.
+- Adding a crate to the allowlist requires a plan that shows why no safe
+  design works, and the user's approval. Keep the raw-pointer code in as few
+  modules as possible, give every `unsafe` block a `// SAFETY:` comment, and
+  test it under Miri.
+
 ## Rust style
 - Prefer iterators whenever practical, including transformations, filtering,
   searches, and reductions.

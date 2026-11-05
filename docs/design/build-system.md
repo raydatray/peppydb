@@ -109,7 +109,18 @@ do not use a configuration flag.
 
 ## Strict by default
 
-Warnings fail every Buck2 build, not only clippy runs, and unsafe code is
-forbidden in every crate through the toolchain configuration. Putting the
-policy on the toolchain means no crate can opt out by omission, and normal
-builds and clippy builds cannot disagree.
+Warnings fail every Buck2 build, not only clippy runs, and the toolchain
+denies unsafe code in every crate. Putting the policy on the toolchain means
+no crate can opt out by omission, and normal builds and clippy builds cannot
+disagree.
+
+- **Unsafe code only where no safe design works.** The toolchain passes
+  `-Dunsafe_code`, not `-Funsafe_code`, so that one crate can opt in with
+  `#![allow(unsafe_code)]`. `tools/check-unsafe`, which `tools/clippy.sh`
+  runs, fails if any first-party crate outside its allowlist lowers the lint,
+  through an attribute or a rustc flag in a `BUCK` file. A crate joins the
+  allowlist only through an approved plan that shows no safe design meets a
+  specific need.
+- **Third-party crates are exempt.** The prelude builds them with
+  `--cap-lints=allow`, so the toolchain's lint levels never reach them.
+- **Current allowlist:** none.
