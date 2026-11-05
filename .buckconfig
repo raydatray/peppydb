@@ -22,7 +22,8 @@
     target:toolchains//...->prelude//platforms:default
 
 [build]
-  execution_platforms = prelude//platforms:default
+  # The host, and the host in Miri mode; see build/platforms.bzl.
+  execution_platforms = root//build:execution-platforms
 
 [project]
   # Cargo's output directory; never part of the Buck2 graph.

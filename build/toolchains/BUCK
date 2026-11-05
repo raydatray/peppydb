@@ -1,16 +1,18 @@
 # Toolchains used by the build. rustc, clippy-driver, and rustdoc come from
 # PATH through rustup, which pins them with rust-toolchain.toml. The C compiler,
-# which rustc uses as its linker, comes from PATH. Go is a pinned download.
+# which rustc uses as its linker, comes from PATH. Go is a pinned download, and
+# so is the nightly Rust toolchain that `@build/mode/miri` uses.
 
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "remote_python_toolchain", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
-load("@prelude//toolchains:rust.bzl", "system_rust_toolchain")
 load("@prelude//toolchains/go:go_bootstrap_toolchain.bzl", "go_bootstrap_distr", "go_bootstrap_toolchain")
 load("@prelude//toolchains/go:go_toolchain.bzl", "go_distr", "go_toolchain")
 load(":host.bzl", "by_host")
+load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC")
+load(":rust.bzl", "peppy_rust_toolchain")
 
 # Cargo's default release profile. Applies to every crate, third-party included.
 RELEASE_FLAGS = [
@@ -19,7 +21,7 @@ RELEASE_FLAGS = [
     "-Coverflow-checks=off",
 ]
 
-system_rust_toolchain(
+peppy_rust_toolchain(
     name = "rust",
     default_edition = "2024",
     # `-Dunsafe_code` is `[workspace.lints.rust] unsafe_code = "deny"`. Deny,
@@ -33,7 +35,76 @@ system_rust_toolchain(
     # `cargo clippy -- -D warnings`. Also makes warnings fail normal builds.
     deny_lints = ["warnings"],
     doctests = True,
+    # In Miri mode, build procedural macros and build scripts with the nightly
+    # too: require the execution platform that carries mode-miri.
+    exec_compatible_with = select({
+        "root//build:mode-miri": ["root//build:mode-miri"],
+        "DEFAULT": [],
+    }),
+    # Only `@build/mode/miri` uses the nightly; other modes never download it.
+    miri_sysroot = select({
+        "root//build:mode-miri": ":miri-sysroot",
+        "DEFAULT": None,
+    }),
+    nightly = select({
+        "root//build:mode-miri": ":rust-nightly",
+        "DEFAULT": None,
+    }),
     visibility = ["PUBLIC"],
+)
+
+# The nightly Rust toolchain for Miri, pinned by tools/update-miri. Each
+# component is a sha256-checked archive for the host; rust-src is the same on
+# every host.
+[
+    http_archive(
+        name = "rust-nightly-{}-{}".format(component, host),
+        urls = [archive["url"]],
+        sha256 = archive["sha256"],
+        strip_prefix = archive["strip_prefix"],
+    )
+    for host, components in MIRI_COMPONENTS.items()
+    for component, archive in components.items()
+]
+
+http_archive(
+    name = "rust-nightly-src",
+    urls = [MIRI_RUST_SRC["url"]],
+    sha256 = MIRI_RUST_SRC["sha256"],
+    strip_prefix = MIRI_RUST_SRC["strip_prefix"],
+)
+
+# One toolchain directory (bin/, lib/, lib/rustlib/...), as rustup lays it out.
+genrule(
+    name = "rust-nightly",
+    out = "dist",
+    cmd = by_host({
+        host: " && ".join(["mkdir -p $OUT"] + [
+            "cp -R $(location :rust-nightly-{}-{})/. $OUT/".format(component, host)
+            for component in sorted(components)
+        ] + ["cp -R $(location :rust-nightly-src)/. $OUT/"])
+        for host, components in MIRI_COMPONENTS.items()
+    }),
+)
+
+# Miri's standard library, built with MIR for every function. `cargo miri
+# setup` compiles it from rust-src and downloads the standard library's
+# crates.io dependencies, so this action needs network access on its first
+# run; Buck2 caches the result.
+genrule(
+    name = "miri-sysroot",
+    out = "sysroot",
+    # The scratch directory must be outside the repository: under buck-out,
+    # Cargo would find the repository's Cargo.toml and treat the generated
+    # sysroot package as part of that workspace.
+    cmd = " ".join([
+        "dist=$(location :rust-nightly) &&",
+        "scratch=`mktemp -d /tmp/peppydb-miri-sysroot.XXXXXX` &&",
+        "trap 'rm -rf $scratch' EXIT &&",
+        "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin",
+        "CARGO_HOME=$scratch/cargo-home RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT",
+        "$dist/bin/cargo miri setup",
+    ]),
 )
 
 system_cxx_toolchain(

@@ -92,6 +92,8 @@ rustc, reindeer, Go, and DotSlash in CI.
   version from `rust-toolchain.toml` on every call, so it is pinned without
   extra machinery. The C linker comes from `PATH` too. `tools/check-tools`
   compares `rustc` and the Go pin with their recorded versions.
+- **The Miri nightly is hermetic.** Buck2 downloads it like Go, from pins
+  that `tools/update-miri` writes (see "Miri" below).
 
 ## Build modes are platforms
 
@@ -101,6 +103,8 @@ do not use a configuration flag.
 - **Why.** A target platform is part of each output's configuration, so
   debug and release outputs are cached side by side, and switching between
   them rebuilds nothing.
+- **Miri is a mode too.** `@build/mode/miri` sets a `mode-miri` constraint
+  on the build mode (see "Miri").
 - **Applies to future switches.** A build-wide mode, such as running
   concurrency tests under the shuttle scheduler, should be a constraint on a
   platform too. It must also be a real feature, not `cfg(test)`, because
@@ -124,3 +128,42 @@ disagree.
 - **Third-party crates are exempt.** The prelude builds them with
   `--cap-lints=allow`, so the toolchain's lint levels never reach them.
 - **Current allowlist:** none.
+
+## Miri
+
+[Miri](https://github.com/rust-lang/miri) interprets Rust programs and
+reports undefined behaviour. Every crate that may contain unsafe code runs
+its tests under it, through Buck2 like every other check:
+
+```sh
+tools/buck2 test @build/mode/miri '//crates/<crate>:<crate>-unittest[miri]'
+```
+
+- **The prelude does the interpreting.** If the Rust toolchain provides a
+  Miri driver, every `rust_test` gets a `[miri]` sub-target, and the
+  dependencies are compiled for Miri separately from native builds, only
+  when such a target is requested.
+- **Why a whole nightly toolchain.** Miri exists only on nightly, and the
+  driver is a nightly `rustc`. A procedural macro, such as `thiserror`'s
+  derive, must be built by the compiler that loads it. So in Miri mode the
+  whole Rust toolchain switches to the same nightly: `rustc`, `rustdoc`, and
+  the driver. Every dependency, including procedural macros, works
+  unchanged.
+- **Why a second execution platform.** Buck2 builds procedural macros and
+  build scripts for the execution platform, which a target platform's
+  constraints do not reach. The repository therefore registers two:
+  the host, and the host with `mode-miri` (`build/platforms.bzl`). In Miri
+  mode the Rust toolchain requires the second, so its tools also get the
+  nightly. Other modes take the first, which matches the prelude's default.
+- **Pinned and downloaded by Buck2.** `build/toolchains/miri_nightly.bzl`,
+  written by `tools/update-miri`, records the nightly date and the sha256 of
+  each component archive (`rustc`, `rust-std`, `cargo`, `miri`, `rust-src`)
+  for every supported host. A genrule merges them into one toolchain
+  directory. Other modes never download them.
+- **The Miri sysroot needs the network once.** Miri needs a standard library
+  built with MIR for every function. A cached genrule builds it with
+  `cargo miri setup`, which downloads the standard library's crates.io
+  dependencies. Pinning those separately would add many hashes for little
+  gain. The genrule builds in a scratch directory outside the repository, so
+  Cargo does not mistake it for part of the workspace.
+- **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
