@@ -184,7 +184,7 @@ the completed concurrent, larger-than-memory engine.
   [0023](0023-bf-tree-io-perf.md).
 - [x] Agree on plan 0010's circular buffer, unsafe-code policy, and stack.
 - [x] Implement and verify the circular buffer stack (plan 0010).
-- [ ] Agree on plan 0011's page changes, mini-page interfaces, and stack.
+- [x] Agree on plan 0011's page changes, mini-page interfaces, and stack.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
