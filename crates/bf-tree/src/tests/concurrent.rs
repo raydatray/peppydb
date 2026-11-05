@@ -281,11 +281,12 @@ fn many_threads_on_one_leaf_range_make_progress() {
 /// leaves.
 #[test]
 fn threads_agree_under_constant_eviction() {
-    for (bytes, percent) in [(1024usize, 10u8), (2048, 100), (1024, 0)] {
+    for (bytes, percent, full) in [(1024usize, 10u8, true), (2048, 100, true), (1024, 0, false)] {
         with_watchdog(Duration::from_secs(120), move || {
             let config = TreeConfig {
                 circular_buffer_bytes: bytes,
                 second_chance_percent: percent,
+                write_load_full_page: full,
                 ..tiny()
             };
             let stop = AtomicBool::new(false);

@@ -157,14 +157,14 @@ fn a_split_loads_the_left_leaf_from_the_store() {
 /// A store that counts reads and syncs and records writes, over any
 /// backend.
 #[derive(Debug)]
-struct Counting {
+pub(super) struct Counting {
     inner: Box<dyn PageStore>,
     io: Io,
 }
 
 /// Shared handles to a [`Counting`] store's counters.
 #[derive(Clone, Debug, Default)]
-struct Io {
+pub(super) struct Io {
     reads: Counter,
     /// The leaf of every store write, in order.
     writes: Writes,
@@ -174,7 +174,7 @@ struct Io {
 impl Io {
     /// Reads and writes since the last call, which resets them. Syncs are
     /// cumulative.
-    fn take(&self) -> (usize, Vec<LeafId>) {
+    pub(super) fn take(&self) -> (usize, Vec<LeafId>) {
         (
             self.reads.swap(0, Ordering::Relaxed),
             std::mem::take(&mut *self.writes.lock().unwrap()),
@@ -219,7 +219,7 @@ impl PageStore for Counting {
 type Counter = Arc<AtomicUsize>;
 type Writes = Arc<Mutex<Vec<LeafId>>>;
 
-fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Io) {
+pub(super) fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Io) {
     let io = Io::default();
     let store = Counting {
         inner: Box::new(MemStore::new(Superblock::from(&config)).unwrap()),

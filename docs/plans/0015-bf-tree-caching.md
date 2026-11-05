@@ -628,7 +628,7 @@ Resolved:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: full pages and write-load promotion.
+- [x] Diff 2: full pages and write-load promotion.
 - [ ] Diff 3: read promotion, split promotion, and deferral.
 - [ ] Diff 4: record and negative caching.
 - [ ] Diff 5: scan promotion.

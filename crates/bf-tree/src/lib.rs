@@ -85,6 +85,9 @@ pub struct TreeConfig {
     /// every access and tombstone almost every freed block. A runtime
     /// setting.
     pub second_chance_percent: u8,
+    /// A write-driven merge keeps the merged page in the circular buffer as
+    /// a full page, if one fits without eviction. A runtime setting.
+    pub write_load_full_page: bool,
 }
 
 /// The default second-chance share, 10 percent, as upstream.
@@ -104,6 +107,7 @@ impl Default for TreeConfig {
             max_value_len: 1024,
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
+            write_load_full_page: true,
         }
     }
 }
@@ -204,6 +208,7 @@ impl From<&Superblock> for TreeConfig {
             max_value_len: superblock.max_value_len,
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
+            write_load_full_page: true,
         }
     }
 }
@@ -316,9 +321,13 @@ impl Tree {
             let Some(mut leaf) = self.leaves.write_if_live(id) else {
                 continue;
             };
-            if let Residency::Mini { .. } = leaf.residency() {
+            match leaf.residency() {
                 // A split's right guard drops before the left guard.
-                with_scratch(|scratch| self.merge_leaf(&mut leaf, scratch).map(drop))?;
+                Residency::Mini { .. } => {
+                    with_scratch(|scratch| self.merge_leaf(&mut leaf, scratch).map(drop))?;
+                }
+                Residency::Full(_) => self.leaves.write_back(&mut leaf)?,
+                Residency::Base => {}
             }
         }
         self.leaves.sync()

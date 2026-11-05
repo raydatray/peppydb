@@ -53,7 +53,7 @@ impl Tree {
             let leaf = self.read_leaf(&cursor)?;
             let noted = self.note(&leaf);
             let next = with_scratch(|scratch| -> Result<_, TreeError> {
-                let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+                let page = self.base_of(&leaf, &mut scratch.page[..n])?;
                 let view = LeafRef {
                     base: page,
                     mini: mini_of(&leaf),
@@ -90,7 +90,7 @@ impl Tree {
         let leaf = self.read_leaf(cursor)?;
         let noted = self.note(&leaf);
         let result = with_scratch(|scratch| {
-            let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
+            let page = self.base_of(&leaf, &mut scratch.page[..n])?;
             let view = LeafRef {
                 base: page,
                 mini: mini_of(&leaf),
@@ -125,11 +125,26 @@ impl Tree {
     }
 }
 
+impl Tree {
+    /// The leaf's base page: its full page if it has one, else the store's
+    /// copy loaded into `buf`.
+    fn base_of<'p>(
+        &self,
+        leaf: &'p impl Locked,
+        buf: &'p mut [u8],
+    ) -> Result<&'p bf_tree_page::Page, TreeError> {
+        match leaf.residency() {
+            Residency::Full(page) => Ok(page),
+            _ => Ok(self.leaves.load_base(leaf, buf)?),
+        }
+    }
+}
+
 /// The leaf's mini-page, if it has one.
 fn mini_of(leaf: &impl Locked) -> Option<&bf_tree_mini_page::MiniPage> {
     match leaf.residency() {
         Residency::Mini { page, .. } => Some(page),
-        Residency::Base => None,
+        Residency::Full(_) | Residency::Base => None,
     }
 }
 

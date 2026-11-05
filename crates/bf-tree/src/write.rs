@@ -2,9 +2,34 @@ use std::sync::atomic::Ordering;
 
 use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
 use super::{Tree, TreeError};
+use bf_tree_circular_buffer::Kind;
 use bf_tree_mini_page::{LeafMut, WriteOutcome};
 use bf_tree_node_id::LeafId;
-use bf_tree_page::{Page, RecordState};
+use bf_tree_page::{Page, PageError, RecordKind, RecordState};
+
+/// Apply one record to a full page, which is the complete leaf: `Insert`
+/// upserts and `Delete` removes; clean kinds change nothing. Returns whether
+/// a byte changed. `PageFull` leaves the page unchanged.
+fn write_full(page: &mut Page, key: &[u8], state: RecordState<'_>) -> Result<bool, PageError> {
+    match state.kind() {
+        RecordKind::Insert => {}
+        RecordKind::Delete => return page.remove(key),
+        RecordKind::Cache | RecordKind::Phantom => {
+            page.check_key(key)?;
+            return Ok(false);
+        }
+    }
+    match page.try_upsert(key, state) {
+        Err(PageError::PageFull) if page.reclaimable_bytes() > 0 => {
+            page.compact();
+            page.try_upsert(key, state)?;
+        }
+        result => {
+            result?;
+        }
+    }
+    Ok(true)
+}
 
 /// The result of one write attempt under the leaf lock.
 enum Attempt {
@@ -59,28 +84,35 @@ impl Tree {
 
     /// One attempt under the owning leaf's lock. When the mini-page is full
     /// at the largest class, merge it into the base page (splitting the leaf
-    /// if needed), then buffer the record into the half that owns the key,
+    /// if needed), keep the merged page as a full page if the configuration
+    /// asks for it, then place the record in the half that owns the key,
     /// under the locks still held. Every guard is dropped before it returns.
     fn write_attempt(&self, key: &[u8], state: RecordState<'_>) -> Result<Attempt, TreeError> {
         self.with_leaf_write(key, |leaf| {
-            let outcome = match self.leaves.buffer(leaf, key, state)? {
+            let outcome = match self.place(leaf, key, state)? {
                 None => return Ok(Attempt::NeedRoom),
                 Some(WriteOutcome::NeedsMerge) => {
-                    let split = with_scratch(|scratch| self.merge_leaf(leaf, scratch))?;
+                    let split = with_scratch(|scratch| {
+                        let split = self.merge_leaf(leaf, scratch)?;
+                        if self.config.write_load_full_page {
+                            self.keep_merged(leaf, scratch);
+                        }
+                        Ok::<_, TreeError>(split)
+                    })?;
                     match split {
                         Some((separator, mut split)) if key >= separator.as_slice() => {
-                            self.leaves.buffer(&mut split.right, key, state)?
+                            self.place(&mut split.right, key, state)?
                         }
-                        _ => self.leaves.buffer(leaf, key, state)?,
+                        _ => self.place(leaf, key, state)?,
                     }
                 }
                 Some(outcome) => Some(outcome),
             };
             match outcome {
-                // The merge is complete; a retry buffers into the owning half.
+                // The merge is complete; a retry places into the owning half.
                 None => Ok(Attempt::NeedRoom),
                 Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => {
-                    // After buffering: a write that grew the mini-page has
+                    // After the write: a write that grew the mini-page has
                     // already moved it to the tail.
                     self.relocate(leaf);
                     Ok(Attempt::Done)
@@ -91,6 +123,42 @@ impl Tree {
                 }
             }
         })
+    }
+
+    /// Place one record in a locked leaf: directly into its full page, or
+    /// buffered in its mini-page. A full page that cannot take the record is
+    /// written back if dirty and released, and the record is buffered.
+    /// `None` if the circular buffer had no room.
+    fn place(
+        &self,
+        leaf: &mut LeafWrite<'_>,
+        key: &[u8],
+        state: RecordState<'_>,
+    ) -> Result<Option<WriteOutcome>, TreeError> {
+        if let Some(page) = leaf.full_mut() {
+            match write_full(page, key, state) {
+                Ok(changed) => {
+                    if changed {
+                        leaf.mark_dirty();
+                    }
+                    return Ok(Some(WriteOutcome::Buffered));
+                }
+                Err(PageError::PageFull) => self.leaves.release_full(leaf)?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.leaves.buffer(leaf, key, state)
+    }
+
+    /// Keep the page that `merge_leaf` just left in `scratch.page` as the
+    /// leaf's full page, if a block fits without eviction.
+    fn keep_merged(&self, leaf: &mut LeafWrite<'_>, scratch: &mut Scratch) {
+        let n = self.config.leaf_capacity;
+        let Ok(mut block) = self.leaves.circular_buffer.alloc(n, Kind::Full, leaf.id()) else {
+            return;
+        };
+        block.as_mut().copy_from_slice(&scratch.page[..n]);
+        leaf.set_full(block, false);
     }
 
     /// Under the exclusive lock of the reachable leaf `leaf`: fold its
