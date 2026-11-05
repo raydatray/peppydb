@@ -1,18 +1,22 @@
-use zerocopy::FromBytes;
+use std::sync::atomic::Ordering;
 
-use super::leaf_map::{Locked, with_scratch};
-use super::read::Path;
+use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
 use super::{Tree, TreeError};
-use bf_tree_inner::{InnerError, InnerNode};
-use bf_tree_node_id::{ChildRef, LeafId};
-use bf_tree_page::{KeyRef, RecordRef, RecordState};
+use bf_tree_node_id::LeafId;
+use bf_tree_page::{KeyRef, Page, RecordRef, RecordState};
+
+/// A completed split, its separator already installed. Holds the new right
+/// leaf's exclusive lock until dropped; drop it before the left leaf's guard.
+pub(super) struct Split<'t> {
+    _right: LeafWrite<'t>,
+}
 
 impl Tree {
     /// Insert `key` with `value`, or replace its current value.
     ///
     /// Rejects an empty key, and keys or values beyond the configured limits,
     /// before touching any node.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), TreeError> {
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
         if value.len() > self.config.max_value_len {
             return Err(TreeError::ValueTooLarge);
@@ -25,7 +29,7 @@ impl Tree {
     ///
     /// Leaves are never merged: an empty leaf keeps its fences and stays
     /// reachable.
-    pub fn remove(&mut self, key: &[u8]) -> Result<(), TreeError> {
+    pub fn remove(&self, key: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
 
         self.write(key, RecordState::Delete)
@@ -34,87 +38,86 @@ impl Tree {
     /// Merge a one-record batch into the leaf that owns `key`: in place if
     /// the rebuilt leaf fits, otherwise split it. A `Delete` removes the key
     /// and never splits.
-    fn write(&mut self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
-        let (leaf, path) = self.locate(key);
+    fn write(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
         let batch = [RecordRef {
             key: KeyRef::from(key),
             state,
         }];
         let n = self.config.leaf_capacity;
-        let separator = {
-            let leaves = &self.leaves;
-            let leaf = leaves.write(leaf)?;
-            with_scratch(|scratch| -> Result<_, TreeError> {
-                let page = leaves.load_base(&leaf, &mut scratch.page[..n])?;
+        self.with_leaf_write(key, |leaf| {
+            with_scratch(|scratch| {
+                let page = self.leaves.load_base(leaf, &mut scratch.page[..n])?;
                 page.check_key(key)?;
                 if page.merge_batch_fits(batch.iter().copied())? {
                     page.merge_batch_in_place(batch.iter().copied())?;
-                    leaves.write_through(&mut [(leaf.id(), &mut scratch.page[..n])])?;
-                    return Ok(None);
+                    return self
+                        .leaves
+                        .write_through(&mut [(leaf.id(), &mut scratch.page[..n])]);
                 }
 
-                let right = leaves.alloc()?;
-                let split = page.merge_batch_split(&mut scratch.right[..n], batch.iter().copied());
-                let separator = match split {
-                    Ok(split) => split.separator,
-                    Err(error) => {
-                        leaves.discard(right)?;
-                        return Err(error.into());
-                    }
-                };
-                let mut pages = [
-                    (leaf.id(), &mut scratch.page[..n]),
-                    (right.id(), &mut scratch.right[..n]),
-                ];
-                if let Err(error) = leaves.write_through(&mut pages) {
-                    leaves.discard(right)?;
-                    return Err(error);
-                }
-                Ok(Some((separator, right.id())))
-            })?
-        };
-
-        match separator {
-            None => Ok(()),
-            Some((separator, right)) => self.propagate(&path, separator, right),
-        }
+                let split = self.split_leaf(leaf.id(), scratch, |page, right| {
+                    Ok(page
+                        .merge_batch_split(right, batch.iter().copied())?
+                        .separator)
+                })?;
+                // The right leaf unlocks before the left one.
+                drop(split);
+                Ok(())
+            })
+        })
     }
 
-    /// Insert `separator -> right` into the parent recorded on `path`,
-    /// splitting full parents in turn. When the path is exhausted, grow a
-    /// new root over the old one.
-    fn propagate(
-        &mut self,
-        path: &Path,
-        mut separator: Vec<u8>,
-        right: LeafId,
-    ) -> Result<(), TreeError> {
-        let mut child = ChildRef::Leaf(right);
-
-        for &(parent, _) in path.iter().rev() {
-            match self.inner_mut(parent).try_insert(&separator, child) {
-                Err(InnerError::NodeFull) => {}
-                result => return Ok(result?),
+    /// Split the reachable leaf `left`, whose caller holds its exclusive
+    /// lock and whose merged contents in `scratch.page` do not fit: allocate
+    /// and lock a fresh right leaf, let `merge` split into `scratch.right`,
+    /// write both pages through in one call, and install the separator.
+    /// Returns the right leaf still locked.
+    ///
+    /// On an error after the allocation, the fresh slot is freed: a written
+    /// but unreachable right page would overlap its neighbour at the next
+    /// open.
+    pub(super) fn split_leaf(
+        &self,
+        left: LeafId,
+        scratch: &mut Scratch,
+        merge: impl FnOnce(&mut Page, &mut [u8]) -> Result<Vec<u8>, TreeError>,
+    ) -> Result<Split<'_>, TreeError> {
+        let n = self.config.leaf_capacity;
+        let right = self.leaves.alloc()?;
+        let result = (|| {
+            let page = zerocopy::FromBytes::mut_from_bytes(&mut scratch.page[..n])
+                .expect("scratch holds a page");
+            let separator = merge(page, &mut scratch.right[..n])?;
+            let mut pages = [
+                (left, &mut scratch.page[..n]),
+                (right.id(), &mut scratch.right[..n]),
+            ];
+            self.leaves.write_through(&mut pages)?;
+            Ok(separator)
+        })();
+        let separator = match result {
+            Ok(separator) => separator,
+            Err(error) => {
+                self.leaves.discard(right)?;
+                return Err(error);
             }
+        };
 
-            let right = self.inner.alloc();
-            let (left_bytes, right_bytes) = self.inner.pair_mut(parent, right);
+        self.install(left, separator, right.id())?;
+        Ok(Split { _right: right })
+    }
 
-            let node =
-                InnerNode::mut_from_bytes(left_bytes).expect("inner buffers hold a node header");
-
-            separator = node
-                .split_with_insert(right_bytes, &separator, child)?
-                .separator;
-
-            child = ChildRef::Inner(right);
-        }
-
-        let root = self.inner.alloc();
-        let node = InnerNode::init(self.inner.get_mut(root), self.root)?;
-        node.try_insert(&separator, child)?;
-        self.root = ChildRef::Inner(root);
-
+    /// Insert `separator -> right` above `left`. The caller holds the
+    /// exclusive locks of both leaves. The parent is found by descending with
+    /// the separator: it is a key of the right half, so it lies in the left
+    /// leaf's old range, which cannot change while the caller holds `left`.
+    /// The version is bumped before the caller releases `left`.
+    fn install(&self, left: LeafId, separator: Vec<u8>, right: LeafId) -> Result<(), TreeError> {
+        let mut inner = self.inner.write();
+        let (leaf, path) = inner.locate(&separator);
+        debug_assert_eq!(leaf, left, "the separator lies in the left leaf's range");
+        inner.propagate(&path, separator, right)?;
+        self.inner_version.fetch_add(1, Ordering::Release);
         Ok(())
     }
 }

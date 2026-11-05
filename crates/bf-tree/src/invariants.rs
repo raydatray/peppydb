@@ -1,4 +1,7 @@
+use zerocopy::FromBytes;
+
 use super::Tree;
+use bf_tree_inner::InnerNode;
 use bf_tree_node_id::{ChildRef, InnerId, LeafId};
 use bf_tree_page::{Fence, Fences, KeyRef, Page};
 
@@ -32,18 +35,30 @@ impl Tree {
     /// 4. Every inner node has strictly increasing separators, at least one.
     /// 5. Every allocated node is reachable exactly once. Freed leaf slots
     ///    are neither reachable nor referenced.
+    ///
+    /// It copies the routing layer under the inner read lock, releases it,
+    /// then locks leaves one at a time, so it never holds the inner lock while
+    /// waiting for a leaf. It needs quiescence for a meaningful result.
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
+        let (root, nodes) = {
+            let inner = self.inner.read();
+            let nodes: Vec<Vec<u8>> = (0..inner.len())
+                .map(|index| inner.get(InnerId::from_index(index)).to_vec())
+                .collect();
+            (inner.root, nodes)
+        };
         let mut checker = Checker {
             tree: self,
+            nodes: &nodes,
             leaf_depth: None,
-            seen_inner: vec![false; self.inner_count()],
+            seen_inner: vec![false; nodes.len()],
             seen_leaves: vec![false; self.leaves.len()],
         };
         let unbounded = Fences {
             lower: Fence::Unbounded,
             upper: Fence::Unbounded,
         };
-        checker.visit(self.root, 0, unbounded)?;
+        checker.visit(root, 0, unbounded)?;
 
         let unreached_inner = checker
             .seen_inner
@@ -66,6 +81,8 @@ impl Tree {
 
 struct Checker<'t> {
     tree: &'t Tree,
+    /// A copy of the inner nodes, indexed by `InnerId`.
+    nodes: &'t [Vec<u8>],
     leaf_depth: Option<usize>,
     seen_inner: Vec<bool>,
     seen_leaves: Vec<bool>,
@@ -146,7 +163,8 @@ impl<'t> Checker<'t> {
         depth: usize,
         interval: Fences<KeyRef<'t>>,
     ) -> Result<(), InvariantError> {
-        let node = self.tree.inner(id);
+        let node = InnerNode::ref_from_bytes(&self.nodes[id.index()])
+            .expect("inner buffers hold a node header");
         if node.is_empty() {
             return Err(InvariantError::EmptyInner(id));
         }

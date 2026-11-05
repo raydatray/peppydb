@@ -1,10 +1,13 @@
 use super::*;
+use crate::store::Path;
+use bf_tree_node_id::InnerId;
 
 mod config;
 mod disk;
 mod model;
 mod open;
 mod read;
+mod route;
 mod scan;
 mod store;
 mod write;
@@ -32,11 +35,29 @@ fn value_of(key: &[u8]) -> Vec<u8> {
 fn empty_tree() -> Tree {
     let config = config(256, 128, 8, 16);
     let store = MemStore::new(Superblock::from(&config)).unwrap();
-    Tree {
+    Tree::assemble(
         config,
-        root: ChildRef::Leaf(LeafId::new(0).unwrap()),
-        inner: InnerStore::new(config.inner_capacity),
-        leaves: LeafMap::new(Box::new(store), []),
+        InnerStore::new(
+            config.inner_capacity,
+            ChildRef::Leaf(LeafId::new(0).unwrap()),
+        ),
+        LeafMap::new(Box::new(store), []),
+    )
+}
+
+/// Test aids over the routing layer.
+impl Tree {
+    /// Route `key` to its leaf and record the path, ignoring concurrency.
+    fn locate(&self, key: &[u8]) -> (LeafId, Path) {
+        self.inner.read().locate(key)
+    }
+
+    fn root(&self) -> ChildRef {
+        self.inner.read().root
+    }
+
+    fn set_root(&mut self, root: ChildRef) {
+        self.inner.get_mut().root = root;
     }
 }
 
@@ -66,8 +87,9 @@ fn add_leaf(
 }
 
 fn add_inner(tree: &mut Tree, first: ChildRef, entries: &[(&[u8], ChildRef)]) -> ChildRef {
-    let id = tree.inner.alloc();
-    let node = InnerNode::init(tree.inner.get_mut(id), first).unwrap();
+    let inner = tree.inner.get_mut();
+    let id = inner.alloc();
+    let node = InnerNode::init(inner.get_mut(id), first).unwrap();
     for &(key, child) in entries {
         node.try_insert(key, child).unwrap();
     }
@@ -80,7 +102,8 @@ fn two_level() -> Tree {
     let l0 = add_leaf(&mut tree, None, Some(b"f"), &[b"a", b"c", b"e"]);
     let l1 = add_leaf(&mut tree, Some(b"f"), Some(b"m"), &[b"f", b"h"]);
     let l2 = add_leaf(&mut tree, Some(b"m"), None, &[b"m", b"q", b"z"]);
-    tree.root = add_inner(&mut tree, l0, &[(b"f", l1), (b"m", l2)]);
+    let root = add_inner(&mut tree, l0, &[(b"f", l1), (b"m", l2)]);
+    tree.set_root(root);
     tree
 }
 
@@ -93,6 +116,7 @@ fn three_level() -> Tree {
     let l3 = add_leaf(&mut tree, Some(b"t"), None, &[b"t", b"zz"]);
     let left = add_inner(&mut tree, l0, &[(b"f", l1)]);
     let right = add_inner(&mut tree, l2, &[(b"t", l3)]);
-    tree.root = add_inner(&mut tree, left, &[(b"m", right)]);
+    let root = add_inner(&mut tree, left, &[(b"m", right)]);
+    tree.set_root(root);
     tree
 }

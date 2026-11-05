@@ -134,7 +134,7 @@ fn disk_baseline() {
     println!("FileStore::open:       {elapsed:.1?}");
 
     let started = Instant::now();
-    let mut tree = Tree::open(Box::new(store)).unwrap();
+    let tree = Tree::open(Box::new(store)).unwrap();
     let elapsed = started.elapsed();
     println!(
         "Tree::open:            {elapsed:.1?}  {:.2} GiB/s read+validate, height {}, {} inner nodes",

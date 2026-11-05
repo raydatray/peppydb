@@ -109,15 +109,14 @@ fn tile_reports_every_inconsistency() {
 /// invariant checker can compare fences with the routing intervals.
 fn built(n: u32, inner_capacity: usize) -> Tree {
     let config = config(256, inner_capacity, 8, 16);
-    let mut tree = Tree {
+    let mut tree = Tree::assemble(
         config,
-        root: ChildRef::Leaf(leaf(0)),
-        inner: InnerStore::new(config.inner_capacity),
-        leaves: LeafMap::new(
+        InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaf(0))),
+        LeafMap::new(
             Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
             [],
         ),
-    };
+    );
     let leaves = tile(tiling(n)).unwrap();
     for _ in 0..n {
         tree.leaves.alloc_id().unwrap();
@@ -134,14 +133,15 @@ fn built(n: u32, inner_capacity: usize) -> Tree {
         }
         tree.leaves.overwrite(bounds.id, &mut bytes).unwrap();
     }
-    tree.root = build_inner(&mut tree.inner, &leaves).unwrap();
+    let inner = tree.inner.get_mut();
+    inner.root = build_inner(inner, &leaves).unwrap();
     tree
 }
 
 #[test]
 fn single_leaf_builds_a_leaf_root() {
     let tree = built(1, 64);
-    assert_eq!(tree.root, ChildRef::Leaf(leaf(0)));
+    assert_eq!(tree.root(), ChildRef::Leaf(leaf(0)));
     assert_eq!(tree.inner_count(), 0);
     assert_eq!(tree.height(), 1);
     assert_eq!(tree.check_invariants(), Ok(()));
@@ -192,7 +192,7 @@ fn routing_from_the_built_tree_matches_a_linear_fence_search() {
 
 #[test]
 fn built_trees_accept_further_writes_and_splits() {
-    let mut tree = built(20, 64);
+    let tree = built(20, 64);
     let height = tree.height();
     for i in 0..200u32 {
         tree.put(&(i * 11).to_be_bytes(), &[2; 16]).unwrap();
@@ -207,12 +207,13 @@ fn a_trailing_single_child_borrows_from_its_neighbour() {
     // Four children per node: 5 leaves would leave the last node with one
     // child, so the split becomes 3 + 2.
     let tree = built(5, 64);
-    let ChildRef::Inner(root) = tree.root else {
+    let inner = tree.inner.read();
+    let ChildRef::Inner(root) = inner.root else {
         panic!("root is inner");
     };
-    let children: Vec<_> = (0..tree.inner(root).child_count())
-        .map(|index| match tree.inner(root).child_at(index).unwrap() {
-            ChildRef::Inner(id) => tree.inner(id).child_count(),
+    let children: Vec<_> = (0..inner.node(root).child_count())
+        .map(|index| match inner.node(root).child_at(index).unwrap() {
+            ChildRef::Inner(id) => inner.node(id).child_count(),
             ChildRef::Leaf(_) => panic!("leaves sit below the second level"),
         })
         .collect();

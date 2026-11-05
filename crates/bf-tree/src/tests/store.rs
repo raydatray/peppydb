@@ -34,7 +34,7 @@ fn a_new_tree_stores_its_one_leaf_at_once() {
 
 #[test]
 fn a_fresh_map_over_the_store_serves_every_leaf() {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..200u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
@@ -46,12 +46,11 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
     // Map the unflushed store afresh, keeping the inner nodes: the store
     // already holds every page.
     let store = tree.leaves.into_store();
-    let mut tree = Tree {
-        config: tree.config,
-        root: tree.root,
-        inner: tree.inner,
-        leaves: LeafMap::new(store, (0..leaves).map(|_| false)),
-    };
+    let tree = Tree::assemble(
+        tree.config,
+        tree.inner.into_inner(),
+        LeafMap::new(store, (0..leaves).map(|_| false)),
+    );
     let key = 7u32.to_be_bytes();
     assert_eq!(tree.get(&key), Ok(Some(b"v".to_vec())));
     assert_eq!(
@@ -82,12 +81,11 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
     );
 
     let store = tree.leaves.into_store();
-    let tree = Tree {
-        config: tree.config,
-        root: tree.root,
-        inner: tree.inner,
-        leaves: LeafMap::new(store, [true]),
-    };
+    let tree = Tree::assemble(
+        tree.config,
+        tree.inner.into_inner(),
+        LeafMap::new(store, [true]),
+    );
     assert_eq!(
         tree.leaves.page_copy(leaf(0)).err(),
         Some(TreeError::UnknownLeaf(leaf(0)))
@@ -112,12 +110,11 @@ fn corrupt_stored_leaves_are_reported_on_load() {
     bytes[2..4].copy_from_slice(&512u16.to_le_bytes());
     store.write(id, &bytes).unwrap();
 
-    let tree = Tree {
+    let tree = Tree::assemble(
         config,
-        root: ChildRef::Leaf(id),
-        inner: InnerStore::new(config.inner_capacity),
-        leaves: LeafMap::new(Box::new(store), [false]),
-    };
+        InnerStore::new(config.inner_capacity, ChildRef::Leaf(id)),
+        LeafMap::new(Box::new(store), [false]),
+    );
     assert_eq!(
         tree.get(b"a"),
         Err(TreeError::CorruptLeaf {
@@ -129,18 +126,17 @@ fn corrupt_stored_leaves_are_reported_on_load() {
 
 #[test]
 fn a_split_loads_the_left_leaf_from_the_store() {
-    let mut tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     for i in 0..7u32 {
         tree.put(&i.to_be_bytes(), &[1; 16]).unwrap();
     }
     // Map the store of the full leaf afresh, then force a split.
     let store = tree.leaves.into_store();
-    let mut tree = Tree {
-        config: tree.config,
-        root: tree.root,
-        inner: tree.inner,
-        leaves: LeafMap::new(store, [false]),
-    };
+    let tree = Tree::assemble(
+        tree.config,
+        tree.inner.into_inner(),
+        LeafMap::new(store, [false]),
+    );
 
     tree.put(&7u32.to_be_bytes(), &[1; 16]).unwrap();
     tree.put(&8u32.to_be_bytes(), &[1; 16]).unwrap();
@@ -258,7 +254,7 @@ fn create_checks_the_store_against_the_configuration() {
 fn puts_write_through_and_flush_only_syncs() {
     let config = config(256, 128, 8, 16);
     let (store, writes, syncs) = counting(config);
-    let mut tree = Tree::create(config, store).unwrap();
+    let tree = Tree::create(config, store).unwrap();
     assert_eq!(*writes.lock().unwrap(), [leaf(0)], "create writes the root");
     writes.lock().unwrap().clear();
 
@@ -307,7 +303,7 @@ fn a_dropped_tree_loses_no_write() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tree.bf");
     let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
-    let mut tree = Tree::create(config, Box::new(store)).unwrap();
+    let tree = Tree::create(config, Box::new(store)).unwrap();
     for i in 0..300u32 {
         tree.put(&i.to_be_bytes(), &i.to_le_bytes()).unwrap();
     }

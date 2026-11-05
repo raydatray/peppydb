@@ -95,7 +95,8 @@ fn checker_catches_a_mismatched_fence() {
     let l0 = add_leaf(&mut tree, None, Some(b"f"), &[]);
     // The parent routes `[g, +inf)` here, but the leaf claims `[f, +inf)`.
     let l1 = add_leaf(&mut tree, Some(b"f"), None, &[]);
-    tree.root = add_inner(&mut tree, l0, &[(b"g", l1)]);
+    let root = add_inner(&mut tree, l0, &[(b"g", l1)]);
+    tree.set_root(root);
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::FenceMismatch(leaf(0)))
@@ -108,7 +109,7 @@ fn checker_catches_a_mismatched_fence() {
     let mut bytes = vec![0; tree.config.leaf_capacity];
     Page::init(&mut bytes).unwrap();
     tree.leaves.overwrite(id, &mut bytes).unwrap();
-    tree.root = ChildRef::Leaf(id);
+    tree.set_root(ChildRef::Leaf(id));
     assert_eq!(
         tree.leaves.page_copy(id).err(),
         Some(TreeError::CorruptLeaf {
@@ -136,7 +137,8 @@ fn checker_catches_uneven_depth() {
     let x = add_inner(&mut tree, l2, &[(b"p", l3)]);
     let z = add_inner(&mut tree, l4, &[(b"t", l5)]);
     let right = add_inner(&mut tree, x, &[(b"s", z)]);
-    tree.root = add_inner(&mut tree, left, &[(b"m", right)]);
+    let root = add_inner(&mut tree, left, &[(b"m", right)]);
+    tree.set_root(root);
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::UnevenDepth(leaf(2)))
@@ -165,13 +167,15 @@ fn checker_catches_unreachable_duplicate_and_dangling_nodes() {
 
     let mut tree = empty_tree();
     let l0 = add_leaf(&mut tree, None, Some(b"f"), &[]);
-    tree.root = add_inner(&mut tree, l0, &[(b"f", l0)]);
+    let root = add_inner(&mut tree, l0, &[(b"f", l0)]);
+    tree.set_root(root);
     assert_eq!(tree.check_invariants(), Err(InvariantError::Duplicate(l0)));
 
     let mut tree = empty_tree();
     let l0 = add_leaf(&mut tree, None, Some(b"f"), &[]);
     let missing = ChildRef::Leaf(leaf(7));
-    tree.root = add_inner(&mut tree, l0, &[(b"f", missing)]);
+    let root = add_inner(&mut tree, l0, &[(b"f", missing)]);
+    tree.set_root(root);
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::Dangling(missing))
@@ -182,7 +186,8 @@ fn checker_catches_unreachable_duplicate_and_dangling_nodes() {
 fn checker_catches_empty_inner_nodes_and_stray_records() {
     let mut tree = empty_tree();
     let l0 = add_leaf(&mut tree, None, None, &[]);
-    tree.root = add_inner(&mut tree, l0, &[]);
+    let root = add_inner(&mut tree, l0, &[]);
+    tree.set_root(root);
     assert_eq!(
         tree.check_invariants(),
         Err(InvariantError::EmptyInner(inner(0)))
@@ -193,7 +198,8 @@ fn checker_catches_empty_inner_nodes_and_stray_records() {
     let l0 = add_leaf(&mut tree, None, Some(b"a"), &[]);
     let l1 = add_leaf(&mut tree, Some(b"a"), Some(b"z"), &[b"y"]);
     let l2 = add_leaf(&mut tree, Some(b"x"), None, &[]);
-    tree.root = add_inner(&mut tree, l0, &[(b"a", l1), (b"x", l2)]);
+    let root = add_inner(&mut tree, l0, &[(b"a", l1), (b"x", l2)]);
+    tree.set_root(root);
     let mut bytes = tree.leaves.page_copy(leaf(1)).unwrap();
     let offset = usize::from(u16::from_le_bytes([bytes[40], bytes[41]]));
     assert_eq!(bytes[offset], b'z');
