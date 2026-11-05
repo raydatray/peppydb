@@ -173,3 +173,21 @@ fn maximum_records_split_at_every_level() {
         assert!(tree.height() >= 2, "{config:?}");
     }
 }
+
+#[test]
+fn removing_from_a_full_leaf_never_splits() {
+    let mut tree = small();
+    let mut model = Model::new();
+    for i in 0..7 {
+        put(&mut tree, &mut model, &key(i), &[1; 16]);
+    }
+    put(&mut tree, &mut model, &key(7), &[]);
+    assert_eq!(tree.leaf(LeafId::new(0).unwrap()).unwrap().free_bytes(), 0);
+
+    for i in [3, 9, 0] {
+        tree.remove(&key(i)).unwrap();
+        model.remove(key(i).as_slice());
+        assert_eq!((tree.leaf_count(), tree.height()), (1, 1));
+    }
+    assert_model(&tree, &model);
+}
