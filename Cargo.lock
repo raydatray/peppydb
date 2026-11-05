@@ -34,6 +34,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bf-tree-mini-page"
+version = "0.1.0"
+dependencies = [
+ "bf-tree-circular-buffer",
+ "bf-tree-node-id",
+ "bf-tree-page",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
 name = "bf-tree-node-id"
 version = "0.1.0"
 
