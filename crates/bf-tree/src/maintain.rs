@@ -13,11 +13,18 @@ use super::leaf_map::{LeafWrite, Locked, Residency, Scratch, with_scratch};
 use super::{Tree, TreeError};
 use bf_tree_circular_buffer::{Claim, Kind, Victim};
 use bf_tree_mini_page::Mini;
+use bf_tree_mini_page::WriteOutcome;
 use bf_tree_node_id::LeafId;
+use bf_tree_page::RecordState;
 
 /// Cache maintenance that a read under the shared lock found worth doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Hint {
+    /// Leave a cached record (`Some`) or a phantom (`None`) for the key.
+    Cache {
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    },
     /// Keep the whole page in the circular buffer.
     Promote,
 }
@@ -72,15 +79,22 @@ impl Tree {
         }
     }
 
-    /// The hint for a read that the base page served: roll the read rate.
-    pub(super) fn read_hint(&self) -> Option<Hint> {
-        if !self.policy.roll(self.config.read_promotion_percent) {
-            return None;
-        }
+    /// Whether a read that the base page serves leaves something behind:
+    /// rolls the read rate.
+    pub(super) fn roll_read(&self) -> bool {
+        self.policy.roll(self.config.read_promotion_percent)
+    }
+
+    /// The hint of a promoting read of `key`, which found `value` in the
+    /// base page: cache the record or the absence, or keep the page.
+    pub(super) fn read_hint(&self, key: &[u8], value: Option<&[u8]>) -> Hint {
         if self.config.read_record_cache {
-            None // Record caching arrives with `Hint::Cache`.
+            Hint::Cache {
+                key: key.to_vec(),
+                value: value.map(<[u8]>::to_vec),
+            }
         } else {
-            Some(Hint::Promote)
+            Hint::Promote
         }
     }
 
@@ -119,6 +133,27 @@ impl Tree {
     ) -> Result<Promotion, TreeError> {
         match hint {
             Hint::Promote => with_scratch(|scratch| self.promote(leaf, scratch)),
+            Hint::Cache { key, value } => self.cache_fill(leaf, key, value.as_deref()),
+        }
+    }
+
+    /// Buffer a clean record for `key` in the locked leaf's mini-page. Never
+    /// evicts and never merges: a full mini-page turns the fill into a
+    /// promotion. A dirty record for the key wins (`SkippedDirty`).
+    fn cache_fill<'t>(
+        &'t self,
+        leaf: &mut LeafWrite<'t>,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<Promotion, TreeError> {
+        if matches!(leaf.residency(), Residency::Full(_)) {
+            return Ok(Promotion::Promoted);
+        }
+        let state = value.map_or(RecordState::Phantom, RecordState::Cache);
+        match self.leaves.buffer(leaf, key, state)? {
+            None => Ok(Promotion::NoRoom),
+            Some(WriteOutcome::NeedsMerge) => with_scratch(|scratch| self.promote(leaf, scratch)),
+            Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => Ok(Promotion::Promoted),
         }
     }
 
@@ -138,7 +173,7 @@ impl Tree {
             Residency::Mini { .. } if !buffer.has_room(n) => return Ok(Promotion::NoRoom),
             // The merged left page is left in scratch; a split's right guard
             // drops here.
-            Residency::Mini { .. } => drop(self.merge_leaf(leaf, scratch)?),
+            Residency::Mini { .. } => drop(self.merge_keeping_page(leaf, scratch)?),
             Residency::Base => {
                 self.leaves.load_base(leaf, &mut scratch.page[..n])?;
             }
@@ -158,6 +193,7 @@ impl Tree {
     fn finish_deferred(&self, id: LeafId, version: u32, hint: &Hint) -> Result<(), TreeError> {
         let need = match hint {
             Hint::Promote => self.config.leaf_capacity,
+            Hint::Cache { .. } => self.leaves.classes.as_slice()[0],
         };
         let buffer = &self.leaves.circular_buffer;
         while !buffer.has_room(need) {
@@ -196,11 +232,7 @@ impl Tree {
             buffer.retire(victim);
             return true;
         }
-        let clean = match leaf.residency() {
-            Residency::Mini { page, .. } => page.dirty().next().is_none(),
-            Residency::Full(_) | Residency::Base => false,
-        };
-        if !clean {
+        if !has_clean_mini(&leaf) {
             drop(leaf);
             buffer.unclaim(victim);
             return false;
@@ -248,5 +280,14 @@ impl Tree {
         mini.copy_into(&mut fresh, true);
         leaf.put_mini(Some(fresh));
         buffer.free(mini.block);
+    }
+}
+
+/// Whether the locked leaf has a mini-page that holds no dirty record: one
+/// that only repeats the base page, so freeing it loses nothing.
+pub(super) fn has_clean_mini(leaf: &impl Locked) -> bool {
+    match leaf.residency() {
+        Residency::Mini { page, .. } => page.dirty().next().is_none(),
+        Residency::Full(_) | Residency::Base => false,
     }
 }

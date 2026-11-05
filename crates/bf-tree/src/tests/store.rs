@@ -229,7 +229,7 @@ pub(super) fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Io) {
 }
 
 /// Every stored page, read back through the store.
-fn stored_pages(tree: &Tree) -> Vec<Vec<u8>> {
+pub(super) fn stored_pages(tree: &Tree) -> Vec<Vec<u8>> {
     let store = tree.store();
     (0..store.slots())
         .map(|raw| {

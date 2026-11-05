@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
+use super::maintain::has_clean_mini;
 use super::{Tree, TreeError};
 use bf_tree_circular_buffer::Kind;
 use bf_tree_mini_page::{LeafMut, WriteOutcome};
@@ -93,10 +94,11 @@ impl Tree {
                 None => return Ok(Attempt::NeedRoom),
                 Some(WriteOutcome::NeedsMerge) => {
                     let split = with_scratch(|scratch| {
-                        let split = self.merge_leaf(leaf, scratch)?;
-                        if self.config.write_load_full_page {
-                            self.keep_merged(leaf, scratch);
+                        if !self.config.write_load_full_page {
+                            return self.merge_leaf(leaf, scratch);
                         }
+                        let split = self.merge_keeping_page(leaf, scratch)?;
+                        self.keep_merged(leaf, scratch);
                         Ok::<_, TreeError>(split)
                     })?;
                     match split {
@@ -161,6 +163,23 @@ impl Tree {
         leaf.set_full(block, false);
     }
 
+    /// [`Tree::merge_leaf`], then make sure `scratch.page` holds the leaf's
+    /// page, for a caller that keeps it as a full page: a clean mini-page
+    /// merges with no I/O, so the base page is loaded then.
+    pub(super) fn merge_keeping_page<'t>(
+        &'t self,
+        leaf: &mut LeafWrite<'t>,
+        scratch: &mut Scratch,
+    ) -> Result<Option<(Vec<u8>, Split<'t>)>, TreeError> {
+        let n = self.config.leaf_capacity;
+        let clean = has_clean_mini(leaf);
+        let split = self.merge_leaf(leaf, scratch)?;
+        if clean {
+            self.leaves.load_base(leaf, &mut scratch.page[..n])?;
+        }
+        Ok(split)
+    }
+
     /// Under the exclusive lock of the reachable leaf `leaf`: fold its
     /// mini-page into the base page, in place or by a split, write the
     /// result through, and free the block. Returns the right half of a
@@ -169,15 +188,23 @@ impl Tree {
     ///
     /// The block is freed only after the pages are written and the separator
     /// installed, so an error leaves every buffered record in place.
+    ///
+    /// A mini-page with no dirty record only repeats the base page: its
+    /// block is freed with no I/O, and `scratch` is left untouched.
     pub(super) fn merge_leaf<'t>(
         &'t self,
         leaf: &mut LeafWrite<'t>,
         scratch: &mut Scratch,
     ) -> Result<Option<(Vec<u8>, Split<'t>)>, TreeError> {
         let n = self.config.leaf_capacity;
+        let clean = has_clean_mini(leaf);
         let Some(mini) = leaf.take_mini() else {
             return Ok(None);
         };
+        if clean {
+            self.leaves.circular_buffer.free(mini.block);
+            return Ok(None);
+        }
         let result = (|| {
             let base = self.leaves.load_base(leaf, &mut scratch.page[..n])?;
             let mut merge = LeafMut {
