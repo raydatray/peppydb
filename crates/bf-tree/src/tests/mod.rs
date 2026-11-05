@@ -11,6 +11,7 @@ mod full;
 mod model;
 mod open;
 mod overlay;
+mod promote;
 mod read;
 mod route;
 mod scan;
@@ -37,6 +38,10 @@ fn config(
         // Off by default in tests, which assert residency and store writes;
         // tests of full pages and the policy models turn it on.
         write_load_full_page: false,
+        // Off in tests unless they test caching, for the same reason.
+        read_promotion_percent: 0,
+        read_record_cache: true,
+        policy_seed: 0x5eed,
     }
 }
 

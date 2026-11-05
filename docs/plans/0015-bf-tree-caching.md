@@ -629,7 +629,7 @@ Resolved:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: full pages and write-load promotion.
-- [ ] Diff 3: read promotion, split promotion, and deferral.
+- [x] Diff 3: read promotion, split promotion, and deferral.
 - [ ] Diff 4: record and negative caching.
 - [ ] Diff 5: scan promotion.
 - [ ] Diff 6: policy models.
@@ -638,7 +638,15 @@ Resolved:
 
 ## Discoveries and plan changes
 
-None yet.
+- **A promotion from `Base` reads the base page twice.** The read loads
+  the page into scratch and answers from it, but the hint is applied
+  only after the shared lock is released, so `promote` loads the page
+  again. Each page promotion therefore costs one extra base-page read.
+  This is accepted for the MVP. A later change can carry the loaded
+  page into the hint.
+- **Hints are a struct, not only an enum.** `Noted` records the leaf
+  version, an `aging` flag (the second chance), and an optional `Hint`,
+  so one read can both relocate a block and promote a page.
 
 ## Agent notes
 

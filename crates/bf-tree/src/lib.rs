@@ -52,6 +52,7 @@ mod invariants;
 mod leaf_map;
 mod maintain;
 mod open;
+mod policy;
 mod read;
 mod scan;
 mod store;
@@ -60,6 +61,7 @@ mod write;
 #[cfg(test)]
 pub use invariants::InvariantError;
 use leaf_map::{LeafMap, Locked, Residency, with_scratch};
+use policy::Policy;
 pub use scan::Scan;
 use store::InnerStore;
 
@@ -88,6 +90,14 @@ pub struct TreeConfig {
     /// A write-driven merge keeps the merged page in the circular buffer as
     /// a full page, if one fits without eviction. A runtime setting.
     pub write_load_full_page: bool,
+    /// Chance, in percent, that a read served by the base page leaves
+    /// something behind: a cached record, or the whole page. Default 20.
+    pub read_promotion_percent: u8,
+    /// A promoting read caches the record (`true`) or keeps the whole page.
+    /// Default `true`.
+    pub read_record_cache: bool,
+    /// Seed of the promotion rolls.
+    pub policy_seed: u64,
 }
 
 /// The default second-chance share, 10 percent, as upstream.
@@ -108,6 +118,9 @@ impl Default for TreeConfig {
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
             write_load_full_page: true,
+            read_promotion_percent: 20,
+            read_record_cache: true,
+            policy_seed: 0x5eed,
         }
     }
 }
@@ -146,6 +159,11 @@ impl TreeConfig {
             ));
         }
 
+        if self.read_promotion_percent > 100 {
+            return Err(TreeError::InvalidConfig(
+                "read_promotion_percent must be at most 100",
+            ));
+        }
         if self.second_chance_percent > 100 {
             return Err(TreeError::InvalidConfig(
                 "second_chance_percent must be at most 100",
@@ -209,6 +227,9 @@ impl From<&Superblock> for TreeConfig {
             circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
             second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
             write_load_full_page: true,
+            read_promotion_percent: 20,
+            read_record_cache: true,
+            policy_seed: 0x5eed,
         }
     }
 }
@@ -265,6 +286,7 @@ pub struct Tree {
     /// Bumped, under the inner write lock, by every structural change.
     inner_version: AtomicU64,
     leaves: LeafMap,
+    policy: Policy,
 }
 
 // Compile-time check: a tree and its scans can be shared between threads.
@@ -394,6 +416,7 @@ impl Tree {
             inner: RwLock::new(inner),
             inner_version: AtomicU64::new(0),
             leaves,
+            policy: Policy::new(config.policy_seed),
         }
     }
 

@@ -10,6 +10,7 @@ fn defaults_validate() {
         TreeConfig {
             circular_buffer_bytes: 32 << 20,
             write_load_full_page: true,
+            read_promotion_percent: 20,
             ..config(4096, 4096, 64, 1024)
         }
     );
