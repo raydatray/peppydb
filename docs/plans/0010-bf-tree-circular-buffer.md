@@ -756,6 +756,17 @@ asserts `used() <= capacity()`. At the end every block is returned,
   through Buck2 in a new `@build/mode/miri`, with a nightly toolchain that
   Buck2 downloads, instead of a rustup wrapper script. New diff 3; the
   stack is seven diffs again.
+- **Diff 3: Miri needs a second execution platform.** Selecting the nightly
+  toolchain on the target platform's `mode-miri` constraint is not enough:
+  Buck2 builds procedural macros for the execution platform, which keeps the
+  default configuration, so `thiserror-impl` was built by stable `rustc` and
+  rejected by the nightly (E0786). `build/platforms.bzl` now registers the
+  host and the host with `mode-miri`, and the Rust toolchain requires the
+  latter in Miri mode (`exec_compatible_with`). Other modes still take the
+  plain host first. The Miri sysroot genrule builds in a scratch directory
+  under `/tmp`, because under `buck-out` Cargo treated the generated sysroot
+  package as part of the repository's workspace. Pins live in
+  `build/toolchains/miri_nightly.bzl`, written by `tools/update-miri`.
 
 ## Agent notes
 
@@ -789,10 +800,9 @@ asserts `used() <= capacity()`. At the end every block is returned,
   (`miri_driver`, `miri_flags`, `miri_rustc_flags`, `nightly_features`),
   `rust/build.bzl` (`miri_command`, `Emit("miri")`), `rust/rust_binary.bzl`
   (`[miri]` sub-target, `miri_interpreted`). Check that `toolchains//:rust`
-  can switch on the `mode-miri` constraint (an `alias` with `select`, or a
-  `select` in the toolchain rule's attributes), and that the downloaded
-  `miri` binary finds `librustc_driver` in the merged directory on macOS
-  and Linux. Only hosts in the pinned list run Miri.
+  switches on `mode-miri` through `select`s in its attributes, and that
+  procedural macros follow through the Miri execution platform (see
+  "Discoveries and plan changes"). Only hosts in the pinned list run Miri.
 - **Upstream reference:** `src/circular_buffer/mod.rs` (`alloc`,
   `dealloc_inner`, `evict_one`, `ptr_is_copy_on_access`),
   `src/circular_buffer/freelist.rs`, `src/config.rs` (`cb_size_byte`

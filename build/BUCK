@@ -1,6 +1,10 @@
 # Build configuration: the build_mode setting and the platforms that use it.
 
-# Debug or release. The Rust toolchain selects its optimization flags on this.
+load("@prelude//platforms:defs.bzl", "host_configuration")
+load(":platforms.bzl", "peppy_execution_platform", "peppy_execution_platforms")
+
+# Debug, release, or Miri. The Rust toolchain selects its optimization flags
+# and, for Miri, a nightly compiler on this.
 constraint_setting(name = "build_mode")
 
 constraint_value(
@@ -15,12 +19,29 @@ constraint_value(
     visibility = ["PUBLIC"],
 )
 
+# Debug flags with the pinned nightly toolchain and its Miri driver. Every
+# rust_test gets a `[miri]` sub-target in this mode.
+constraint_value(
+    name = "mode-miri",
+    constraint_setting = ":build_mode",
+    visibility = ["PUBLIC"],
+)
+
 # The host platform with release flags: `buck2 ... @build/mode/release`.
 # Release outputs get their own configuration, so they are cached separately
 # from debug outputs.
 platform(
     name = "release",
     constraint_values = [":mode-release"],
+    deps = ["prelude//platforms:default"],
+    visibility = ["PUBLIC"],
+)
+
+# The host platform with the nightly toolchain and Miri:
+# `buck2 test @build/mode/miri '<test>[miri]'`.
+platform(
+    name = "miri",
+    constraint_values = [":mode-miri"],
     deps = ["prelude//platforms:default"],
     visibility = ["PUBLIC"],
 )
@@ -34,5 +55,23 @@ platform(
         "config//os/constraints:linux",
     ],
     deps = ["prelude//platforms:default"],
+    visibility = ["PUBLIC"],
+)
+
+# Execution platforms (see platforms.bzl). The plain host comes first, so every
+# mode except Miri builds its tools exactly as with the prelude's default.
+peppy_execution_platform(
+    name = "exec-host",
+    constraints = [host_configuration.cpu, host_configuration.os],
+)
+
+peppy_execution_platform(
+    name = "exec-host-miri",
+    constraints = [host_configuration.cpu, host_configuration.os, ":mode-miri"],
+)
+
+peppy_execution_platforms(
+    name = "execution-platforms",
+    platforms = [":exec-host", ":exec-host-miri"],
     visibility = ["PUBLIC"],
 )
