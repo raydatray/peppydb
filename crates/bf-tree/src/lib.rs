@@ -6,23 +6,23 @@
 //! access and kept resident.
 //!
 //! ```
-//! use bf_tree::{Tree, TreeConfig, UpsertOutcome};
+//! use bf_tree::{Tree, TreeConfig};
 //!
 //! let mut tree = Tree::in_memory(TreeConfig::default()).unwrap();
 //! for i in 0..1000u32 {
 //!     tree.put(&i.to_be_bytes(), b"value").unwrap();
 //! }
-//! assert_eq!(tree.put(&7u32.to_be_bytes(), b"new"), Ok(UpsertOutcome::Replaced));
-//! assert_eq!(tree.get(&7u32.to_be_bytes()), Ok(Some(b"new".as_slice())));
-//! assert_eq!(tree.remove(&8u32.to_be_bytes()), Ok(true));
+//! tree.put(&7u32.to_be_bytes(), b"new").unwrap();
+//! assert_eq!(tree.get(&7u32.to_be_bytes()), Ok(Some(b"new".to_vec())));
+//! tree.remove(&8u32.to_be_bytes()).unwrap();
 //! assert_eq!(tree.get(&8u32.to_be_bytes()), Ok(None));
 //! assert!(tree.height() > 1);
 //!
-//! // Scans yield `Result`s because moving to the next leaf may load it.
+//! // Scans yield owned `Result`s, because moving to the next leaf may load it.
 //! let keys: Vec<_> = tree
 //!     .range(Some(&5u32.to_be_bytes()), Some(&10u32.to_be_bytes()))
 //!     .unwrap()
-//!     .map(|record| record.map(|record| record.key.to_vec()))
+//!     .map(|record| record.map(|(key, _)| key))
 //!     .collect::<Result<_, _>>()
 //!     .unwrap();
 //! assert_eq!(keys.len(), 4);
@@ -39,7 +39,7 @@ use bf_tree_page::{Fence, Fences, Page};
 // that callers need no other dependency. Other items stay internal.
 pub use bf_tree_inner::InnerError;
 pub use bf_tree_node_id::LeafId;
-pub use bf_tree_page::{KeyRef, PageError, RecordKind, RecordRef, RecordState, UpsertOutcome};
+pub use bf_tree_page::PageError;
 pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
 
 #[cfg(test)]

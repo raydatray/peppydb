@@ -1,26 +1,27 @@
 use std::iter::FusedIterator;
+use std::ops::ControlFlow;
 
 use super::{Tree, TreeError};
-use bf_tree_page::Iter;
-use bf_tree_page::{Fence, RecordRef};
+use bf_tree_page::{Fence, RecordState};
+
+/// One leaf's live records in range, copied, and where the scan continues.
+type LeafRecords = (Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>);
 
 impl Tree {
     /// Iterate over records with keys in `[start, end)` in key order.
     ///
     /// `None` is unbounded; an empty slice is a finite bound. Equal bounds
     /// yield nothing; reversed bounds return [`TreeError::InvalidRange`].
+    /// Items are owned copies; [`Tree::scan_with`] is the zero-copy form.
     pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Result<Scan<'_>, TreeError> {
-        if let (Some(start), Some(end)) = (start, end)
-            && start > end
-        {
-            return Err(TreeError::InvalidRange);
-        }
+        check_range(start, end)?;
 
-        let (records, next) = self.scan_leaf(start.unwrap_or_default(), start, end)?;
+        let cursor = start.unwrap_or_default().to_vec();
+        let (records, next) = self.scan_leaf(&cursor, end)?;
 
         Ok(Scan {
             tree: self,
-            records,
+            records: records.into_iter(),
             next,
             end: end.map(<[u8]>::to_vec),
         })
@@ -31,43 +32,93 @@ impl Tree {
         self.range(None, None).expect("unbounded ranges are valid")
     }
 
-    /// Borrow the records in `[start, end)` from the leaf containing `key`,
-    /// and that leaf's finite upper fence if the scan continues past it.
-    fn scan_leaf(
+    /// Call `visit` with each record in `[start, end)` in key order, until it
+    /// returns `Break`. Keys and values are borrowed only for the call. The
+    /// visitor runs while the scan reads a leaf, so it must not call back
+    /// into the tree.
+    pub fn scan_with(
         &self,
-        key: &[u8],
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> Result<(Iter<'_>, Option<Vec<u8>>), TreeError> {
-        let page = self.leaf(self.find_leaf(key))?;
-        let records = page.range(start, end)?;
-        let next = match page.fences().expect("tree leaves are fenced").upper {
-            Fence::Key(upper) if end.is_none_or(|end| upper.cmp_bytes(end).is_lt()) => {
-                Some(upper.to_vec())
+        mut visit: impl FnMut(&[u8], &[u8]) -> ControlFlow<()>,
+    ) -> Result<(), TreeError> {
+        check_range(start, end)?;
+
+        let mut cursor = start.unwrap_or_default().to_vec();
+        let mut key = Vec::new();
+        loop {
+            let page = self.leaf(self.find_leaf(&cursor))?;
+            for record in page.range(Some(&cursor), end)? {
+                let RecordState::Insert(value) = record.state else {
+                    continue;
+                };
+                key.clear();
+                key.extend(record.key.bytes());
+                if visit(&key, value).is_break() {
+                    return Ok(());
+                }
             }
-            _ => None,
-        };
+            match next_leaf(page.fences().expect("tree leaves are fenced").upper, end) {
+                Some(next) => cursor = next,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Copy the live records in `[cursor, end)` from the leaf containing
+    /// `cursor`, and that leaf's finite upper fence if the scan continues
+    /// past it. The lower bound applies to every leaf, not only the first.
+    fn scan_leaf(&self, cursor: &[u8], end: Option<&[u8]>) -> Result<LeafRecords, TreeError> {
+        let page = self.leaf(self.find_leaf(cursor))?;
+        let records = page
+            .range(Some(cursor), end)?
+            .filter_map(|record| match record.state {
+                RecordState::Insert(value) => Some((record.key.to_vec(), value.to_vec())),
+                _ => None,
+            })
+            .collect();
+        let next = next_leaf(page.fences().expect("tree leaves are fenced").upper, end);
 
         Ok((records, next))
     }
 }
 
-/// Records of a [`Tree`] in key order, borrowed from its leaves.
+fn check_range(start: Option<&[u8]>, end: Option<&[u8]>) -> Result<(), TreeError> {
+    if let (Some(start), Some(end)) = (start, end)
+        && start > end
+    {
+        return Err(TreeError::InvalidRange);
+    }
+    Ok(())
+}
+
+/// Where a scan continues after a leaf with upper fence `upper`: its key if
+/// it is finite and below `end`.
+fn next_leaf(upper: Fence<bf_tree_page::KeyRef<'_>>, end: Option<&[u8]>) -> Option<Vec<u8>> {
+    match upper {
+        Fence::Key(upper) if end.is_none_or(|end| upper.cmp_bytes(end).is_lt()) => {
+            Some(upper.to_vec())
+        }
+        _ => None,
+    }
+}
+
+/// Records of a [`Tree`] in key order, as owned key-value pairs.
 ///
-/// Created by [`Tree::range`] or [`Tree::iter`]. Moving to the next leaf may
-/// load it from the page store, so items are `Result`s; after an error the
-/// scan ends.
+/// Created by [`Tree::range`] or [`Tree::iter`]. The scan copies one leaf's
+/// records at a time. Moving to the next leaf may load it from the page
+/// store, so items are `Result`s; after an error the scan ends.
 #[derive(Clone, Debug)]
 pub struct Scan<'t> {
     tree: &'t Tree,
-    records: Iter<'t>,
+    records: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
     /// The current leaf's finite upper fence, if the scan continues past it.
     next: Option<Vec<u8>>,
     end: Option<Vec<u8>>,
 }
 
-impl<'t> Iterator for Scan<'t> {
-    type Item = Result<RecordRef<'t>, TreeError>;
+impl Iterator for Scan<'_> {
+    type Item = Result<(Vec<u8>, Vec<u8>), TreeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -76,8 +127,8 @@ impl<'t> Iterator for Scan<'t> {
             }
 
             let next = self.next.take()?;
-            match self.tree.scan_leaf(&next, None, self.end.as_deref()) {
-                Ok((records, next)) => (self.records, self.next) = (records, next),
+            match self.tree.scan_leaf(&next, self.end.as_deref()) {
+                Ok((records, next)) => (self.records, self.next) = (records.into_iter(), next),
                 Err(error) => return Some(Err(error)),
             }
         }

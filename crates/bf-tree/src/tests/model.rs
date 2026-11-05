@@ -3,7 +3,6 @@ use std::ops::Bound;
 use std::time::Instant;
 
 use super::*;
-use bf_tree_page::UpsertOutcome;
 use bf_tree_store::FileStore;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -122,18 +121,16 @@ fn run_on(
                     _ => rng.below(config.max_value_len + 1),
                 };
                 let value = vec![step as u8; value_len];
-                let expected = match model.insert(key.clone(), value.clone()) {
-                    Some(_) => UpsertOutcome::Replaced,
-                    None => UpsertOutcome::Inserted,
-                };
-                assert_eq!(tree.put(&key, &value), Ok(expected), "{context}");
+                model.insert(key.clone(), value.clone());
+                assert_eq!(tree.put(&key, &value), Ok(()), "{context}");
             }
             5..=6 => {
-                let expected = model.remove(&key).is_some();
-                assert_eq!(tree.remove(&key), Ok(expected), "{context}");
+                model.remove(&key);
+                assert_eq!(tree.remove(&key), Ok(()), "{context}");
+                assert_eq!(tree.get(&key), Ok(None), "{context}");
             }
             7 => {
-                let expected = model.get(&key).map(Vec::as_slice);
+                let expected = model.get(&key).cloned();
                 assert_eq!(tree.get(&key), Ok(expected), "{context}");
             }
             _ => {

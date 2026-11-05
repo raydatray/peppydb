@@ -42,11 +42,7 @@ fn empty_tree() -> Tree {
 
 /// Collect a scan's records as owned key/value pairs; any error panics.
 fn collect(scan: Scan<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
-    scan.map(|record| {
-        let record = record.unwrap();
-        (record.key.to_vec(), record.state.value().unwrap().to_vec())
-    })
-    .collect()
+    scan.map(Result::unwrap).collect()
 }
 
 fn add_leaf(

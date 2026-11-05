@@ -8,17 +8,29 @@ use bf_tree_page::RecordState;
 pub(super) type Path = Vec<(InnerId, usize)>;
 
 impl Tree {
-    /// Return the value stored for `key`, or `None`.
+    /// Return a copy of the value stored for `key`, or `None`.
     ///
     /// Rejects an empty key and a key longer than the configured maximum.
-    pub fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, TreeError> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TreeError> {
+        self.get_with(key, |value| value.map(<[u8]>::to_vec))
+    }
+
+    /// Call `f` exactly once with the value stored for `key`, or `None`, and
+    /// return its result. The value is borrowed only for the call, so `f` is
+    /// the zero-copy form of [`Tree::get`]. `f` must not call back into the
+    /// tree.
+    pub fn get_with<R>(
+        &self,
+        key: &[u8],
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, TreeError> {
         self.check_key(key)?;
 
         let record = self.leaf(self.find_leaf(key))?.get(key)?;
-        Ok(record.and_then(|record| match record.state {
+        Ok(f(record.and_then(|record| match record.state {
             RecordState::Insert(value) => Some(value),
             _ => None,
-        }))
+        })))
     }
 
     /// Number of levels, counting the leaf level: a single-leaf tree has

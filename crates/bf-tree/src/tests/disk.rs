@@ -21,7 +21,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::*;
-use bf_tree_page::UpsertOutcome;
 use bf_tree_store::FileStore;
 use zerocopy::IntoBytes;
 
@@ -184,8 +183,7 @@ fn disk_baseline() {
     let mut latencies = Latencies(Vec::with_capacity(puts));
     for _ in 0..puts {
         let key = (rng.next() % records).to_be_bytes();
-        let outcome = latencies.time(|| tree.put(&key, &value).unwrap());
-        assert_eq!(outcome, UpsertOutcome::Replaced);
+        latencies.time(|| tree.put(&key, &value).unwrap());
     }
     latencies.report("put, replace random", "ops");
 

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use bf_tree_page::UpsertOutcome;
 use zerocopy::IntoBytes;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -10,7 +9,7 @@ type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 fn assert_model(tree: &Tree, model: &Model) {
     assert_eq!(tree.check_invariants(), Ok(()));
     for (key, value) in model {
-        assert_eq!(tree.get(key), Ok(Some(value.as_slice())), "{key:?}");
+        assert_eq!(tree.get(key), Ok(Some(value.clone())), "{key:?}");
     }
     let records: usize = (0..tree.leaf_count())
         .map(|index| tree.leaf(LeafId::new(index as u64).unwrap()).unwrap().len())
@@ -19,11 +18,9 @@ fn assert_model(tree: &Tree, model: &Model) {
 }
 
 fn put(tree: &mut Tree, model: &mut Model, key: &[u8], value: &[u8]) {
-    let expected = match model.insert(key.to_vec(), value.to_vec()) {
-        Some(_) => UpsertOutcome::Replaced,
-        None => UpsertOutcome::Inserted,
-    };
-    assert_eq!(tree.put(key, value), Ok(expected), "{key:?}");
+    model.insert(key.to_vec(), value.to_vec());
+    assert_eq!(tree.put(key, value), Ok(()), "{key:?}");
+    assert_eq!(tree.get(key), Ok(Some(value.to_vec())), "{key:?}");
 }
 
 /// Small nodes reach several levels after a few hundred records.
@@ -102,8 +99,10 @@ fn removal_empties_leaves_without_merging() {
     let leaves = tree.leaf_count();
     let height = tree.height();
     for i in (0..300).step_by(2).chain((1..300).step_by(2)) {
-        assert_eq!(tree.remove(&key(i)), Ok(true));
-        assert_eq!(tree.remove(&key(i)), Ok(false));
+        assert_eq!(tree.get(&key(i)), Ok(Some(vec![7; 4])));
+        assert_eq!(tree.remove(&key(i)), Ok(()));
+        assert_eq!(tree.get(&key(i)), Ok(None));
+        assert_eq!(tree.remove(&key(i)), Ok(()));
         model.remove(key(i).as_slice());
         assert_eq!(tree.check_invariants(), Ok(()));
     }
@@ -137,9 +136,11 @@ fn limits_are_checked_before_touching_nodes() {
         tree.leaf(LeafId::new(0).unwrap()).unwrap().as_bytes(),
         snapshot
     );
-    assert_eq!(tree.put(&[1; 8], &[1; 16]), Ok(UpsertOutcome::Inserted));
-    assert_eq!(tree.put(b"b", b""), Ok(UpsertOutcome::Inserted));
-    assert_eq!(tree.get(b"b"), Ok(Some(b"".as_slice())));
+    assert_eq!(tree.get(b"b"), Ok(None));
+    assert_eq!(tree.put(&[1; 8], &[1; 16]), Ok(()));
+    assert_eq!(tree.get(&[1; 8]), Ok(Some(vec![1; 16])));
+    assert_eq!(tree.put(b"b", b""), Ok(()));
+    assert_eq!(tree.get(b"b"), Ok(Some(Vec::new())));
 }
 
 #[test]

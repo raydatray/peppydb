@@ -52,7 +52,7 @@ fn reads_do_not_dirty_and_writes_do() {
     assert_eq!(tree.dirty_leaves(), 0);
 
     let key = 7u32.to_be_bytes();
-    assert_eq!(tree.get(&key), Ok(Some(b"v".as_slice())));
+    assert_eq!(tree.get(&key), Ok(Some(b"v".to_vec())));
     assert_eq!(tree.resident_leaves(), 1);
     assert_eq!(tree.dirty_leaves(), 0);
     assert_eq!(
@@ -278,7 +278,7 @@ fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
     assert_eq!(stored_pages(&tree), resident_pages(&tree));
 
     // A clean tree writes nothing; reads keep it clean.
-    assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(Some(b"v".as_slice())));
+    assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(Some(b"v".to_vec())));
     tree.flush().unwrap();
     assert_eq!(
         (
@@ -295,9 +295,10 @@ fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
     assert_eq!(writes.load(Ordering::Relaxed), leaves + 1);
     assert_eq!(stored_pages(&tree), resident_pages(&tree));
 
-    assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(true));
+    assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(()));
+    assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(None));
     assert_eq!(tree.dirty_leaves(), 1);
-    assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(false));
+    assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(()));
     tree.flush().unwrap();
     assert_eq!(stored_pages(&tree), resident_pages(&tree));
     assert_eq!(tree.check_invariants(), Ok(()));
