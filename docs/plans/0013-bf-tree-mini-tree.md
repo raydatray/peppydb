@@ -1,6 +1,6 @@
 # 0013: Mini-pages in the shared tree
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Mini-pages](../design/bf-tree-mini-page.md),
 [circular buffer](../design/bf-tree-circular-buffer.md),
@@ -399,8 +399,9 @@ machinery is tested on hand-built mini-pages before any write creates one.
 - **Core changes:** `TreeConfig::circular_buffer_bytes`; `validate` derives
   `SizeClasses` and checks the budget (the `7K + 3V` rule stays until diff
   4); `From` impls; `Tree::open_with`; BUCK: add
-  `//crates/bf-tree-mini-page:bf-tree-mini-page` to `crates/bf-tree/BUCK`;
-  `tools/autocargo`.
+  `//crates/bf-tree-mini-page:bf-tree-mini-page` and (as implemented, see
+  Discoveries) `//crates/bf-tree-circular-buffer:bf-tree-circular-buffer`
+  to `crates/bf-tree/BUCK`; `tools/autocargo`.
 - **Verification:** defaults derive the expected ladder; budgets that are
   not powers of two or are too small are rejected; `open_with` rejects a
   layout mismatch and accepts a different budget.
@@ -414,9 +415,9 @@ machinery is tested on hand-built mini-pages before any write creates one.
   `buffered_leaves`, `circular_buffer_used`; `check_invariants` checks each
   mini-page (backing leaf, keys within the leaf's fences, `refs` present
   exactly with `block`); a crate-private test helper that installs a
-  mini-page; BUCK: add
-  `//crates/bf-tree-circular-buffer:bf-tree-circular-buffer`;
-  `tools/autocargo`.
+  mini-page. (As implemented, the circular-buffer dependency landed in
+  diff 2, and `free_mini` and the `refs` check were not added; see
+  Discoveries.)
 - **Verification:** hand-built mini-pages with inserts and tombstones:
   reads hit, miss, and see absence correctly; scans merge; `flush` merges in
   place and by split, then `buffered_leaves() == 0` and reopen equals the
@@ -482,15 +483,113 @@ interim `CircularBufferFull` until plan 0014 adds eviction.
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: configuration.
-- [ ] Diff 3: reads, scans, flush merges.
-- [ ] Diff 4: blind writes.
-- [ ] Diff 5: blind-write and circular-buffer tests.
-- [ ] Diff 6: design documents and roadmap.
+- [x] Diff 2: configuration.
+- [x] Diff 3: reads, scans, flush merges.
+- [x] Diff 4: blind writes.
+- [x] Diff 5: blind-write and circular-buffer tests.
+- [x] Diff 6: design documents and roadmap.
+
+## Verification outcomes (2026-11-05)
+
+- **Workspace checks.** `tools/fmt.sh`, `tools/clippy.sh`,
+  `tools/buck2 test //crates/... //bin/... //go/...` (17 Buck2 targets
+  pass), `tools/autocargo --check`, `tools/gobuckify-remote --check`,
+  `cargo test --workspace --locked` (274 tests pass), and
+  `(cd go && go vet ./... && go test ./...)` all pass.
+- **Blind writes** (`tests/store.rs`, a counting store over `MemStore`):
+  - A put to a leaf whose mini-page has room does 0 store reads and
+    0 writes. A put to a leaf without a mini-page also does no I/O.
+  - A merge in place does 1 read and 1 write. A merge split does 1 read and
+    2 writes, the new right leaf first and then the left leaf.
+  - A get of a buffered key or tombstone does 0 reads. A get of an
+    unbuffered key does 1 read.
+  - `flush` does one read per buffered leaf, one or two writes per merge,
+    and one sync. A flush with nothing buffered only syncs.
+- **Reads and flush** (`tests/overlay.rs`): reads hit, miss, and see
+  absence correctly on hand-built mini-pages; `flush` merges in place and by
+  split; after `flush`, `buffered_leaves() == 0` and the reopened tree
+  equals the oracle; `into_store` without `flush` loses buffered records.
+- **Circular buffer** (`tests/buffered.rs`, `tests/model.rs`): a full
+  circular buffer returns `CircularBufferFull` and leaves contents and
+  `circular_buffer_used()` unchanged, and the write succeeds after `flush`.
+  The model asserts `circular_buffer_used() <= circular_buffer_bytes` after
+  every step.
+- **Concurrency.** The concurrent model with 2, 4, and 8 threads passes
+  with mini-pages. A test with four writers on a `FileStore` racing a
+  looping `flush` keeps every write after a final `flush` and a reopen.
+  Repeated runs: 20 of 20 in release and 10 of 10 in debug builds passed.
+- **Admission sweep** (`tests/config.rs`): over `L = 128..=4096` in steps
+  of 64, `K` in {1, 8, 9, 16, 64, 255}, and `V` in {0, 16, 64, 256, 1024,
+  1800} (2268 configurations), both rules accept 1337, neither accepts 766,
+  only `7K + 3V` accepts 1 (`L = 192, K = 9, V = 16`), and only the ladder
+  accepts 164. `usize::MAX` limits are rejected without overflow.
+- **Baselines** (release, Apple M4 Pro, one million random 8-byte keys with
+  16-byte values, default configuration except a 1 GiB circular buffer):
+
+| step | before 0012 | after 0012 | after 0013 |
+| --- | --- | --- | --- |
+| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s |
+| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s |
+| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s |
+| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s |
+| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms (merges 8192 leaves) |
+| `FileStore` open | not recorded | not recorded | ~31 ms |
+| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s |
+| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s |
+
+Writes recovered as planned. Reads still load base pages; plan 0015
+recovers them with caching. The in-memory get rate fell from 1.96 to
+1.28 M ops/s. In that benchmark the keys are still buffered in mini-pages
+when the gets run, so most gets hit a mini-page; the cause of the slowdown
+was not investigated.
 
 ## Discoveries and plan changes
 
-None yet.
+- **`validate` order changed.** Removing the `7K + 3V` rule exposed an
+  integer overflow: the inner-node rule's sums overflowed for huge limits
+  such as `usize::MAX`, which the old leaf rule had rejected first. The
+  ladder check (`SizeClasses::derive`, with checked arithmetic) now runs
+  before the inner-node rule. The order is: capacities, `K >= 1`, ladder,
+  inner-node rule, circular-buffer budget. A test covers `usize::MAX`.
+- **The circular-buffer dependency moved to diff 2.** `validate` checks
+  the budget with the buffer's own rule by calling `CircularBuffer::new`,
+  so diff 2 needed the crate.
+- **`LeafMap::for_config`.** It builds the map, its `SizeClasses`, and its
+  `CircularBuffer` (classes: ladder plus `L`, second-chance share 0) from a
+  validated configuration. `Tree::create`, `Tree::in_memory`, and
+  `Tree::open_with` all use it.
+- **`merge_leaf` takes the mini-page out of the entry.** Instead of
+  borrowing it through `residency()`, it calls `take_mini`, merges, and
+  frees `mini.block` after the pages are written and the separator is
+  installed. On any error it calls `put_mini` to put the mini-page back.
+- **`free_mini` was not needed.** `merge_leaf` frees the block directly
+  with `circular_buffer.free(mini.block)`.
+- **`merge_leaf` returns the separator beside the split.** Its result is
+  `Option<(Vec<u8>, Split)>`; `Split` holds only the right leaf's guard.
+- **The placement after a merge panics on failure.** A fresh mini-page
+  takes any admitted record, so any outcome other than `Buffered` is
+  `unreachable!`, not `Err(PageFull)`. An allocation failure there still
+  returns `CircularBufferFull`.
+- **Test helper `install_mini`** applies records into an existing
+  mini-page, or allocates one at the smallest fitting class. Fixtures use
+  it to build buffered leaves, including clean records.
+- **`check_invariants` does not check that `refs` is present exactly with
+  `block`.** `take_mini` asserts that pairing with `unreachable!`, and
+  `residency()` reports `Base` if only one is present. The checker checks
+  each mini-page's validity, missing fences, backing leaf, class capacity,
+  and key range.
+- **The routing guard moves to merge time for writes.** Blind writes load
+  no base page, so they cannot call `Page::check_key`. A misrouted record
+  is caught when its leaf merges: the merge's batch check rejects a key
+  outside the base's fences with `KeyOutOfRange`. With the version bump
+  removed, the concurrent model still fails 10 of 10 runs this way.
+- **Dropping a tree with buffered mini-pages leaked the circular buffer's
+  slab; fixed.** Found in review: only `into_store` freed the blocks, so a
+  plain drop left them outstanding and the circular buffer leaked its slab
+  by design. `LeafMap` now has a `Drop` that returns every block first, and
+  a test checks that the metrics balance.
+- **`open_with` compares the superblock before it validates the
+  configuration.**
 
 ## Agent notes
 

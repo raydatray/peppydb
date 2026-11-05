@@ -5,8 +5,9 @@ pages, use. It follows the BF-Tree paper's §4 and the upstream
 implementation. Its crate, `bf-tree-circular-buffer`, knows nothing about
 pages: it hands out blocks of bytes. [Plan 0010](../plans/0010-bf-tree-circular-buffer.md)
 built it; [plan 0011](../plans/0011-bf-tree-mini-page.md) allocates
-mini-pages from it, and [plan 0014](../plans/0014-bf-tree-eviction.md)
-evicts from it.
+mini-pages from it, [plan 0013](../plans/0013-bf-tree-mini-tree.md) puts it
+into the tree, and [plan 0014](../plans/0014-bf-tree-eviction.md) evicts
+from it.
 
 ## Shape
 
@@ -116,6 +117,39 @@ checks before it mutates. Plan 0012 moves the mutex onto `bf-tree-sync`.
 
 `in_second_chance` reads a relaxed copy of the tail without the mutex. A
 stale value only shifts which block gets a second chance.
+
+## Use in the tree
+
+Since [plan 0013](../plans/0013-bf-tree-mini-tree.md), each tree has one
+circular buffer, owned by its `LeafMap`
+([leaf storage](bf-tree-leaf-store.md)):
+
+- **Budget.** `TreeConfig::circular_buffer_bytes` sets the capacity
+  (default `DEFAULT_CIRCULAR_BUFFER_BYTES`, 32 MiB). It is a runtime
+  setting: the superblock does not record it, and `Tree::open_with` takes it
+  for an existing store. `TreeConfig::validate` builds a buffer with
+  `CircularBuffer::new` to check the budget, so construction cannot fail on
+  a validated configuration. The second-chance share is 0 until plan 0014.
+- **Classes.** The buffer's classes are the
+  [mini-page ladder](bf-tree-mini-page.md#size-classes-and-the-admission-rule)
+  followed by the leaf page size `L`. The `L` class is for full pages in
+  [plan 0015](../plans/0015-bf-tree-caching.md) and has no user yet.
+- **Ownership.** A mini-page block is owned by its leaf. The leaf's entry
+  holds the `Block` handle, and the block's owner is the leaf's ID.
+  `LeafMap::buffer` is the only call site that allocates mini-page blocks,
+  and it runs under the leaf's X lock. Growth frees the old block there
+  too. `Tree::merge_leaf` frees the block under the same X lock after the
+  merged pages are written. `LeafMap::into_store` frees every remaining
+  block.
+- **Locking.** The buffer's mutex is innermost in the
+  [lock order](bf-tree-concurrency.md#lock-order): a thread takes it under
+  a leaf's X lock and never waits for a leaf lock while it holds it.
+- **A full buffer.** A failed allocation is interim
+  `TreeError::CircularBufferFull`: the write did not happen, and the caller
+  can `flush` to free blocks and retry. (If the failure follows a merge, the
+  merge stays done; see the [mini-page design](bf-tree-mini-page.md#in-the-tree).) A freed block makes room only when
+  the head passes it; a single-threaded `flush` frees every block, so the
+  head passes them all. Plan 0014 replaces the error with eviction.
 
 ## Measurements
 

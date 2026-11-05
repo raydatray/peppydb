@@ -5,9 +5,11 @@ leaf mapping table, the `LeafMap`. This document records the store boundary,
 the file layout, how the tree locks, loads, writes, and reopens leaves, and
 what the design does and does not guarantee about durability. It is the
 paper's §3.3 base-leaf and mapping-table layer, with one reader-writer lock
-per leaf, and without mini-pages or eviction. The
-[concurrency design](bf-tree-concurrency.md) records the lock order and the
-protocol that uses these locks.
+per leaf. Each entry can also hold the leaf's
+[mini-page](bf-tree-mini-page.md) in the
+[circular buffer](bf-tree-circular-buffer.md); eviction does not exist yet.
+The [concurrency design](bf-tree-concurrency.md) records the lock order and
+the protocol that uses these locks.
 
 ## Shape
 
@@ -15,17 +17,21 @@ protocol that uses these locks.
 flowchart LR
     Tree --> Inner["RwLock&lt;InnerStore&gt;: derived, in memory"]
     Tree --> Map["LeafMap"]
-    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed flag"]
+    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs"]
+    Map --> CB["CircularBuffer: mini-page blocks"]
+    Map --> C["SizeClasses"]
     Map --> PS["Box&lt;dyn PageStore&gt;"]
+    E -. "block bytes: MiniPage" .-> CB
     PS --> Mem["MemStore"]
     PS --> File["FileStore: superblock page + slots"]
     Tree -. per thread .-> S["Scratch: page, right"]
 ```
 
 Inner nodes stay in memory and are rebuilt on open. Only leaves cross the
-store boundary. No leaf page stays in memory between operations: each
-access loads the base page into a thread-local scratch buffer, and each
-write goes to the store at once.
+store boundary. No base page stays in memory between operations: each
+access that needs one loads it into a thread-local scratch buffer. Writes
+buffer in mini-pages, which stay in memory until a merge writes them to the
+store.
 
 ## `PageStore`
 
@@ -86,6 +92,13 @@ disagrees with the requested configuration, and `Tree::open` takes its
 configuration from the superblock, so a reopened tree never admits a key or
 value that the stored pages could not split.
 
+The superblock records only layout settings. `circular_buffer_bytes` is a
+runtime setting: `From<&TreeConfig> for Superblock` ignores it, and
+`From<&Superblock> for TreeConfig` fills in `DEFAULT_CIRCULAR_BUFFER_BYTES`.
+`Tree::open_with(config, store)` opens a store with chosen runtime settings
+and requires `Superblock::from(&config) == *store.superblock()`.
+`Tree::open(store)` is `open_with` with the superblock's configuration.
+
 ### Backends
 
 `MemStore` is the fast test backend and the store behind `Tree::in_memory`.
@@ -107,23 +120,35 @@ to distinct slots.
 ## `LeafMap`
 
 The mapping table gives each `LeafId` a lock and resolves it to the leaf's
-base page in the store.
+base page in the store and its mini-page, if any, in the circular buffer.
 
 ```rust
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
     entries: Table<RwLock<LeafEntry>>,
+    circular_buffer: CircularBuffer,
+    classes: SizeClasses,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct LeafEntry {
     /// The slot holds no page.
     freed: bool,
+    /// A circular-buffer block holding this leaf's mini-page.
+    block: Option<Block>,
+    /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
+    refs: Option<Box<RefBits>>,
 }
 
-pub(super) struct LeafRead<'m>  { id: LeafId, _entry: RwLockReadGuard<'m, LeafEntry> }
-pub(super) struct LeafWrite<'m> { id: LeafId, _entry: RwLockWriteGuard<'m, LeafEntry> }
+pub(super) struct LeafRead<'m>  { id: LeafId, entry: RwLockReadGuard<'m, LeafEntry> }
+pub(super) struct LeafWrite<'m> { id: LeafId, entry: RwLockWriteGuard<'m, LeafEntry> }
 ```
+
+`LeafMap::for_config` builds the map, its circular buffer, and its size
+classes from a validated `TreeConfig`. The
+[mini-page design](bf-tree-mini-page.md#in-the-tree) records the entry's
+`Residency` view, `take_mini` and `put_mini`, and `LeafMap::buffer`, the
+only place that allocates mini-page blocks.
 
 ### Locked entries
 
@@ -131,8 +156,10 @@ Entries are dense and indexed by the ID. They live in a `Table` from
 [`bf-tree-sync`](bf-tree-concurrency.md#bf-tree-sync), so lookups take no
 lock and the table grows while other threads read it. Each entry is a
 `RwLock<LeafEntry>`: the paper's per-leaf reader-writer lock (§3.3). The
-lock covers the entry and the leaf's base page in the store. Every base
-write happens under X, so a base page read under S or X is consistent.
+lock covers the entry, the leaf's mini-page bytes, and the leaf's base page
+in the store. Every base write and every mini-page change happens under X,
+so a leaf read under S or X is consistent. (Readers set reference bits
+under S through atomics.)
 
 - `read(id)` takes S and `write(id)` takes X. Both return `UnknownLeaf` for
   an ID beyond the table or a freed slot.
@@ -142,17 +169,21 @@ write happens under X, so a base page read under S or X is consistent.
 - `discard(leaf)` returns a fresh slot to the store and then marks its
   entry freed, so a failed free leaves the entry live. A split that fails
   after `alloc` uses it.
-- `LeafEntry` holds only `freed` today. Later plans add fields (`block` and
-  `refs` in plan 0013, `version` in plan 0014, `dirty` in plan 0015). A test
-  requires `size_of::<RwLock<LeafEntry>>() <= 64`.
+- `LeafEntry` holds `freed`, `block`, and `refs`
+  ([plan 0013](../plans/0013-bf-tree-mini-tree.md)). Later plans add fields
+  (`version` in plan 0014, `dirty` in plan 0015). A test requires
+  `size_of::<RwLock<LeafEntry>>() <= 64`.
+- `ids()` yields `0..len()` at the time of the call; `write_if_live(id)`
+  X-locks a live slot or returns `None`. `flush` walks leaves by ID with
+  them.
 
-This is upstream's `PageTable` row of `RwLock<PageLocation>` without the
-`Mini` variant and the circular-buffer pointer.
+This is upstream's `PageTable` row of `RwLock<PageLocation>`: `block` plays
+the role of the `Mini` variant's circular-buffer pointer.
 
 ### Scratch
 
-There are no resident copies. Each access loads the base page into a
-per-thread scratch buffer:
+There are no resident base-page copies. Each access that needs the base
+page loads it into a per-thread scratch buffer:
 
 ```rust
 pub(super) const MAX_PAGE: usize = 4096; // the largest legal page
@@ -211,17 +242,20 @@ impl Tree {
     pub fn in_memory(config: TreeConfig) -> Result<Self, TreeError>;   // MemStore; not durable
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError>;
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError>;
-    pub fn flush(&self) -> Result<(), TreeError>;               // store.sync()
-    pub fn into_store(self) -> Box<dyn PageStore>;              // close; nothing written is lost
+    pub fn open_with(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError>;
+    pub fn flush(&self) -> Result<(), TreeError>;               // merge every mini-page, then sync
+    pub fn into_store(self) -> Box<dyn PageStore>;              // close; buffered records are lost
     pub fn leaf_count(&self) -> usize;                          // slots, live or freed
+    pub fn buffered_leaves(&self) -> usize;                     // leaves holding a mini-page
+    pub fn circular_buffer_used(&self) -> usize;                // used bytes, dead blocks included
     pub fn store(&self) -> &dyn PageStore;
 }
 ```
 
 `create` requires an empty store whose superblock matches the configuration.
 It allocates the first unbounded leaf and writes it through at once.
-`flush` calls `store.sync()`; it writes nothing, because every write is
-already in the store. `Drop` does not sync.
+`flush` merges every buffered mini-page into its base page and then calls
+`store.sync()`. `Drop` neither merges nor syncs.
 
 ### Open
 
@@ -237,8 +271,9 @@ flowchart TD
     B --> R[set root, map every slot with its freed flag]
 ```
 
-1. The configuration comes from the superblock and must pass
-   `TreeConfig::validate`.
+1. The configuration comes from the superblock (`open`) or from the caller
+   (`open_with`, whose layout settings must equal the superblock's). It must
+   pass `TreeConfig::validate`.
 2. Every slot is read once. An all-zero slot is free: a slot allocated for a
    split but never written. `open` returns it to the store's free list, so
    the next allocation reuses it. Every other slot must pass
@@ -257,8 +292,9 @@ flowchart TD
    separator borrows the last entry of its left neighbour instead; under the
    admission rule a full node holds at least two separators, so the neighbour
    keeps at least one. A single leaf is its own root.
-5. The `LeafMap` gets one entry per slot, with the freed flag from step 2.
-   No page is loaded until an operation needs it.
+5. The `LeafMap` gets one entry per slot, with the freed flag from step 2,
+   and an empty circular buffer. No leaf has a mini-page, and no page is
+   loaded until an operation needs it.
 
 Open is `O(leaves)` in I/O and memory and is the complete recovery path:
 inner nodes are derived and nothing else is persisted. Bulk-built levels are
@@ -269,19 +305,24 @@ open on very large trees, keeping this rebuild as the repair path.
 
 ## Durability and consistency without a log
 
-Every write goes to the store as it happens. A `put` or `remove` returns
-after `write_through` has written the leaf's page, so the tree keeps no
-state that the store lacks:
+A `put` or `remove` buffers its record in the leaf's mini-page and returns.
+The record lives only in memory until a merge writes it to the store: a
+merge when the mini-page is full at its largest class, or `flush`. A merge
+writes its pages with `write_through` at once.
 
-- **Drop loses nothing.** Dropping the tree or calling `into_store` loses no
-  completed write. The writes are in the store, synced or not. (Plan 0013
-  brings back buffered mini-page state, which a drop without a flush
-  loses.)
-- **`flush` syncs.** `flush` calls `store.sync()`. Every write that
-  returned before `flush` began is durable when `flush` returns. Writes
-  that are not yet synced survive a process stop on `FileStore`, because
-  they are in the operating system's page cache, but not necessarily an
-  operating-system crash or a power loss.
+- **Drop loses buffered records.** Dropping the tree or calling
+  `into_store` loses every record that is still buffered. Merged records
+  are in the store, synced or not, and the store still opens as a valid
+  tree. Both return the blocks to the circular buffer, so its slab is
+  freed normally. Call `flush` first.
+- **`flush` merges, then syncs.** `flush` merges every buffered mini-page
+  into its base page, one leaf at a time, and then calls `store.sync()`.
+  Every write that returned before `flush` began is durable when `flush`
+  returns. Writers may run during `flush`; a record buffered into a leaf
+  that `flush` already visited may stay buffered. Merged writes that are not
+  yet synced survive a process stop on `FileStore`, because they are in the
+  operating system's page cache, but not necessarily an operating-system
+  crash or a power loss.
 
 There is no per-operation atomicity across pages. A split writes two pages
 (the right half first, then the left) and then updates the parent in
@@ -318,33 +359,45 @@ All baselines are informational and single-threaded. They live in the tree
 tests as ignored benchmarks. Contended numbers are not taken on macOS;
 [plan 0016](../plans/0016-bf-tree-concurrency.md) takes them on Linux.
 
-### Write-through without resident pages (plan 0012)
+### Mini-pages and write-through (plans 0012 and 0013)
 
 `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`
 (both `baseline_throughput` and `baseline_file_store`), on an Apple M4 Pro:
 one million random 8-byte keys with 16-byte values and the default
-configuration. "Before" is the resident-copy design of plan 0008, measured
-on the same machine immediately before
-[plan 0012](../plans/0012-bf-tree-shared-tree.md); "after" is the current
-design.
+configuration, except for a 1 GiB circular buffer (the default 32 MiB cannot
+hold the buffered leaves until plan 0014 adds eviction). "Before 0012" is
+the resident-copy design of plan 0008, measured on the same machine
+immediately before [plan 0012](../plans/0012-bf-tree-shared-tree.md).
+"After 0012" is write-through without resident pages. "After 0013" is the
+current design with blind writes into mini-pages
+([plan 0013](../plans/0013-bf-tree-mini-tree.md)).
 
-| step | before | after |
-| --- | --- | --- |
-| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s |
-| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s |
-| `MemStore` scan | 140 M records/s | 27 M records/s |
-| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s |
-| `FileStore` flush | 47 ms | 859 ms |
-| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s |
-| `FileStore` scan, warm | 138 M records/s | 22 M records/s |
+| step | before 0012 | after 0012 | after 0013 |
+| --- | --- | --- | --- |
+| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s |
+| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s |
+| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s |
+| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s |
+| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms |
+| `FileStore` open | not recorded | not recorded | ~31 ms |
+| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s |
+| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s |
 
-The regression is expected. Nothing stays resident, so every `put` loads,
-rebuilds, and writes a full 4 KiB page, and every read loads a page. The
-flush rows measure different work. Before, `flush` wrote every dirty leaf
-and then synced. Now the page writes happen during the put phase, and
-`flush` only calls `sync_data`. Plan 0013 recovers write throughput with
-blind buffering in mini-pages, and plan 0015 recovers read throughput with
-caching.
+- **Writes.** Plan 0012 regressed writes as expected: nothing stayed
+  resident, so every `put` loaded, rebuilt, and wrote a full 4 KiB page.
+  Plan 0013 recovers most of that: a `put` to a leaf whose mini-page has
+  room does no store I/O, and a merge writes many buffered records with one
+  base read and one or two writes.
+- **Flush.** The flush rows measure different work. Before 0012, `flush`
+  wrote every dirty leaf and then synced. After 0012, the page writes
+  happened during the put phase, and `flush` only called `sync_data`. Now
+  `flush` merges every buffered leaf (8192 leaves in this run) and then
+  syncs.
+- **Reads.** Reads still load base pages; plan 0015 recovers read throughput
+  with caching. The in-memory get rate fell from 1.96 to 1.28 M ops/s after
+  0013. In that benchmark the keys are still buffered in mini-pages when the
+  gets run, so most gets hit a mini-page. The cause of the slowdown was not
+  investigated.
 
 ### Resident copies (plan 0008)
 
@@ -401,15 +454,17 @@ than random ones, which favours scans and `open`. `Tree::open` is bounded by
 sequential read bandwidth and grows linearly with the file; checkpointed
 inner nodes would remove the full read from the common path. In that design
 memory grew by one page per touched leaf (1.8 GiB resident after this run);
-the current design keeps no leaf page resident.
+the current design keeps no base page resident.
 
 ## References
 
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.3: base leaves, page
   I/O, the mapping table, and the per-leaf reader-writer lock.
 - Plans [0008](../plans/0008-bf-tree-leaf-store.md) (the store boundary,
-  validation, and open) and [0012](../plans/0012-bf-tree-shared-tree.md)
-  (locked entries, scratch, and write-through).
+  validation, and open), [0012](../plans/0012-bf-tree-shared-tree.md)
+  (locked entries, scratch, and write-through), and
+  [0013](../plans/0013-bf-tree-mini-tree.md) (mini-pages in entries,
+  `open_with`, and flush merges).
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `src/storage.rs`
   (`PageTable`, `PageLocation`), `src/utils/mapping_table.rs`, `src/fs/mod.rs`

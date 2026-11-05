@@ -4,7 +4,9 @@ Many threads can share one `Tree`. The tree is `Send + Sync`, and every
 operation takes `&self`. This document records which locks exist, what each
 one protects, the order in which a thread may take them, the protocol that
 every key operation follows, and the guarantees that result.
-[Plan 0012](../plans/0012-bf-tree-shared-tree.md) built this design.
+[Plan 0012](../plans/0012-bf-tree-shared-tree.md) built this design, and
+[plan 0013](../plans/0013-bf-tree-mini-tree.md) added mini-pages in the
+circular buffer under the same leaf locks.
 [Plan 0016](../plans/0016-bf-tree-concurrency.md) replaces the interim
 routing lock described below with per-node frames.
 
@@ -19,7 +21,8 @@ flowchart LR
     Tree --> Inner["RwLock&lt;InnerStore&gt; (root + inner nodes)"]
     Tree --> V["inner_version: AtomicU64"]
     Tree --> Map["LeafMap"]
-    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;"]
+    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs"]
+    Map --> CB["CircularBuffer: Mutex&lt;State&gt; + slab"]
     Map --> PS["Box&lt;dyn PageStore&gt; (Send + Sync, &amp;self)"]
     Tree -. per thread .-> S["thread-local Scratch: page, right"]
 ```
@@ -38,15 +41,17 @@ pub struct Tree {
 
 | Lock | Type | Protects | Taken by |
 | --- | --- | --- | --- |
-| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`) and the leaf's base page in the store | reads (S), writes and splits (X) |
+| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`), the mini-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, and splits (X), `flush` (X, by ID) |
 | Inner lock | `RwLock<InnerStore>` | the inner-node buffers and the root | `route` (read), `install` (write), `height`, `inner_count`, `check_invariants` (read) |
 | Routing version | `AtomicU64` (not a lock) | detects structural changes since a route was taken | written only under the inner write lock |
+| Circular-buffer mutex | `Mutex<State>` inside `CircularBuffer` | block metadata: head, tail, free lists | `alloc`, `free`, `used` |
 | Store locks | backend mutexes | free lists, slot bytes (`MemStore`), slot flags | `PageStore` methods only |
 | Table growth | `Mutex<()>` inside `Table<T>` | chunk initialization and `len` | `Table::grow_to` only |
 
 The leaf lock is the paper's per-leaf reader-writer lock (§3.3). Every base
-write happens under X, so a base page that a thread reads under S or X is
-consistent. Only `LeafMap::load_base` reads a base page and only
+write and every mini-page change happens under X, so a leaf that a thread
+reads under S or X is consistent. A reader under S marks reference bits
+through `AtomicU64`s beside the mini-page; the page bytes do not change. Only `LeafMap::load_base` reads a base page and only
 `LeafMap::write_through` writes one; `load_base` takes a guard as proof
 that the caller holds the lock.
 
@@ -64,7 +69,7 @@ flowchart LR
     A["1 reachable leaf lock, at most one"] --> B["2 fresh leaf lock, split only"]
     B --> C["3 inner RwLock, write only in install"]
     C --> D["4 store free list"]
-    D --> E["5 Table growth, MemStore slot mutex"]
+    D --> E["5 Table growth, MemStore slot mutex, circular-buffer mutex"]
 ```
 
 - Rank 1 is the leaf that routing named. An operation holds at most one.
@@ -79,6 +84,14 @@ flowchart LR
   `MemStore::read` and `write` take only the slot mutex. `FileStore` reads
   and writes take no lock. No holder of a rank 4 or 5 lock takes a leaf
   lock or the inner lock.
+- The circular-buffer mutex is innermost too. Allocation and free take it
+  only under a leaf's X lock: `LeafMap::buffer` allocates and grows
+  mini-pages, `merge_leaf` frees a block, and `into_store` frees the rest.
+  `circular_buffer_used` takes it while it holds no other lock. The buffer
+  calls nothing while it holds the mutex, so its holder never waits for a
+  leaf lock. No thread waits for circular-buffer room while it holds a leaf
+  lock: a full buffer fails at once with `CircularBufferFull`, and in
+  plan 0014 the writer releases its leaf lock before it evicts.
 
 ## Route, lock, validate, retry
 
@@ -106,12 +119,16 @@ fn with_leaf_write<R>(&self, key: &[u8],
 }
 ```
 
-A split happens inside step 4. `split_leaf` allocates and X-locks a fresh
-right leaf, merges into it, writes both pages with one `write_through`
-call, and calls `install`. `install` takes the inner write lock, finds the
+A split happens inside step 4, when a write's mini-page is full and
+`merge_leaf` finds that the merge does not fit one page. `merge_leaf`
+reuses `split_leaf` and `install` unchanged. `split_leaf` allocates and
+X-locks a fresh right leaf, merges into it, writes both pages with one
+`write_through` call, and calls `install`. `install` takes the inner write lock, finds the
 parent by descending with the separator, inserts the separator, propagates
-splits upward, and bumps `inner_version`. The splitter then releases the
-right leaf, and then the left leaf.
+splits upward, and bumps `inner_version`. `merge_leaf` then frees the
+mini-page's block, and the writer buffers its record into the half that
+owns the key while it still holds both locks. The splitter then releases
+the right leaf, and then the left leaf.
 
 ```mermaid
 sequenceDiagram
@@ -125,10 +142,11 @@ sequenceDiagram
     W->>L: X lock
     Note over W: version is still v, so the route is valid
     R->>L: S lock, waits for W
-    Note over W: load base, merge one record, it does not fit
+    Note over W: buffer returns NeedsMerge, load base, merge does not fit
     W->>N: store alloc, grow table, X lock while unreachable
-    Note over W: merge_batch_split into N, write_through N then L
+    Note over W: merge_split into N, write_through N then L
     W->>I: write lock, descend by separator, insert, v+1, unlock
+    Note over W: free the block, buffer the record into L or N
     W->>N: unlock
     W->>L: unlock
     Note over R: S granted, version v+1 differs from v
@@ -153,16 +171,20 @@ has no cycle. The cases:
    and 5, released before `alloc` returns) and then X-locks the fresh leaf.
    No route names the fresh leaf. Only a thread that locks leaves by ID can
    contend for it, and such a thread must hold no other leaf lock, so it
-   releases the lock without waiting. Today `check_invariants` is the only
-   such thread; flush (plan 0013) and eviction (plan 0014) follow the same
-   rule.
-3. **`install`** takes the inner write lock while it holds leaf locks.
+   releases the lock without waiting. `check_invariants` and `flush` are
+   such threads today, and eviction (plan 0014) follows the same rule.
+3. **`flush`** locks leaves by ID, one at a time, and holds no other leaf
+   lock when it waits for one. Under that X lock it calls `merge_leaf`,
+   which may split through `split_leaf` and `install` exactly as a write
+   does, so the leaf it holds acts as rank 1 and the fresh right leaf as
+   rank 2. It releases both before it locks the next ID.
+4. **`install`** takes the inner write lock while it holds leaf locks.
    Under the write lock it only edits `InnerStore` and allocates inner
    buffers. It never touches a leaf. No thread waits for a leaf lock while
    it holds the inner lock.
-4. **Store and table locks** are innermost. Their holders take no leaf lock
-   and no inner lock.
-5. **`check_invariants`** copies the routing layer under the inner read
+5. **Store, table, and circular-buffer locks** are innermost. Their holders
+   take no leaf lock and no inner lock.
+6. **`check_invariants`** copies the routing layer under the inner read
    lock, releases it, and then locks leaves one at a time. Its result is
    meaningful only at quiescence, but it cannot deadlock.
 
@@ -196,20 +218,27 @@ A split that wrote its pages but has not yet installed its separator still
 holds X on `L`, so no thread observes the intermediate state. A false
 positive (a split of some other leaf) costs one retry.
 
-As a guard against protocol bugs, `put`, `remove`, and `get_with` call
-`page.check_key(key)` on the loaded base page. A failure surfaces as the
-internal error `TreeError::Page(PageError::KeyOutOfRange)`, never as wrong
-data. Scans apply the cursor as the lower bound in every leaf instead. The
-guard is effective: with the version bump removed from `install`, the
-concurrent model test failed in 10 of 10 runs with this error.
+As a guard against protocol bugs, `get_with` calls `page.check_key(key)`
+when it loads the base page. A failure surfaces as the internal error
+`TreeError::Page(PageError::KeyOutOfRange)`, never as wrong data. Scans
+apply the cursor as the lower bound in every leaf instead. A blind write
+loads no base page, so a misrouted record is caught when its leaf merges:
+the merge's batch check rejects a key outside the base page's fences with
+the same error. `check_invariants` also checks that every buffered key lies
+within its leaf's fences. With the version bump removed from `install`, the
+concurrent model test fails in 10 of 10 runs with this error, both under
+plan 0012 and with blind writes.
 
 ## Guarantees
 
 - **Writes on one key are linearizable.** Each operation on key `k` runs
   under the lock of the leaf that owns `k` at that moment, and a split moves
-  `k` under the same lock. A `put` or `remove` returns after its page write
-  completes under X, so every later operation on `k` observes it. A key's
-  value is the value of its last completed write.
+  `k` under the same lock. A `put` or `remove` returns after it has
+  buffered its record in the leaf's mini-page under X (after a merge, if one
+  was needed), so every later operation on `k` observes it. A key's value is
+  the value of its last completed write.
+- **Flush.** Every write that returned before `flush` began is in the store
+  when `flush` returns, even with concurrent writers.
 - **No multi-key atomicity.** Operations on different keys are independent.
 - **Scans.** Both scan forms (`Scan` and `scan_with`) visit one leaf at a
   time under its S lock. A scan yields each key at most once and in
@@ -336,7 +365,14 @@ bytes back.
   threads join, the tree must equal the union of the oracles and pass
   `check_invariants`. The test runs with 2, 4, and 8 writers, on a
   `FileStore` with flush and reopen, and with 8 threads on one leaf's
-  keys. A watchdog turns a deadlock into a failure.
+  keys. A watchdog turns a deadlock into a failure. Since plan 0013 every
+  write goes through mini-pages, so these runs exercise buffering, merges,
+  and merge splits under contention.
+- `crates/bf-tree/src/tests/buffered.rs` runs four writers on a
+  `FileStore` while another thread calls `flush` in a loop. After a final
+  `flush` and a reopen, the tree must hold every write. Plan 0013 ran the
+  concurrent suites 20 times in release and 10 times in debug builds
+  without a failure.
 - `crates/bf-tree/src/tests/route.rs` checks that a route taken before a
   split reports `route_changed`, that writes without a split do not, and
   that a write through a stale route lands in the right half.

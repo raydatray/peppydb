@@ -169,21 +169,24 @@ impl LeafMap {
     }
 
     /// Give up the map and return its store. Buffered mini-pages are lost;
-    /// flush first to keep them. Their blocks return to the circular buffer
-    /// before it is dropped.
-    pub(super) fn into_store(self) -> Box<dyn PageStore> {
-        let Self {
-            store,
-            entries,
-            circular_buffer,
-            ..
-        } = self;
-        for entry in entries.iter() {
-            if let Some(block) = entry.write().block.take() {
-                circular_buffer.free(block);
+    /// flush first to keep them.
+    pub(super) fn into_store(mut self) -> Box<dyn PageStore> {
+        self.release_blocks();
+        let placeholder: Box<dyn PageStore> = Box::new(ReleasedStore);
+        std::mem::replace(&mut self.store, placeholder)
+    }
+
+    /// Return every mini-page block to the circular buffer, discarding the
+    /// buffered records. Without this, dropping the map with blocks out would
+    /// make the circular buffer leak its slab.
+    pub(super) fn release_blocks(&mut self) {
+        for entry in self.entries.iter() {
+            let mut entry = entry.write();
+            entry.refs = None;
+            if let Some(block) = entry.block.take() {
+                self.circular_buffer.free(block);
             }
         }
-        store
     }
 
     /// The live leaves' IDs as of now; a by-ID walk such as `flush` uses
@@ -402,6 +405,44 @@ impl LeafMap {
     /// Allocate a slot and return its ID, unlocked and unreachable.
     pub(super) fn alloc_id(&self) -> Result<LeafId, TreeError> {
         Ok(self.alloc()?.id())
+    }
+}
+
+impl Drop for LeafMap {
+    fn drop(&mut self) {
+        self.release_blocks();
+    }
+}
+
+/// The store a map holds after `into_store` moved its real store out; the
+/// map is dropped right after, so no method is ever called.
+#[derive(Debug)]
+struct ReleasedStore;
+
+impl PageStore for ReleasedStore {
+    fn page_size(&self) -> usize {
+        unreachable!("released store")
+    }
+    fn slots(&self) -> u64 {
+        unreachable!("released store")
+    }
+    fn alloc(&self) -> Result<LeafId, bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
+    fn free(&self, _: LeafId) -> Result<(), bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
+    fn read(&self, _: LeafId, _: &mut [u8]) -> Result<(), bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
+    fn write(&self, _: LeafId, _: &[u8]) -> Result<(), bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
+    fn sync(&self) -> Result<(), bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
+    fn superblock(&self) -> &bf_tree_store::Superblock {
+        unreachable!("released store")
     }
 }
 
