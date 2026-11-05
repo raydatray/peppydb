@@ -58,3 +58,40 @@ fn errors_implement_std_error_with_messages() {
         assert_eq!(error.to_string(), message);
     }
 }
+
+#[test]
+fn the_backing_leaf_round_trips_and_survives_rebuilds() {
+    use bf_tree_node_id::LeafId;
+
+    let mut bytes = vec![0; 256];
+    let page = Page::init(&mut bytes).unwrap();
+    assert_eq!(page.backing_leaf(), None);
+
+    let leaf = LeafId::new(42).unwrap();
+    page.set_backing_leaf(Some(leaf));
+    assert_eq!(page.backing_leaf(), Some(leaf));
+    page.try_insert(b"a", b"1").unwrap();
+    page.try_upsert(b"a", RecordState::Insert(b"")).unwrap();
+    page.compact();
+    assert_eq!(page.backing_leaf(), Some(leaf));
+    page.set_backing_leaf(None);
+    assert_eq!(page.backing_leaf(), None);
+
+    // Both split outputs inherit the field.
+    let unbounded = Fences {
+        lower: Fence::Unbounded,
+        upper: Fence::Unbounded,
+    };
+    let mut left = vec![0; 128];
+    let mut right = vec![0; 128];
+    let page = Page::init_with_fences(&mut left, unbounded).unwrap();
+    page.set_backing_leaf(Some(leaf));
+    for key in [&b"a"[..], b"b", b"c"] {
+        page.try_insert(key, b"0123456789").unwrap();
+    }
+    let split = page
+        .split_with_insert(&mut right, b"d", RecordState::Insert(b"0123456789"))
+        .unwrap();
+    assert_eq!(split.right.backing_leaf(), Some(leaf));
+    assert_eq!(page.backing_leaf(), Some(leaf));
+}

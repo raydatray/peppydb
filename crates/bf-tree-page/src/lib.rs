@@ -33,6 +33,8 @@ use std::ops::Range;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use bf_tree_node_id::LeafId;
+
 mod compact;
 mod fence;
 mod key;
@@ -120,6 +122,18 @@ impl Page {
         page.header.backing_leaf.set(NO_BACKING_LEAF);
 
         Ok(page)
+    }
+
+    /// The leaf a mini-page overlays, or `None` for a base page.
+    pub fn backing_leaf(&self) -> Option<LeafId> {
+        LeafId::new(self.header.backing_leaf.get())
+    }
+
+    /// Record the leaf this page overlays, or clear it.
+    pub fn set_backing_leaf(&mut self, leaf: Option<LeafId>) {
+        self.header
+            .backing_leaf
+            .set(leaf.map_or(NO_BACKING_LEAF, LeafId::raw));
     }
 
     /// Number of records, including tombstones and phantoms but not fences.
