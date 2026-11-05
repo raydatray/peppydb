@@ -1,6 +1,6 @@
 # 0011: Single-leaf mini-page component
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Shared pages](../design/bf-tree-pages.md) (roles
 table, reference bit, splitting), [tree structure](../design/bf-tree-structure.md#admission-rule)
@@ -669,18 +669,18 @@ empty and maximum values. After each checked step:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: zero-length payload validation fix.
-- [ ] Diff 3: backing leaf as `LeafId`.
-- [ ] Diff 4: retire the in-slot reference bit.
-- [ ] Diff 5: `Merge<A, B>` and indexed access.
-- [ ] Diff 6: batch merges.
-- [ ] Diff 7: mini-page crate and size classes.
-- [ ] Diff 8: `MiniPage` view and `RefBits`.
-- [ ] Diff 9: `apply`, `copy_into`, `Mini`.
-- [ ] Diff 10: `buffer`.
-- [ ] Diff 11: `LeafRef` and `LeafMut`.
-- [ ] Diff 12: leaf-set model and documentation.
-- [ ] Stack-wide verification; create `bf-tree-mini-page.md`; update
+- [x] Diff 2: zero-length payload validation fix.
+- [x] Diff 3: backing leaf as `LeafId`.
+- [x] Diff 4: retire the in-slot reference bit.
+- [x] Diff 5: `Merge<A, B>` and indexed access.
+- [x] Diff 6: batch merges.
+- [x] Diff 7: mini-page crate and size classes.
+- [x] Diff 8: `MiniPage` view and `RefBits`.
+- [x] Diff 9: `apply`, `copy_into`, `Mini`.
+- [x] Diff 10: `buffer`.
+- [x] Diff 11: `LeafRef` and `LeafMut`.
+- [x] Diff 12: leaf-set model and documentation.
+- [x] Stack-wide verification; create `bf-tree-mini-page.md`; update
   `bf-tree-pages.md` and the roadmap.
 
 ## Discoveries and plan changes
@@ -691,6 +691,26 @@ empty and maximum values. After each checked step:
   `buffer` takes `&CircularBuffer` directly, so the circular buffer (now
   plan 0010) lands first. See the decision "The concrete circular buffer,
   not an allocation trait".
+- **Implementation notes.** Splits now build both output images through
+  `&self` and commit them afterwards, so a merged sequence may borrow the
+  page being split; `merge_batch_*` and `split_with_insert` share that path.
+  `Merge<A, B>` needs both sides to yield the same `RecordRef` lifetime, so
+  `RecordRef::shorten` converts a longer-lived side (clippy flags an
+  identity `map`). `MiniPage` is `#[repr(C)]`, which zerocopy's
+  `KnownLayout` derive needs for an unsized newtype. A cache fill can meet a
+  full largest-class mini-page and get `NeedsMerge`; the model drops such a
+  fill, as plan 0015's tree will.
+
+### Verification outcomes (2026-11-05)
+
+| Check | Outcome |
+| --- | --- |
+| Workspace checks (`fmt`, `clippy`, Buck2 tests, `autocargo`, `gobuckify`, Cargo, Go) | All pass; 15 Buck2 targets; 232 Cargo tests |
+| Page suite | 69 tests pass, including the zero-length payload regression (failed before the fix) and the reserved-bit check |
+| Batch merges against a map | 500 random cases: 416 in place, 80 splits, 4 `CannotSplit` on tiny pages with nothing changed |
+| Admission boundary | Full base plus full largest-class mini-page of maximum records splits in four configurations, both key layouts |
+| Mini-page suite | 24 tests pass |
+| Leaf-set model | 3 configurations x 3 seeds, 3000 to 4000 steps; an injected bug (clean records replacing dirty ones) was caught |
 
 ## Agent notes
 

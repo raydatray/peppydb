@@ -36,7 +36,7 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 | `2..4` | `capacity` | Page length in bytes |
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
 | `6..8` | `prefix_len` | Length of the key prefix stored once in the low fence and omitted from other keys; see [Prefix compression](#prefix-compression) |
-| `8..16` | `backing_leaf` | Base leaf that a mini-page or full-page cache belongs to; `u64::MAX` if none |
+| `8..16` | `backing_leaf` | Base leaf that a mini-page or full-page cache belongs to; `u64::MAX` if none; see [Backing leaf](#backing-leaf) |
 | `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive |
 | `24..32` | `snapshot_version` | Checkpoint snapshot version; inactive |
 
@@ -44,6 +44,16 @@ Bytes `0..16` describe the page structure. Bytes `16..32` hold recovery state,
 which the logging and checkpoint design will define. A smaller mini-page header
 without recovery state is deferred to that design: it would not shrink
 upstream's allocation sizes, and the recovery state would need another home.
+
+### Backing leaf
+
+`backing_leaf()` returns `Option<LeafId>`, and `set_backing_leaf(Option<LeafId>)`
+writes the field. `LeafId` comes from the `bf-tree-node-id` crate. The stored
+sentinel for `None` is `u64::MAX`, which is also `LeafId`'s reserved raw value,
+so no real leaf ID can collide with it. `init` and `init_with_fences` store
+`None`. Splits and batch merges copy the field from the source page to every
+output. The page itself gives the field no meaning; role types decide when it
+must be set (see [`Page` as a base type](#page-as-a-base-type)).
 
 ## Slots and records
 
@@ -53,13 +63,26 @@ Each slot uses 8 bytes:
 | --- | --- |
 | `0..2` | Payload offset from the page start |
 | `2..4` | Record kind (high 2 bits) and key length (low 14 bits) |
-| `4..6` | Reference bit (high bit) and value length (low 15 bits) |
+| `4..6` | Reserved bit (high bit, always zero) and value length (low 15 bits) |
 | `6..8` | First two key bytes (preview), zero-padded |
+
+- Bit 15 of bytes `4..6` (the `ref_and_value_len` word) is reserved. Every page
+  operation writes it as zero, and `Page::validate` rejects a finite slot that
+  sets it. Upstream stores a reference bit there. peppydb keeps reference bits
+  outside the page format: readers will hold only a shared leaf lock, and safe
+  Rust cannot set a bit inside bytes that other readers are reading. Mini-page
+  reference bits live beside each mini-page in `RefBits` (crate
+  `bf-tree-mini-page`; see [BF-Tree mini-pages](bf-tree-mini-page.md)).
+  Upstream also clears the bit on every copy, so the format loses no durable
+  state.
 
 - Ordinary slots are sorted by full key bytes. Each payload holds the key
   followed by its encoded value allocation, even when a tombstone hides it.
 - Record kinds follow upstream: `Insert` (live value), `Delete` (tombstone),
   `Cache` (clean cached value), and `Phantom` (clean cached absence).
+  `RecordKind::is_dirty()` is true for `Insert` and `Delete`, which can be
+  newer than the base page. `Cache` and `Phantom` are clean: they only repeat
+  what the base page holds.
 - Keys must be nonempty, as upstream requires. Values may be empty: an empty
   value is a live record, and value length never encodes absence. Upstream
   asserts that values are nonempty; peppydb allows empty values for
@@ -70,7 +93,14 @@ Each slot uses 8 bytes:
 `get` returns `Option<RecordRef>`: a miss is `None`, while known absence is a
 stored `Delete` or `Phantom` state. `Insert` and `Cache` borrow their logical value,
 including an empty value. `RecordState::kind()` and `value()` expose these two
-views. `RecordRef` also borrows the key and reports the reference bit.
+views. `RecordRef` also borrows the key. `RecordRef::shorten` returns the same
+record with a shorter lifetime; it lets records from two sources with different
+lifetimes form one iterator item type, for example in a [`Merge`](#merging-sorted-records).
+
+`find_index(key)` returns the record index of a stored key, or `None` on a miss.
+It rejects empty and out-of-range keys as `get` does. Indices exclude fence
+slots. `record_at(index)` returns the record at an index in key order and
+panics if `index >= len()`.
 
 ### Logical keys
 
@@ -87,7 +117,7 @@ range bounds still take full `&[u8]` keys.
 
 `iter()` and iteration over `&Page` yield every stored record in key order,
 including absence records. The iterator is exact-sized and fused. Reads never
-change page bytes or reference bits. Borrowed results keep the page borrowed;
+change page bytes. Borrowed results keep the page borrowed;
 callers must retain its allocation and any later synchronization protection.
 
 ### Bounded iteration
@@ -119,7 +149,7 @@ binary search compares the query's remaining suffix with stored suffixes and
 their previews. A query equal to the prefix has an empty suffix and is searched
 normally. With a zero prefix, the search reduces to full-key comparison.
 
-## Typed writes and reference hints
+## Typed writes
 
 `try_insert_record` inserts any `RecordState` at a distinct nonempty key;
 `try_insert` is the `Insert` convenience. Newly inserted absence states have
@@ -128,14 +158,15 @@ checks key emptiness, range membership, standalone record size including fences,
 duplicates, then contiguous space. Every rejected operation preserves the entire
 page image.
 
-New entries have a clear reference bit. `set_referenced` changes only that bit
-under exclusive access and returns whether an entry exists. Cache policy will
-decide when to mark accesses; raw reads remain pure.
+The page stores no access-tracking state. Cache policy records accesses outside
+the page format; see [Slots and records](#slots-and-records). Reads remain pure.
 
 ### Replacement
 
-`try_upsert` returns `Inserted` or `Replaced`. It preserves the reference bit of
-an existing entry. `Delete` changes only the kind, retaining the payload and its
+`try_upsert` returns `Inserted` or `Replaced`. `upsert_indexed` has the same
+contract and also returns the record index that the key now occupies. On
+`Inserted`, every record at or above that index has moved up by one. `Delete`
+changes only the kind, retaining the payload and its
 encoded value length. Later live writes may reuse that retained value region.
 `Phantom` stores a zero-length value. Other smaller/equal writes overwrite the
 existing value; shortening leaves a hole and reduces the encoded length. There
@@ -167,8 +198,7 @@ reachable payloads are disjoint and lie above it, but need not start at it.
 
 `compact()` packs all reachable payloads using one zero-initialized 4096-byte
 scratch image and returns the recovered byte count. It preserves every record,
-kind, reference bit, retained tombstone value, flag, and recovery/backing-leaf
-field. It rebuilds physical slots because logical absence views hide retained
+kind, retained tombstone value, flag, and recovery/backing-leaf field. It rebuilds physical slots because logical absence views hide retained
 values and logical keys include the shared prefix. Each slot's physical size
 depends on its role: the low fence stores its full key, the high fence and
 ordinary records store suffixes, and infinite fences have no payload. The
@@ -191,7 +221,7 @@ bound; derived traits apply when `K` supports them. `None` means the page has no
 fence slots. Membership checks compare logical fence views with the full query.
 
 `Fence::Key(b"")` is finite and distinct from `Fence::Unbounded`. Finite fences
-use normal `Insert` slots with zero value length and reference bit. Their keys
+use normal `Insert` slots with zero value length and a clear reserved bit. Their keys
 may be empty, with a normal offset at or below page end. Infinite fences use
 explicit offsets: `u16::MAX - 1` for lower and `u16::MAX` for upper, with all
 remaining fields zero. Decoding never infers infinity from key length. Compaction
@@ -224,10 +254,10 @@ the parent's new separator. Routing agrees by construction: inner nodes route
 `key >= separator` right, and fences are lower-inclusive.
 
 Selection works over a *virtual sequence*: the stored records merged in key
-order with a sorted batch of pending records. A pending record replaces a
-stored record with the same key. `split_with_insert` passes a batch of one;
-the mini-page merge can pass a larger batch to the same
-selector. For `m` virtual records and candidates `j` in `1..m`:
+order with a sorted batch of pending records by [`Merge`](#merging-sorted-records).
+A pending record replaces a stored record with the same key.
+`split_with_insert` passes a batch of one; `merge_batch_split` passes a larger
+batch to the same selector (see [Batch merges](#batch-merges)). For `m` virtual records and candidates `j` in `1..m`:
 
 ```text
 prefix_left  = implied prefix of [lower, key_j)
@@ -247,7 +277,7 @@ output's `capacity - free_bytes()` equals its score component.
 Both outputs are built in 4096-byte stack scratch images with
 `init_with_fences` and `try_insert_record`, then copied. Each output therefore
 gets the prefix its own fences imply, even if the source stored a shorter
-one. Record kinds and reference bits are preserved. Tombstones lose retained
+one. Record kinds are preserved. Tombstones lose retained
 value bytes, as in any rebuild. Both outputs inherit the source's backing-leaf,
 LSN, and snapshot-version fields; other header flags are not copied.
 
@@ -259,6 +289,63 @@ virtual records exist or no candidate fits. Every error preserves both
 buffers. The page does not allocate a leaf ID or update a parent. The
 admission rule that makes `CannotSplit` unreachable in the tree is described in
 [BF-Tree structure](bf-tree-structure.md#admission-rule).
+
+## Merging sorted records
+
+`Merge<A, B>` is a public iterator over two sorted `RecordRef` sequences,
+built with `Merge::new(older, newer)`. It yields records in key order. On an
+equal key it yields the record from `newer` and skips the one from `older`.
+Both sides must yield the same `RecordRef` lifetime; a side that borrows longer
+converts with `.map(RecordRef::shorten)`. `Merge` is fused when both sides are
+fused, and it does not allocate. Splits and batch merges build their virtual
+sequence with it, with the page's records as `older`.
+
+## Batch merges
+
+Three methods merge a sorted batch of dirty records into a fenced base page:
+
+| Method | Result |
+| --- | --- |
+| `merge_batch_fits(batch)` | `Ok(true)` if the merged page fits in place |
+| `merge_batch_in_place(batch)` | Rebuilds `self` with the batch applied, or returns `PageFull` |
+| `merge_batch_split(right, batch)` | Splits the merged records into `self` (left) and `right`, as in [Splitting](#splitting) |
+
+The merged sequence is the page's records with the batch applied. An `Insert`
+adds or replaces a key. A `Delete` removes the key, and is a no-op if the page
+does not hold the key. The output holds only `Insert` records, so a merge never
+writes a tombstone to a base page.
+
+```rust
+Merge::new(self.iter(), batch.map(RecordRef::shorten))
+    .filter(|record| record.state.kind() == RecordKind::Insert)
+```
+
+Every method checks the batch in one pass before it changes anything:
+
+1. The page must be fenced, else `InvalidFences`. `merge_batch_split` first
+   checks the right buffer as `split_with_insert` does (`InvalidCapacity`,
+   `CapacityMismatch`).
+2. For each record in order: the key must be nonempty and inside the fences,
+   and the record must fit an empty page, with the same errors as
+   `try_insert_record` (`EmptyKey`, `KeyOutOfRange`, `RecordTooLarge`).
+3. Each record must be dirty, and each key must be strictly greater than the
+   previous key. Otherwise the error is `PageError::InvalidBatch(reason)`.
+
+Every error leaves every buffer unchanged. An empty batch leaves the page
+byte-for-byte unchanged in place.
+
+`merge_batch_fits` and `merge_batch_in_place` size the packed result: holes do
+not count, because the rebuild packs the page. Sizes use the page's stored
+prefix length. `merge_batch_in_place` builds the result in a 4096-byte stack
+scratch image with `init_with_fences` and `try_insert_record`, then copies it
+back. The page keeps its fences and gets the prefix they imply. It keeps its
+backing-leaf, LSN, and snapshot-version fields. `merge_batch_split` uses the
+split selector, so it returns `CannotSplit` under the same conditions as
+`split_with_insert`.
+
+These methods are the single merge path into a base page. A mini-page merge
+passes the mini-page's dirty records. A direct base write passes a one-record
+batch ([plan 0012](../plans/0012-bf-tree-shared-tree.md)).
 
 ## Prefix compression
 
@@ -324,7 +411,10 @@ fenced or not. It rejects any image where:
 - an unknown header flag is set, or the slot directory or the free gap does
   not fit;
 - a payload starts before the end of the free gap or ends past the buffer, or
-  two payloads overlap;
+  two nonempty payloads overlap. An empty payload (a key equal to the page
+  prefix with an empty value) is excluded from the overlap check, because it
+  may start where a neighbour starts;
+- a finite slot sets the reserved bit ("reserved slot bit is set");
 - a fence slot carries a value, an unbounded fence has a key length, or the
   prefix length is nonzero without a finite low fence long enough to hold it;
 - a record key is empty or shorter than the prefix, or a slot preview differs
@@ -345,27 +435,34 @@ opens a store.
 
 ## `Page` as a base type
 
-The public `page` module uses private `layout`, `key`, `record`, `read`, `write`,
-`compact`, and `fence` submodules. They implement the same `Page` type and keep
+The `bf-tree-page` crate uses private `layout`, `key`, `record`, `read`,
+`write`, `compact`, `fence`, `split`, `merge`, and `validate` modules. They implement the same `Page` type and keep
 encoding details private; `KeyRef` is the public logical-key view. Unit tests use
 independent byte decoding alongside ordered-map checks, and an independent
 fixture encoder builds compressed pages with any stored prefix length. The
 mixed-operation model owns full logical keys and retained physical values,
 derives the fence prefix and suffix lengths itself, and tracks the contiguous
-gap from operation history. It checks errors, logical states, ranges, references,
-the stored prefix length, suffix previews, payload overlap, and full byte
-accounting after each operation, across representative capacities and fence
-profiles, including compressed ones.
+gap from operation history. It checks errors, logical states, ranges, the
+clear reserved bit, the stored prefix length, suffix previews, payload overlap,
+and full byte accounting after each operation, across representative capacities
+and fence profiles, including compressed ones. Batch-merge tests compare
+merges against an ordered map, and check that deletes of missing keys are
+no-ops, that an empty batch changes nothing, and that every rejected batch
+leaves both buffers unchanged.
 
 `Page` holds what every leaf-level page shares: the header, the slot directory,
-and the record operations. Role types will wrap `Page`, expose
-the header fields their role uses, and enforce role-specific rules:
+and the record operations. Each role adds rules on top of `Page`. With `L` the
+tree's leaf page capacity and `M` the largest mini-page size class:
 
-| Role (planned) | Adds to `Page` |
-| --- | --- |
-| `BasePage` | Requires fences; only `Insert` and `Delete` records; no backing leaf |
-| `MiniPage` | A size class; any record kind; `backing_leaf` set to its base leaf; no fences |
-| Full-page cache | A whole in-memory copy of a base leaf, with `backing_leaf` set |
+| Role | Status | Fences | `backing_leaf` | Record kinds | Capacity |
+| --- | --- | --- | --- | --- | --- |
+| Base page | Implemented as a plain `Page` | Required | `None` | `Insert` only | `L` |
+| Mini-page | Implemented as `MiniPage` in `bf-tree-mini-page` | None | Its base leaf | Any | One size class, `64..=M` |
+| Full-page cache | Planned ([plan 0015](../plans/0015-bf-tree-caching.md)) | — | Its base leaf | — | — |
+
+A base page never stores a tombstone: a [batch merge](#batch-merges) drops a
+`Delete` after it removes the base key. [BF-Tree mini-pages](bf-tree-mini-page.md)
+defines the mini-page rules, size classes, and reference bits.
 
 All roles share one format, so records and whole pages move between roles
 without format conversion. Inner nodes use a separate format; see
@@ -374,13 +471,14 @@ without format conversion. Inner nodes use a separate format; see
 ## Boundaries
 
 The page primitive makes no base/mini/cache role decisions. It can split itself
-once asked, but deciding when to split, growth, merging, and selection of
-records during rebuild belong to later components.
-All mutations require exclusive access. Page operations do not log, advance
-the LSN, or change the snapshot version. Future concurrency must protect borrowed
-results and relocation; explicit reference updates are not synchronization points.
-The current unaligned byte representation does not establish a shared-reader
-reference-bit update protocol.
+and merge a batch once asked, but deciding when to split or merge, mini-page
+growth, and selection of records during rebuild belong to other components.
+All mutations require exclusive access (`&mut Page`), and reads require only
+shared access (`&Page`). No read writes page bytes, so concurrent readers under
+a shared leaf lock need no write protocol inside the page; access tracking
+lives outside the format (see [Slots and records](#slots-and-records)).
+Page operations do not log, advance the LSN, or change the snapshot version.
+Callers must protect borrowed results against relocation.
 
 ## References
 
@@ -393,8 +491,9 @@ reference-bit update protocol.
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `LeafNode` in
   `src/nodes/leaf_node.rs` has the same header fields, field order, and slot
   packing. peppydb differs by encoding integers as explicit little-endian
-  values, measuring payload offsets from the page start, and capping pages at
-  4096 bytes (upstream allows up to 32 KiB).
+  values, measuring payload offsets from the page start, capping pages at
+  4096 bytes (upstream allows up to 32 KiB), and reserving the slot bit where
+  upstream stores its reference bit.
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.5: fence-derived prefix
   compression and look-ahead (preview) bytes. The
   [upstream page explanation](../explanations/bf-tree-upstream-pages.md#fences-prefixes-and-previews)
@@ -403,4 +502,6 @@ reference-bit update protocol.
   by keeping finite empty fences distinct from infinity, checking fence
   membership on every point operation, and returning segmented `KeyRef` views.
 - Figure 3 of the paper shows a 14-bit value length and a separate fence bit.
-  peppydb follows upstream's current slot packing.
+  peppydb follows upstream's current slot packing, except for the reserved bit.
+- [Plan 0011](../plans/0011-bf-tree-mini-page.md) retired the in-slot
+  reference bit and added backing-leaf accessors, `Merge`, and batch merges.
