@@ -142,6 +142,9 @@ pub(super) struct LeafEntry {
     block: Option<Block>,
     /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
     refs: Option<Box<RefBits>>,
+    /// Changes (wrapping) on every block change. A read's hint applies
+    /// only if it is unchanged (plan 0014).
+    version: u32,
 }
 
 pub(super) enum Residency<'e> {
@@ -158,16 +161,26 @@ pub(super) enum Residency<'e> {
   block bytes in place as a `MiniPage`.
 - `LeafWrite::take_mini` moves the two handles out of the entry into a
   `Mini`, and `put_mini` moves them back. No block bytes are copied.
+  `take_mini` also bumps `version`. Growth, merges, and relocation all go
+  through it, so one bump covers every block change. A bump without a
+  change only makes a read's hint skip.
 
-### One allocation site
+### Allocation sites
 
-`LeafMap::buffer` is the only place in the tree that allocates mini-page
-blocks. It runs under the leaf's X lock. It takes the leaf's `Mini` out of
-the entry, calls this crate's `buffer` with the map's circular buffer, the
-leaf's ID (the block's owner and the mini-page's backing leaf), and the
-map's `SizeClasses`, and puts the result back. It never reads the base
-page. `BufferError::Full` becomes `TreeError::CircularBufferFull`, and
-`BufferError::Page` becomes `TreeError::Page`.
+`LeafMap::buffer` creates and grows mini-pages. It runs under the leaf's X
+lock. It takes the leaf's `Mini` out of the entry, calls this crate's
+`buffer` with the map's circular buffer, the leaf's ID (the block's owner
+and the mini-page's backing leaf), and the map's `SizeClasses`, and puts
+the result back. It never reads the base page. On `BufferError::Full` it
+returns `Ok(None)`, and nothing changed. `BufferError::Page` becomes
+`TreeError::Page`.
+
+Since [plan 0014](../plans/0014-bf-tree-eviction.md), `Tree::relocate` is
+the second allocation site. Under the leaf's X lock, it copies a mini-page
+whose block has aged into the second-chance region into a fresh block of
+the same size with `Mini::copy_into(fresh, true)`, then frees the old
+block. If the allocation fails, it keeps the old block; it never evicts.
+See [the second chance](bf-tree-circular-buffer.md#the-second-chance).
 
 ### Writes
 
@@ -179,7 +192,8 @@ not hold becomes a tombstone, and the merge drops it.
 flowchart TD
     A["route, X-lock leaf, validate route"] --> B["LeafMap::buffer"]
     B -->|"Buffered or SkippedDirty"| Z[done]
-    B -->|Full| P["CircularBufferFull, nothing changed"]
+    B -->|"None: buffer full"| P["drop every guard, make_room, route again"]
+    P --> A
     B -->|NeedsMerge| C["merge_leaf: take the mini-page, load base into scratch"]
     C --> D{merge_fits}
     D -->|yes| E["merge_in_place, write_through leaf"]
@@ -208,13 +222,19 @@ flowchart TD
   record to the merge content, and the admission derivation then requires
   `M <= L - 6K - 2V - 32`: 1600 at the defaults instead of 2688. The
   mini-page would merge almost twice as often.
-- **A full circular buffer.** An allocation failure returns
-  `TreeError::CircularBufferFull`. The first `buffer` call changes nothing.
-  A failure in the placement after a merge leaves the merge done and the
-  record not written, so the error still means "this write did not happen".
-  This error is interim: `flush` frees every block, and
-  [plan 0014](../plans/0014-bf-tree-eviction.md) replaces the error with
-  eviction.
+- **A full circular buffer.** When `buffer` returns `None`, the write
+  attempt returns `Attempt::NeedRoom` and drops every guard. `write` then
+  calls `make_room`, which evicts the oldest blocks with no leaf lock
+  held, and routes the key again. The first `buffer` call changes nothing.
+  A failure in the placement after a merge leaves the merge done; the
+  retry buffers into whichever half now owns the key. No circular-buffer
+  error reaches the caller. See
+  [the circular buffer design](bf-tree-circular-buffer.md#a-full-buffer).
+- **Relocation after the write.** After a record is buffered, the write
+  calls `Tree::relocate` on the routed leaf under the same X lock. After a
+  merge, that leaf has no block or a fresh one at the tail, so the call
+  does nothing. A write that grew the mini-page has already moved it to the tail,
+  so relocating after buffering avoids a second copy.
 
 ### Reads and scans
 

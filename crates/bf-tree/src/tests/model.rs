@@ -261,13 +261,10 @@ fn reversed_ranges_are_rejected() {
     assert_eq!(tree.range(Some(b"a"), Some(b"a")).unwrap().count(), 0);
 }
 
-/// Defaults with a circular buffer large enough to buffer a million keys
-/// without eviction (plan 0014).
+/// The default configuration: eviction keeps a million keys within the
+/// default 32 MiB circular buffer.
 fn baseline_config() -> TreeConfig {
-    TreeConfig {
-        circular_buffer_bytes: 1 << 30,
-        ..TreeConfig::default()
-    }
+    TreeConfig::default()
 }
 
 /// An informational single-threaded baseline, not a gate. Run with

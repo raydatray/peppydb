@@ -7,7 +7,9 @@ what the design does and does not guarantee about durability. It is the
 paper's §3.3 base-leaf and mapping-table layer, with one reader-writer lock
 per leaf. Each entry can also hold the leaf's
 [mini-page](bf-tree-mini-page.md) in the
-[circular buffer](bf-tree-circular-buffer.md); eviction does not exist yet.
+[circular buffer](bf-tree-circular-buffer.md). When the circular buffer is
+full, eviction merges the oldest mini-pages into their base pages
+([plan 0014](../plans/0014-bf-tree-eviction.md)).
 The [concurrency design](bf-tree-concurrency.md) records the lock order and
 the protocol that uses these locks.
 
@@ -17,7 +19,7 @@ the protocol that uses these locks.
 flowchart LR
     Tree --> Inner["RwLock&lt;InnerStore&gt;: derived, in memory"]
     Tree --> Map["LeafMap"]
-    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs"]
+    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
     Map --> CB["CircularBuffer: mini-page blocks"]
     Map --> C["SizeClasses"]
     Map --> PS["Box&lt;dyn PageStore&gt;"]
@@ -92,9 +94,10 @@ disagrees with the requested configuration, and `Tree::open` takes its
 configuration from the superblock, so a reopened tree never admits a key or
 value that the stored pages could not split.
 
-The superblock records only layout settings. `circular_buffer_bytes` is a
-runtime setting: `From<&TreeConfig> for Superblock` ignores it, and
-`From<&Superblock> for TreeConfig` fills in `DEFAULT_CIRCULAR_BUFFER_BYTES`.
+The superblock records only layout settings. `circular_buffer_bytes` and
+`second_chance_percent` are runtime settings: `From<&TreeConfig> for
+Superblock` ignores them, and `From<&Superblock> for TreeConfig` fills in
+`DEFAULT_CIRCULAR_BUFFER_BYTES` and `DEFAULT_SECOND_CHANCE_PERCENT`.
 `Tree::open_with(config, store)` opens a store with chosen runtime settings
 and requires `Superblock::from(&config) == *store.superblock()`.
 `Tree::open(store)` is `open_with` with the superblock's configuration.
@@ -138,6 +141,9 @@ pub(super) struct LeafEntry {
     block: Option<Block>,
     /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
     refs: Option<Box<RefBits>>,
+    /// Changes (wrapping) on every block change: allocation, growth,
+    /// relocation, merge. A read's hint applies only if it is unchanged.
+    version: u32,
 }
 
 pub(super) struct LeafRead<'m>  { id: LeafId, entry: RwLockReadGuard<'m, LeafEntry> }
@@ -147,8 +153,8 @@ pub(super) struct LeafWrite<'m> { id: LeafId, entry: RwLockWriteGuard<'m, LeafEn
 `LeafMap::for_config` builds the map, its circular buffer, and its size
 classes from a validated `TreeConfig`. The
 [mini-page design](bf-tree-mini-page.md#in-the-tree) records the entry's
-`Residency` view, `take_mini` and `put_mini`, and `LeafMap::buffer`, the
-only place that allocates mini-page blocks.
+`Residency` view, `take_mini` and `put_mini`, and the two sites that
+allocate mini-page blocks: `LeafMap::buffer` and `Tree::relocate`.
 
 ### Locked entries
 
@@ -162,7 +168,13 @@ so a leaf read under S or X is consistent. (Readers set reference bits
 under S through atomics.)
 
 - `read(id)` takes S and `write(id)` takes X. Both return `UnknownLeaf` for
-  an ID beyond the table or a freed slot.
+  an ID beyond the table or a freed slot. Eviction locks a victim's owner
+  with `write(id)`.
+- `try_write(id)` takes X without waiting and returns `None` if the lock is
+  busy or the slot is not live. `Tree::maintain` uses it to apply a read's
+  hint.
+- `holds(leaf, victim)` reports whether the X-locked entry still holds the
+  block that an eviction claim names.
 - `alloc()` allocates a store slot, grows the table to `id + 1`, resets the
   entry, and returns it under X. The leaf is unreachable until a separator
   names it.
@@ -170,9 +182,13 @@ under S through atomics.)
   entry freed, so a failed free leaves the entry live. A split that fails
   after `alloc` uses it.
 - `LeafEntry` holds `freed`, `block`, and `refs`
-  ([plan 0013](../plans/0013-bf-tree-mini-tree.md)). Later plans add fields
-  (`version` in plan 0014, `dirty` in plan 0015). A test requires
-  `size_of::<RwLock<LeafEntry>>() <= 64`.
+  ([plan 0013](../plans/0013-bf-tree-mini-tree.md)) and `version`
+  ([plan 0014](../plans/0014-bf-tree-eviction.md)). `LeafWrite::take_mini`
+  bumps `version` (wrapping); every block change goes through it. A read
+  notes the version under S, and its relocation hint applies only if the
+  version is unchanged
+  ([concurrency](bf-tree-concurrency.md#hints-and-maintain)). Plan 0015
+  adds `dirty`. A test requires `size_of::<RwLock<LeafEntry>>() <= 64`.
 - `ids()` yields `0..len()` at the time of the call; `write_if_live(id)`
   X-locks a live slot or returns `None`. `flush` walks leaves by ID with
   them.
@@ -307,8 +323,9 @@ open on very large trees, keeping this rebuild as the repair path.
 
 A `put` or `remove` buffers its record in the leaf's mini-page and returns.
 The record lives only in memory until a merge writes it to the store: a
-merge when the mini-page is full at its largest class, or `flush`. A merge
-writes its pages with `write_through` at once.
+merge when the mini-page is full at its largest class, an eviction when the
+circular buffer is full, or `flush`. A merge writes its pages with
+`write_through` at once. An eviction does not sync.
 
 - **Drop loses buffered records.** Dropping the tree or calling
   `into_store` loses every record that is still buffered. Merged records
@@ -359,29 +376,38 @@ All baselines are informational and single-threaded. They live in the tree
 tests as ignored benchmarks. Contended numbers are not taken on macOS;
 [plan 0016](../plans/0016-bf-tree-concurrency.md) takes them on Linux.
 
-### Mini-pages and write-through (plans 0012 and 0013)
+### Mini-pages, write-through, and eviction (plans 0012 to 0014)
 
 `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`
 (both `baseline_throughput` and `baseline_file_store`), on an Apple M4 Pro:
 one million random 8-byte keys with 16-byte values and the default
-configuration, except for a 1 GiB circular buffer (the default 32 MiB cannot
-hold the buffered leaves until plan 0014 adds eviction). "Before 0012" is
-the resident-copy design of plan 0008, measured on the same machine
-immediately before [plan 0012](../plans/0012-bf-tree-shared-tree.md).
-"After 0012" is write-through without resident pages. "After 0013" is the
-current design with blind writes into mini-pages
-([plan 0013](../plans/0013-bf-tree-mini-tree.md)).
+configuration. "Before 0012" is the resident-copy design of plan 0008,
+measured on the same machine immediately before
+[plan 0012](../plans/0012-bf-tree-shared-tree.md). "After 0012" is
+write-through without resident pages. "After 0013" adds blind writes into
+mini-pages ([plan 0013](../plans/0013-bf-tree-mini-tree.md)). The 0012 and
+0013 columns used a 1 GiB circular buffer, because without eviction the
+default 32 MiB could not hold the buffered leaves. "After 0014" is the
+current design with eviction and the second chance
+([plan 0014](../plans/0014-bf-tree-eviction.md)), measured with the
+default 32 MiB circular buffer; the benchmarks no longer override it.
 
-| step | before 0012 | after 0012 | after 0013 |
-| --- | --- | --- | --- |
-| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s |
-| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s |
-| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s |
-| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s |
-| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms |
-| `FileStore` open | not recorded | not recorded | ~31 ms |
-| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s |
-| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s |
+| step | before 0012 | after 0012 | after 0013 | after 0014 (32 MiB) |
+| --- | --- | --- | --- | --- |
+| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s | 1.57 M ops/s |
+| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s | 1.65 to 1.89 M ops/s |
+| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s | ~19 M records/s |
+| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s | 1.33 M ops/s |
+| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms | 180 ms |
+| `FileStore` open | not recorded | not recorded | ~31 ms | 26 ms |
+| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s | 1.29 M ops/s |
+| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s | 25 M records/s |
+
+The 0014 column is not a like-for-like comparison with the 0013 column,
+because the circular-buffer budget differs. Under the smaller budget,
+eviction merges mini-pages during the put phase, so fewer leaves are
+buffered when `flush` and the reads run. The table records the outcomes;
+the causes of the differences were not investigated.
 
 - **Writes.** Plan 0012 regressed writes as expected: nothing stayed
   resident, so every `put` loaded, rebuilt, and wrote a full 4 KiB page.
@@ -430,7 +456,7 @@ The in-memory `Tree::in_memory` baseline is unchanged by the mapping table: abou
 #### Larger than memory (`disk_baseline`)
 
 `PEPPYDB_DISK_GIB=96 tools/buck2 run @build/mode/release
-//crates/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline`. Nothing evicts yet, so a tree cannot be
+//crates/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline`. Nothing evicted in that design, so a tree could not be
 built through `put` beyond RAM; the benchmark writes the file directly in
 the on-disk format (sorted keys, three 1000-byte records per 4 KiB leaf),
 opens it, and measures 200,000 random gets, 5,000 scans of 100 records,
@@ -464,7 +490,9 @@ the current design keeps no base page resident.
   validation, and open), [0012](../plans/0012-bf-tree-shared-tree.md)
   (locked entries, scratch, and write-through), and
   [0013](../plans/0013-bf-tree-mini-tree.md) (mini-pages in entries,
-  `open_with`, and flush merges).
+  `open_with`, and flush merges), and
+  [0014](../plans/0014-bf-tree-eviction.md) (eviction, `version`, and
+  relocation).
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `src/storage.rs`
   (`PageTable`, `PageLocation`), `src/utils/mapping_table.rs`, `src/fs/mod.rs`

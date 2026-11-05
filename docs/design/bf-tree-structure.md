@@ -14,8 +14,11 @@ protocol. Leaves live behind a [page store](bf-tree-leaf-store.md). Each
 leaf is a base page in the store plus at most one in-memory
 [mini-page](bf-tree-mini-page.md) in the
 [circular buffer](bf-tree-circular-buffer.md). Writes buffer into the
-mini-page, and a full mini-page merges into the base page. Eviction and
-logging do not exist in the tree yet.
+mini-page, and a full mini-page merges into the base page. When the
+circular buffer is full, a writer evicts the oldest mini-pages by merging
+them into their base pages
+([plan 0014](../plans/0014-bf-tree-eviction.md)). Logging does not exist in
+the tree yet.
 
 ## Shape
 
@@ -123,8 +126,13 @@ flowchart TD
 Every split is therefore a merge split: a leaf splits only when its base
 page plus its full mini-page do not fit one page. A merge applies a
 tombstone by removing the base key, so tombstones never reach a base page.
-A full circular buffer returns the interim `TreeError::CircularBufferFull`
-(see [the mini-page design](bf-tree-mini-page.md#in-the-tree)).
+When the circular buffer is full, `LeafMap::buffer` returns `None`. The
+write drops every guard, evicts with `make_room`, and routes again; no
+circular-buffer error reaches the caller. Eviction merges a victim's
+mini-page through the same `merge_leaf`, so an eviction can also split a
+leaf. After buffering, the write calls `Tree::relocate`, which copies the
+mini-page to the tail if it has aged into the second-chance region (see
+[the circular buffer design](bf-tree-circular-buffer.md#use-in-the-tree)).
 
 ### Split and install
 

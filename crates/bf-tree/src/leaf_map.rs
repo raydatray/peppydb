@@ -218,9 +218,9 @@ impl LeafMap {
         (0..self.entries.len()).map(LeafId::from_index)
     }
 
-    /// Buffer one record in `leaf`'s mini-page, creating or growing it. This
-    /// is the only place that allocates mini-page blocks. Never reads the
-    /// base page.
+    /// Buffer one record in `leaf`'s mini-page, creating or growing it. With
+    /// relocation (`Tree::relocate`), one of the two places that allocate
+    /// mini-page blocks. Never reads the base page.
     ///
     /// `None` if the circular buffer had no room; nothing changed then, and
     /// the caller must release its locks and make room.

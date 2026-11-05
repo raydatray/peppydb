@@ -6,7 +6,9 @@ one protects, the order in which a thread may take them, the protocol that
 every key operation follows, and the guarantees that result.
 [Plan 0012](../plans/0012-bf-tree-shared-tree.md) built this design, and
 [plan 0013](../plans/0013-bf-tree-mini-tree.md) added mini-pages in the
-circular buffer under the same leaf locks.
+circular buffer under the same leaf locks, and
+[plan 0014](../plans/0014-bf-tree-eviction.md) added eviction and
+access-time relocation without a new lock rank.
 [Plan 0016](../plans/0016-bf-tree-concurrency.md) replaces the interim
 routing lock described below with per-node frames.
 
@@ -21,7 +23,7 @@ flowchart LR
     Tree --> Inner["RwLock&lt;InnerStore&gt; (root + inner nodes)"]
     Tree --> V["inner_version: AtomicU64"]
     Tree --> Map["LeafMap"]
-    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs"]
+    Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
     Map --> CB["CircularBuffer: Mutex&lt;State&gt; + slab"]
     Map --> PS["Box&lt;dyn PageStore&gt; (Send + Sync, &amp;self)"]
     Tree -. per thread .-> S["thread-local Scratch: page, right"]
@@ -41,10 +43,10 @@ pub struct Tree {
 
 | Lock | Type | Protects | Taken by |
 | --- | --- | --- | --- |
-| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`), the mini-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, and splits (X), `flush` (X, by ID) |
+| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`), the mini-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), `flush` and eviction (X, by ID), `maintain` (X, by ID, `try_write` only) |
 | Inner lock | `RwLock<InnerStore>` | the inner-node buffers and the root | `route` (read), `install` (write), `height`, `inner_count`, `check_invariants` (read) |
 | Routing version | `AtomicU64` (not a lock) | detects structural changes since a route was taken | written only under the inner write lock |
-| Circular-buffer mutex | `Mutex<State>` inside `CircularBuffer` | block metadata: head, tail, free lists | `alloc`, `free`, `used` |
+| Circular-buffer mutex | `Mutex<State>` inside `CircularBuffer` | block metadata: head, tail, free lists, claims | `alloc`, `free`, `used`, `has_room`, `claim_victim`, `retire`, `unclaim` |
 | Store locks | backend mutexes | free lists, slot bytes (`MemStore`), slot flags | `PageStore` methods only |
 | Table growth | `Mutex<()>` inside `Table<T>` | chunk initialization and `len` | `Table::grow_to` only |
 
@@ -86,12 +88,18 @@ flowchart LR
   lock or the inner lock.
 - The circular-buffer mutex is innermost too. Allocation and free take it
   only under a leaf's X lock: `LeafMap::buffer` allocates and grows
-  mini-pages, `merge_leaf` frees a block, and `into_store` frees the rest.
-  `circular_buffer_used` takes it while it holds no other lock. The buffer
-  calls nothing while it holds the mutex, so its holder never waits for a
-  leaf lock. No thread waits for circular-buffer room while it holds a leaf
-  lock: a full buffer fails at once with `CircularBufferFull`, and in
-  plan 0014 the writer releases its leaf lock before it evicts.
+  mini-pages, `Tree::relocate` allocates a copy and frees the old block,
+  `merge_leaf` frees a block, and `into_store` frees the rest.
+  `has_room`, `claim_victim`, `retire`, `unclaim`, and
+  `circular_buffer_used` take it while the caller holds no leaf lock. The
+  buffer calls nothing while it holds the mutex, so its holder never waits
+  for a leaf lock.
+- No thread waits for circular-buffer room while it holds a leaf lock. A
+  full buffer ends the write attempt (`Attempt::NeedRoom`), every guard is
+  dropped, and only then does the writer evict.
+
+Plan 0014 added no rank. Eviction and `maintain` take a leaf lock by ID
+while they hold no other leaf lock, exactly as `flush` does.
 
 ## Route, lock, validate, retry
 
@@ -171,20 +179,32 @@ has no cycle. The cases:
    and 5, released before `alloc` returns) and then X-locks the fresh leaf.
    No route names the fresh leaf. Only a thread that locks leaves by ID can
    contend for it, and such a thread must hold no other leaf lock, so it
-   releases the lock without waiting. `check_invariants` and `flush` are
-   such threads today, and eviction (plan 0014) follows the same rule.
+   releases the lock without waiting. `check_invariants`, `flush`,
+   eviction, and `maintain` are such threads.
 3. **`flush`** locks leaves by ID, one at a time, and holds no other leaf
    lock when it waits for one. Under that X lock it calls `merge_leaf`,
    which may split through `split_leaf` and `install` exactly as a write
    does, so the leaf it holds acts as rank 1 and the fresh right leaf as
    rank 2. It releases both before it locks the next ID.
-4. **`install`** takes the inner write lock while it holds leaf locks.
+4. **Eviction** runs only when the evicting thread holds no leaf lock: a
+   writer returns `Attempt::NeedRoom` and drops every guard before it
+   calls `make_room`. `Tree::evict` then locks exactly one leaf, the
+   victim's owner, by ID with the blocking `LeafMap::write`. The victim can
+   be the writer's own leaf or another evicting writer's leaf; because the
+   writer holds nothing, neither case can deadlock. Under the owner's X
+   lock, `merge_leaf` may split exactly as in a write or `flush`. The
+   split's right guard drops before the owner's guard. `evict` releases
+   both before it retires or unclaims the claim.
+5. **`maintain`** applies a read's hint after the read drops its S lock.
+   It holds no leaf lock and calls `LeafMap::try_write`, which never
+   waits. If the lock is busy, the hint is skipped.
+6. **`install`** takes the inner write lock while it holds leaf locks.
    Under the write lock it only edits `InnerStore` and allocates inner
    buffers. It never touches a leaf. No thread waits for a leaf lock while
    it holds the inner lock.
-5. **Store, table, and circular-buffer locks** are innermost. Their holders
+7. **Store, table, and circular-buffer locks** are innermost. Their holders
    take no leaf lock and no inner lock.
-6. **`check_invariants`** copies the routing layer under the inner read
+8. **`check_invariants`** copies the routing layer under the inner read
    lock, releases it, and then locks leaves one at a time. Its result is
    meaningful only at quiescence, but it cannot deadlock.
 
@@ -194,6 +214,25 @@ deadlocks on X. A second S request on the same leaf can also deadlock when
 a writer is queued, because std's reader-writer lock may block new readers
 behind a waiting writer. `Scan` holds no lock between `next` calls,
 so iterator users are not affected.
+
+## Hints and `maintain`
+
+A read or scan holds only an S lock, which cannot change the entry. When
+the leaf's block is in the second-chance region, `Tree::note` returns a
+`Noted` value under S: the leaf ID, `LeafEntry::version`, and
+`Hint::Relocate`. After it drops the S lock, the reader calls
+`Tree::maintain`:
+
+1. `LeafMap::try_write(leaf)`. If the lock is busy or the slot is not
+   live, skip the hint.
+2. If the version differs from the noted one, skip the hint. The block it
+   named may be gone.
+3. Otherwise call `Tree::relocate` under X.
+
+`LeafWrite::take_mini` bumps the version, and every block change goes
+through it. A stale hint therefore never passes the check. A reader never
+blocks on maintenance, so readers of one leaf do not serialize. See the
+[circular buffer design](bf-tree-circular-buffer.md#the-second-chance).
 
 ## Routing correctness
 
@@ -250,6 +289,12 @@ plan 0012 and with blind writes.
 - **Progress.** The version changes only when a split completes, so every
   retry implies that some split completed and the system makes progress. A
   single thread can starve only under a continuous stream of splits.
+- **Eviction progress.** Each `Evicted` round evicts one live block. If a
+  slow claim holds the head, the other evictors eventually see `Busy` and
+  yield. The holder of that claim locks at most one leaf, and no waiting
+  thread holds a leaf lock, so it finishes and the head advances. A writer
+  can lose its room to another thread and loop again, but some thread
+  always makes progress.
 
 ## Interim routing layer
 
@@ -367,12 +412,19 @@ bytes back.
   `FileStore` with flush and reopen, and with 8 threads on one leaf's
   keys. A watchdog turns a deadlock into a failure. Since plan 0013 every
   write goes through mini-pages, so these runs exercise buffering, merges,
-  and merge splits under contention.
+  and merge splits under contention. Since plan 0014,
+  `threads_agree_under_constant_eviction` runs writers, readers, scanners,
+  and a looping `flush` on 1 KiB and 2 KiB circular buffers (1 KiB with
+  second-chance shares of 10 and 0 percent, 2 KiB with 100 percent), so
+  every thread evicts and relocates. `a_writer_waits_while_every_block_is_claimed`
+  claims every live block, starts a writer that needs room, and then
+  evicts the claims; under a watchdog, the writer must finish.
 - `crates/bf-tree/src/tests/buffered.rs` runs four writers on a
   `FileStore` while another thread calls `flush` in a loop. After a final
   `flush` and a reopen, the tree must hold every write. Plan 0013 ran the
   concurrent suites 20 times in release and 10 times in debug builds
-  without a failure.
+  without a failure. Plan 0014 ran them 20 times in release and 5 times in
+  debug builds without a failure.
 - `crates/bf-tree/src/tests/route.rs` checks that a route taken before a
   split reports `route_changed`, that writes without a split do not, and
   that a write through a stale route lands in the right half.
