@@ -192,3 +192,56 @@ fn a_route_under_the_root_changes_when_the_root_grows() {
     assert!(!tree.route_changed(&tree.route(&key(0))));
     assert_eq!(tree.check_invariants(), Ok(()));
 }
+
+#[test]
+fn a_stale_parent_is_rejected_and_left_unchanged() {
+    let (tree, keys) = tall();
+    let first = key(keys[0]);
+    let leaf = ChildRef::Leaf(tree.find_leaf(&first));
+    let stale = tree.inner.find_parent(&first, leaf).unwrap().unwrap();
+    let (version, _) = tree.inner.frames().get(stale).read(|_| ()).unwrap();
+    assert!(tree.inner.confirm(stale, &first, leaf).is_some());
+    assert_eq!(
+        tree.inner.frames().get(stale).validate(version),
+        Ok(()),
+        "a confirmed but unchanged frame keeps its version"
+    );
+
+    // Split leaves under that parent until the parent itself splits: keys in
+    // its right half then have a new parent, and the old one is stale.
+    let mut i = 1;
+    let probe = loop {
+        let probe = key(keys[0] + i);
+        tree.put(&probe, &[3; 16]).unwrap();
+        if parent_of(&tree, &probe) != Some(stale) {
+            break probe;
+        }
+        i += 1;
+        assert!(i < 3000, "the parent never split");
+    };
+    let moved = ChildRef::Leaf(tree.find_leaf(&probe));
+    let (before, _) = tree.inner.frames().get(stale).read(|_| ()).unwrap();
+    assert!(tree.inner.confirm(stale, &probe, moved).is_none());
+    assert_eq!(
+        tree.inner.frames().get(stale).validate(before),
+        Ok(()),
+        "a rejected frame is released unchanged"
+    );
+    let found = tree.inner.find_parent(&probe, moved).unwrap().unwrap();
+    assert_ne!(found, stale);
+    assert!(tree.inner.confirm(found, &probe, moved).is_some());
+}
+
+#[test]
+fn the_root_is_found_as_the_parent_until_it_grows() {
+    let tree = small();
+    let root = tree.root();
+    assert_eq!(tree.inner.find_parent(&key(0), root), Ok(None));
+    split_near(&tree, 0);
+    let ChildRef::Inner(grown) = tree.root() else {
+        panic!("the root grew");
+    };
+    let left = ChildRef::Leaf(tree.find_leaf(&key(0)));
+    assert_eq!(left, root, "the old root leaf keeps the left half");
+    assert_eq!(tree.inner.find_parent(&key(0), left), Ok(Some(grown)));
+}

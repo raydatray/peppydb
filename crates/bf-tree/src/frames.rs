@@ -265,10 +265,6 @@ impl FrameWrite<'_> {
 
     /// The node as this guard sees it: the draft if it changed anything,
     /// else the current image.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by lock_parent from diff 7")
-    )]
     pub(super) fn node(&self) -> &InnerNode {
         self.draft
             .as_ref()

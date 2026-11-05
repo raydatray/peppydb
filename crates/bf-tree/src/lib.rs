@@ -288,6 +288,24 @@ pub enum TreeError {
 /// reader-writer lock per leaf; inner nodes are in-memory data derived from
 /// leaf fences, in version-locked frames that readers never lock. Every
 /// operation takes `&self`.
+///
+/// Lock order (plan 0016): a thread acquires waitable locks only in this
+/// order, so no cycle of waits can form.
+///
+/// 1. Leaf locks: at most one reachable leaf, plus a split's fresh right
+///    leaf, which no other thread can reach.
+/// 2. Frame write locks, bottom-up by level, taken only by
+///    `Inner::install` while the thread holds the node whose split it
+///    propagates. Fresh frames are never locked.
+/// 3. `root_grow`, only while holding the current root's lock.
+/// 4. Store locks: a store's slot free list, which may in turn take the
+///    locks below.
+/// 5. Innermost locks: the circular-buffer mutex, a store slot's page
+///    mutex, and table growth. Nothing is acquired while one is held.
+///
+/// Readers take no frame lock and no `root_grow`, and hold at most one leaf
+/// S lock. Scans release a leaf before locking the next; eviction and
+/// `make_room` run with no leaf lock.
 #[derive(Debug)]
 pub struct Tree {
     config: TreeConfig,
