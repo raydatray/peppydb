@@ -2,7 +2,9 @@
 
 use std::collections::VecDeque;
 
-use super::Metrics;
+use bf_tree_node_id::LeafId;
+
+use super::{Kind, Metrics};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BlockState {
@@ -12,6 +14,10 @@ pub(super) enum BlockState {
     Freed,
     /// Freed, never reused; dead until the head passes it.
     Tombstone,
+    /// Claimed by an evictor. Never reused; the head waits for it.
+    Evicting,
+    /// Retired by its evictor after the owner returned the handle.
+    Evicted,
     /// Covers the end of the slab when a block would cross it; never had a
     /// handle.
     Filler,
@@ -21,8 +27,8 @@ impl BlockState {
     /// Whether the head may pass the block.
     fn is_dead(self) -> bool {
         match self {
-            Self::Live => false,
-            Self::Freed | Self::Tombstone | Self::Filler => true,
+            Self::Live | Self::Evicting => false,
+            Self::Freed | Self::Tombstone | Self::Evicted | Self::Filler => true,
         }
     }
 }
@@ -35,6 +41,11 @@ pub(super) struct BlockMeta {
     /// rest of the slab for a filler.
     pub(super) span: usize,
     pub(super) state: BlockState,
+    pub(super) kind: Kind,
+    /// `None` for a filler.
+    pub(super) owner: Option<LeafId>,
+    /// The owner returned the handle while an evictor held the claim.
+    pub(super) freed_while_claimed: bool,
 }
 
 #[derive(Debug)]
@@ -44,7 +55,8 @@ pub(super) struct State {
     first_seq: u64,
     pub(super) head: usize,
     pub(super) tail: usize,
-    /// Live blocks. The slab is leaked on drop unless this is 0.
+    /// Handles not yet returned (live blocks, and claimed blocks whose owner
+    /// has not freed them). The slab is leaked on drop unless this is 0.
     pub(super) outstanding: usize,
     /// Per size class, ascending: sequence numbers of `Freed` blocks. An entry
     /// whose block the head has passed is stale (`seq < first_seq`).
@@ -87,9 +99,15 @@ impl State {
     }
 
     /// Take a hole of `class` that lies outside the second-chance region and
-    /// make it live. Holes that have aged into the region become tombstones
+    /// make it live for `kind` and `owner`. Holes that have aged into the region become tombstones
     /// on the way. Returns the hole's sequence number and logical address.
-    pub(super) fn take_hole(&mut self, class: usize, threshold: usize) -> Option<(u64, usize)> {
+    pub(super) fn take_hole(
+        &mut self,
+        class: usize,
+        threshold: usize,
+        kind: Kind,
+        owner: LeafId,
+    ) -> Option<(u64, usize)> {
         while let Some(seq) = self.free[class].pop() {
             if seq < self.first_seq {
                 // The head passed this hole; its space is already free.
@@ -107,6 +125,8 @@ impl State {
                 continue;
             }
             meta.state = BlockState::Live;
+            meta.kind = kind;
+            meta.owner = Some(owner);
             return Some((seq, meta.addr));
         }
         None
@@ -141,33 +161,60 @@ impl State {
         self.used() + self.filler(capacity, span) + span <= capacity
     }
 
-    /// Reserve `span` bytes at the tail, after a filler if needed, and return
-    /// the new block's sequence number and logical address. `None` if the
-    /// budget does not allow it; nothing changes then.
-    pub(super) fn bump(&mut self, capacity: usize, span: usize) -> Option<(u64, usize)> {
+    /// Reserve `span` bytes at the tail for `owner`, after a filler if
+    /// needed, and return the new block's sequence number and logical
+    /// address. `None` if the budget does not allow it; nothing changes then.
+    pub(super) fn bump(
+        &mut self,
+        capacity: usize,
+        span: usize,
+        kind: Kind,
+        owner: LeafId,
+    ) -> Option<(u64, usize)> {
         if !self.fits(capacity, span) {
             return None;
         }
 
         let filler = self.filler(capacity, span);
         if filler > 0 {
-            self.push(filler, BlockState::Filler);
+            self.push(filler, BlockState::Filler, kind, None);
             self.metrics.fillers += 1;
         }
         let addr = self.tail;
-        let seq = self.push(span, BlockState::Live);
+        let seq = self.push(span, BlockState::Live, kind, Some(owner));
         Some((seq, addr))
     }
 
-    fn push(&mut self, span: usize, state: BlockState) -> u64 {
+    fn push(&mut self, span: usize, state: BlockState, kind: Kind, owner: Option<LeafId>) -> u64 {
         let seq = self.first_seq + self.blocks.len() as u64;
         self.blocks.push_back(BlockMeta {
             addr: self.tail,
             span,
             state,
+            kind,
+            owner,
+            freed_while_claimed: false,
         });
         self.tail += span;
         seq
+    }
+
+    /// The oldest live block, marked `Evicting`, with its sequence number.
+    /// `Err(true)` if every remaining block that is not dead is already
+    /// claimed, `Err(false)` if none is.
+    pub(super) fn claim_oldest(&mut self) -> Result<(u64, &BlockMeta), bool> {
+        let mut busy = false;
+        for (index, meta) in self.blocks.iter_mut().enumerate() {
+            match meta.state {
+                BlockState::Live => {
+                    meta.state = BlockState::Evicting;
+                    return Ok((self.first_seq + index as u64, meta));
+                }
+                BlockState::Evicting => busy = true,
+                _ => {}
+            }
+        }
+        Err(busy)
     }
 
     /// Move the head past every dead block at the front. Holes it passes

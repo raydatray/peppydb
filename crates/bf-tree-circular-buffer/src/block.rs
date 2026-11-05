@@ -7,8 +7,8 @@
 
 use std::ptr::NonNull;
 
-use super::BLOCK_HEADER_BYTES;
 use super::slab::Slab;
+use super::{BLOCK_HEADER_BYTES, Victim};
 
 /// A live block: the only handle to its byte range in the circular buffer.
 ///
@@ -57,6 +57,11 @@ impl Block {
     /// The block's logical address in the circular buffer.
     pub fn addr(&self) -> usize {
         self.addr
+    }
+
+    /// Whether this is the block that `victim` names.
+    pub fn is(&self, victim: &Victim) -> bool {
+        self.seq == victim.seq()
     }
 
     pub(super) fn seq(&self) -> u64 {

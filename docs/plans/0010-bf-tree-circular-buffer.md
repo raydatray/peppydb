@@ -726,7 +726,7 @@ asserts `used() <= capacity()`. At the end every block is returned,
 - [x] Diff 3: Miri through Buck2.
 - [x] Diff 4: slab, bump allocation, fillers, budget.
 - [x] Diff 5: holes and the second-chance region.
-- [ ] Diff 6: claims.
+- [x] Diff 6: claims.
 - [ ] Diff 7: model, stress, Miri sizes, documentation.
 - [ ] Stack-wide verification; create `bf-tree-circular-buffer.md`; update
   the roadmap.
