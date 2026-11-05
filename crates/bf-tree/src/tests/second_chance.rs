@@ -87,7 +87,7 @@ fn a_hint_is_skipped_when_the_leaf_changed() {
     let tree = Tree::in_memory(with_percent(100)).unwrap();
     tree.put(b"a", b"1").unwrap();
     let noted = tree.note(&tree.leaves.read(leaf0()).unwrap());
-    assert!(noted.is_some());
+    assert!(noted.is_aging());
     // A write changes the block (and relocates it itself).
     tree.put(b"b", b"2").unwrap();
     let after_write = addr(&tree, leaf0());

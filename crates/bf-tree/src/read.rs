@@ -49,6 +49,7 @@ impl Tree {
             }
             Residency::Base => None,
         };
+        let base_served = buffered.is_none();
         let result = match buffered {
             Some(value) => f(value),
             None => with_scratch(|scratch| -> Result<_, TreeError> {
@@ -62,7 +63,8 @@ impl Tree {
             })?,
         };
         drop(leaf);
-        self.maintain(noted)?;
+        let hint = if base_served { self.read_hint() } else { None };
+        self.maintain(noted.with_hint(hint))?;
         Ok(result)
     }
 
