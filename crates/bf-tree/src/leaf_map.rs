@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use super::{TreeConfig, TreeError};
 use bf_tree_circular_buffer::{Block, CircularBuffer};
-use bf_tree_mini_page::{Mini, MiniPage, RefBits, SizeClasses};
+use bf_tree_mini_page::{Mini, MiniPage, RefBits, SizeClasses, WriteOutcome};
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::PageStore;
@@ -13,8 +13,9 @@ use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 /// The lock is the paper's per-leaf reader-writer lock (§3.3). It covers the
 /// entry and the leaf's base page in the store: every base write happens
 /// under the exclusive lock, so a base page read under the shared lock is
-/// consistent. No page stays resident; each access loads the base page into
-/// a thread-local scratch buffer.
+/// consistent. Base pages are not resident: an access loads one into a
+/// thread-local scratch buffer. A leaf's mini-page, if any, lives in the
+/// circular buffer and is reached through its entry.
 #[derive(Debug)]
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
@@ -22,8 +23,6 @@ pub(super) struct LeafMap {
     /// Every mini-page block. Its mutex is innermost: it may be taken under
     /// a leaf lock, and it never waits for one.
     pub(super) circular_buffer: CircularBuffer,
-    /// The mini-page ladder; blind writes (the next diff) use it.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) classes: SizeClasses,
 }
 
@@ -193,6 +192,28 @@ impl LeafMap {
         (0..self.entries.len()).map(LeafId::from_index)
     }
 
+    /// Buffer one record in `leaf`'s mini-page, creating or growing it. This
+    /// is the only place that allocates mini-page blocks. Never reads the
+    /// base page.
+    pub(super) fn buffer(
+        &self,
+        leaf: &mut LeafWrite<'_>,
+        key: &[u8],
+        state: bf_tree_page::RecordState<'_>,
+    ) -> Result<WriteOutcome, TreeError> {
+        let mut slot = leaf.take_mini();
+        let result = bf_tree_mini_page::buffer(
+            &mut slot,
+            &self.circular_buffer,
+            leaf.id,
+            &self.classes,
+            key,
+            state,
+        );
+        leaf.put_mini(slot);
+        Ok(result?)
+    }
+
     /// Lock leaf `id` exclusively if it is a live slot.
     pub(super) fn write_if_live(&self, id: LeafId) -> Option<LeafWrite<'_>> {
         self.write(id).ok()
@@ -308,33 +329,41 @@ impl LeafMap {
 
 #[cfg(test)]
 impl LeafMap {
-    /// Install a mini-page holding `records` for leaf `id`, allocated from
-    /// the circular buffer at the smallest class that holds them. Test
-    /// fixtures build buffered leaves this way before blind writes exist.
+    /// Apply `records` to leaf `id`'s mini-page, as they are, without growing
+    /// it or merging. A leaf without a mini-page gets one, allocated from the
+    /// circular buffer at the smallest class that holds the records. Test
+    /// fixtures build buffered leaves, including clean records, this way.
+    /// `PageFull` if an existing mini-page cannot take the records; records
+    /// applied before the failure stay.
     pub(super) fn install_mini(
         &self,
         id: LeafId,
         records: &[(&[u8], bf_tree_page::RecordState<'_>)],
     ) -> Result<(), TreeError> {
         let mut leaf = self.write(id)?;
-        let bytes: usize = records
+        let mut mini = match leaf.take_mini() {
+            Some(mini) => mini,
+            None => {
+                let bytes: usize = records
+                    .iter()
+                    .map(|(key, state)| 8 + key.len() + state.value().map_or(0, <[u8]>::len))
+                    .sum();
+                let class = self
+                    .classes
+                    .smallest_for(bytes)
+                    .ok_or(TreeError::Page(PageError::RecordTooLarge))?;
+                let block = self
+                    .circular_buffer
+                    .alloc(class, bf_tree_circular_buffer::Kind::Mini, id)
+                    .map_err(|_| TreeError::CircularBufferFull)?;
+                Mini::new(block, id)
+            }
+        };
+        let applied = records
             .iter()
-            .map(|(key, state)| 8 + key.len() + state.value().map_or(0, <[u8]>::len))
-            .sum();
-        let class = self
-            .classes
-            .smallest_for(bytes)
-            .ok_or(TreeError::Page(PageError::RecordTooLarge))?;
-        let block = self
-            .circular_buffer
-            .alloc(class, bf_tree_circular_buffer::Kind::Mini, id)
-            .map_err(|_| TreeError::InvalidConfig("circular buffer full"))?;
-        let mut mini = Mini::new(block, id);
-        for (key, state) in records {
-            mini.apply(key, *state)?;
-        }
+            .try_for_each(|(key, state)| mini.apply(key, *state).map(drop));
         leaf.put_mini(Some(mini));
-        Ok(())
+        Ok(applied?)
     }
 
     /// Point leaf `id`'s mini-page at another leaf, to test the checker.

@@ -1,5 +1,6 @@
-//! Reads, scans, and flush through hand-built mini-pages, before blind writes
-//! create them.
+//! Reads, scans, and flush through hand-built mini-pages over flushed base
+//! pages. Each test flushes its puts first, so that the base page holds them
+//! and the leaf has no mini-page when the fixture installs one.
 
 use bf_tree_page::RecordState;
 
@@ -19,6 +20,7 @@ fn reads_hit_the_mini_page_and_fall_back_to_the_base() {
     for key in [&b"a"[..], b"b", b"c"] {
         tree.put(key, b"base").unwrap();
     }
+    tree.flush().unwrap();
     tree.leaves
         .install_mini(
             leaf0(),
@@ -57,6 +59,7 @@ fn flush_merges_in_place_and_keeps_every_write_after_reopen() {
     let tree = small();
     tree.put(b"a", b"base").unwrap();
     tree.put(b"c", b"base").unwrap();
+    tree.flush().unwrap();
     tree.leaves
         .install_mini(
             leaf0(),
@@ -91,7 +94,9 @@ fn flush_splits_a_leaf_whose_merge_does_not_fit() {
     for i in 0..8 {
         tree.put(&key(i * 2), &[1; 12]).unwrap();
     }
+    tree.flush().unwrap();
     assert_eq!(tree.leaf_count(), 1);
+    assert_eq!(tree.buffered_leaves(), 0);
     // Four more (88 bytes) do not fit the base: the merge must split.
     let values: Vec<[u8; 12]> = (0..4).map(|i| [2 + i; 12]).collect();
     let records: Vec<(Vec<u8>, &[u8])> = (0..4)
@@ -124,12 +129,37 @@ fn flush_splits_a_leaf_whose_merge_does_not_fit() {
 fn into_store_without_flush_loses_buffered_records() {
     let tree = small();
     tree.put(b"a", b"base").unwrap();
+    tree.flush().unwrap();
     tree.leaves
         .install_mini(leaf0(), &[(b"b", RecordState::Insert(b"buffered"))])
         .unwrap();
     let reopened = Tree::open(tree.into_store()).unwrap();
     assert_eq!(reopened.get(b"a"), Ok(Some(b"base".to_vec())));
     assert_eq!(reopened.get(b"b"), Ok(None));
+}
+
+#[test]
+fn a_fixture_applies_into_the_mini_page_a_put_created() {
+    let tree = small();
+    tree.put(b"a", b"put").unwrap();
+    assert_eq!(tree.buffered_leaves(), 1);
+    tree.leaves
+        .install_mini(
+            leaf0(),
+            &[
+                (b"b", RecordState::Insert(b"fixture")),
+                (b"a", RecordState::Delete),
+            ],
+        )
+        .unwrap();
+    assert_eq!(tree.buffered_leaves(), 1, "the same mini-page");
+    assert_eq!(tree.get(b"a"), Ok(None));
+    assert_eq!(tree.get(b"b"), Ok(Some(b"fixture".to_vec())));
+    assert_eq!(tree.check_invariants(), Ok(()));
+
+    tree.flush().unwrap();
+    let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
+    assert_eq!(all, [(b"b".to_vec(), b"fixture".to_vec())]);
 }
 
 #[test]

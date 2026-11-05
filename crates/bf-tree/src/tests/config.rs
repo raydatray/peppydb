@@ -1,5 +1,6 @@
 use super::*;
 use crate::store::InnerStore;
+use bf_tree_mini_page::SizeClasses;
 
 #[test]
 fn defaults_validate() {
@@ -57,6 +58,8 @@ fn open_with_takes_runtime_settings_and_checks_the_layout() {
     let config = config(256, 128, 8, 16);
     let tree = Tree::in_memory(config).unwrap();
     tree.put(b"k", b"v").unwrap();
+    // Buffered writes reach the store only through a merge.
+    tree.flush().unwrap();
     let store = tree.into_store();
 
     // A different budget is a runtime setting.
@@ -97,26 +100,91 @@ fn capacities_follow_the_page_rule() {
     ));
 }
 
+/// The old admission rule, `7K + 3V <= L - 72`, which direct base-page
+/// writes needed before writes were buffered.
+fn old_leaf_rule(leaf: usize, key: usize, value: usize) -> bool {
+    leaf.checked_sub(72)
+        .is_some_and(|room| 7 * key + 3 * value <= room)
+}
+
 #[test]
-fn leaf_rule_is_tight_on_both_sides() {
-    // 7K + 3V <= L - 72.
+fn ladder_rule_is_tight_on_both_sides() {
+    // M = floor64(L - 5K - V - 24) >= 64 and 32 + 8 + K + V <= M.
     let cases = [
-        (4096, 64, 1192, true),
-        (4096, 64, 1193, false),
-        (4096, 574, 0, true),
-        (4096, 575, 0, false),
+        // The record bound: M = 1920 holds 40 + 64 + 1816 = 1920 bytes.
+        (4096, 64, 1816, true),
+        (4096, 64, 1817, false),
+        // 4096 - 5 * 664 - 24 = 752 gives M = 704 = 40 + 664; with
+        // K = 665, 747 still gives M = 704 < 40 + 665.
+        (4096, 664, 0, true),
+        (4096, 665, 0, false),
+        // The record bound at the smallest ladder, M = 64.
+        (128, 1, 23, true),
+        (128, 1, 24, false),
+        (128, 2, 22, true),
+        (128, 2, 23, false),
+        (256, 12, 44, true),
+        (256, 12, 45, false),
+        // The class bound: 128 - 40 - 0 - 24 = 64, but one more value byte
+        // leaves 63, and M = 0 < 64.
         (128, 8, 0, true),
         (128, 8, 1, false),
-        (128, 2, 14, true),
-        (128, 2, 15, false),
-        // 64-byte leaves cannot satisfy the rule at all.
+        (128, 9, 0, false),
+        // 64-byte leaves have no ladder at all.
         (64, 1, 0, false),
-        (4096, usize::MAX, usize::MAX, false),
     ];
     for (leaf, key, value, valid) in cases {
         let result = config(leaf, 4096, key, value).validate();
         assert_eq!(result.is_ok(), valid, "L={leaf} K={key} V={value}");
+        let ladder = SizeClasses::derive(leaf, key, value);
+        assert_eq!(ladder.is_ok(), valid, "L={leaf} K={key} V={value}");
     }
+}
+
+/// Huge limits are rejected, not overflowed: the ladder rule, with checked
+/// arithmetic, runs before the inner-node rule's sums.
+#[test]
+fn huge_limits_are_rejected_without_overflow() {
+    let result = config(4096, 4096, usize::MAX, usize::MAX).validate();
+    assert!(matches!(result, Err(TreeError::InvalidConfig(_))));
+}
+
+#[test]
+fn admission_sweep_lists_changes_from_the_old_rule() {
+    let keys = [1, 8, 9, 16, 64, 255];
+    let values = [0, 16, 64, 256, 1024, 1800];
+    let (mut both, mut neither, mut old_only, mut new_only) = (0, 0, 0, 0);
+    for leaf in (128..=4096).step_by(64) {
+        for key in keys {
+            for value in values {
+                let old = old_leaf_rule(leaf, key, value);
+                let new = config(leaf, 4096, key, value).validate().is_ok();
+                match (old, new) {
+                    (true, true) => both += 1,
+                    (false, false) => neither += 1,
+                    (true, false) => old_only += 1,
+                    (false, true) => new_only += 1,
+                }
+            }
+        }
+    }
+    eprintln!(
+        "admission sweep: both {both}, neither {neither}, \
+         old rule only {old_only}, new rule only {new_only}"
+    );
+
+    // Large values: the ladder accepts what the old rule rejected.
+    assert!(!old_leaf_rule(4096, 64, 1800));
+    assert_eq!(config(4096, 4096, 64, 1800).validate(), Ok(()));
+    // Small leaves: a record must fit the 64-byte class, which is stricter.
+    // 192 - 45 - 16 - 24 = 107 gives M = 64 < 40 + 9 + 16.
+    assert!(old_leaf_rule(192, 9, 16));
+    assert!(matches!(
+        config(192, 4096, 9, 16).validate(),
+        Err(TreeError::InvalidConfig(_))
+    ));
+    assert!(old_only > 0 && new_only > 0);
+    assert_eq!(both + neither + old_only + new_only, 63 * 36);
 }
 
 #[test]
