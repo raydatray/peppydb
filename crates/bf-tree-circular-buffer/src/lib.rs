@@ -40,11 +40,8 @@
 //!
 //! # Locking
 //!
-//! Poisoning is ignored: a panic inside a critical section has already failed
-//! its own operation and must not fail every later caller. To keep that safe,
-//! every critical section follows one rule, **check before mutating**: all
-//! checks and assertions run before the first write to the metadata, so a
-//! panic leaves it consistent.
+//! The metadata mutex comes from `bf-tree-sync`, which ignores poisoning. Every
+//! critical section here checks before it mutates, as that crate requires.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(
@@ -53,7 +50,8 @@
 )]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use bf_tree_sync::{Mutex, MutexGuard};
 
 use bf_tree_node_id::LeafId;
 
@@ -392,13 +390,13 @@ impl CircularBuffer {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock()
     }
 }
 
 impl Drop for CircularBuffer {
     fn drop(&mut self) {
-        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.get_mut();
         if state.outstanding != 0 {
             // Blocks still point into the slab; keep their bytes valid.
             self.slab.leak();

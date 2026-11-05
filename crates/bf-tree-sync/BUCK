@@ -1,0 +1,10 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+peppy_rust_library(
+    name = "bf-tree-sync",
+    visibility = [
+        "//crates/bf-tree-circular-buffer:",
+        "//crates/bf-tree-store:",
+        "//crates/bf-tree:",
+    ],
+)
