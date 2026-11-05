@@ -24,6 +24,10 @@ use std::sync::{PoisonError, TryLockError};
 
 pub use std::sync::{MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 
+mod table;
+
+pub use table::Table;
+
 /// A mutex whose `lock` never fails.
 #[derive(Debug, Default)]
 pub struct Mutex<T>(std::sync::Mutex<T>);
