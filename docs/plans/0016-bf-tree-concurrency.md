@@ -667,14 +667,40 @@ Single-thread component numbers may come from either platform, labelled.
 - [x] Diff 4: `arc-swap`.
 - [x] Diff 5: frame primitive.
 - [x] Diff 6: lock-free descent.
-- [ ] Diff 7: concurrent propagation and root growth.
+- [x] Diff 7: concurrent propagation and root growth.
 - [ ] Diff 8: concurrent model extensions and soak.
 - [ ] Diff 9: design documents, measurements, roadmap.
 - [ ] Stack-wide verification.
 
 ## Discoveries and plan changes
 
-None yet.
+- **The writer needs a release fence after the CAS.** The plan's sketch
+  took the version odd with an acquire CAS and then stored the image. On
+  weak memory that store can become visible before the odd version, so a
+  reader could load the new image and still validate against the old even
+  version. `FrameRef::write` issues `fence(Release)` after the CAS, the
+  standard seqlock writer fence; the module documentation gives the
+  argument. `arc-swap` documents that each of its concurrent operations
+  contains a `SeqCst` read-modify-write.
+- **`FrameWrite` holds the current image as an `Arc`.** A borrow cannot
+  outlive an `arc-swap` load guard, so the write guard loads the image
+  with `load_full` when it locks. This costs one reference-count increment
+  per frame write lock, on writers only.
+- **The routing layer is one `Inner` type.** The root word, the frames,
+  and `root_grow` (the structure mutex in diff 6) live in
+  `crates/bf-tree/src/inner.rs` behind the existing `tree.inner` field, so
+  callers and fixtures changed mechanically. `Path` and `locate` remain for
+  tests only.
+- **A concurrent test checked invariants without quiescence.**
+  `threads_agree_under_constant_eviction` (plan 0014) ran
+  `check_invariants` while its flusher thread still ran. A flush merge
+  can split a leaf, so the checker could see a new leaf page before its
+  parent was published (`FenceMismatch`). The panic then skipped the
+  flusher's stop flag, so the scope never joined and the watchdog fired.
+  It appeared about once in 20 runs under 12-way parallel load after
+  diff 7. The test now checks after the flusher stops, and background
+  loops stop through a drop guard, so a failure reports itself instead of
+  hanging.
 
 ## Agent notes
 

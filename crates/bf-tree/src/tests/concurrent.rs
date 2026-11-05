@@ -171,15 +171,36 @@ fn scanner(tree: &Tree, seed: u64, stop: &AtomicBool) -> usize {
 /// Run writers, readers, and scanners on one tree; afterwards the tree must
 /// equal the union of the writers' oracles and pass its invariants.
 fn run(tree: Tree, writers: u8, readers: usize, ops: usize) -> Tree {
-    run_shared(&tree, writers, readers, ops);
+    let oracle = run_shared(&tree, writers, readers, ops);
+    check_quiescent(&tree, oracle);
     tree
 }
 
-/// [`run`] on a shared tree, so other threads may use it meanwhile.
-fn run_shared(tree: &Tree, writers: u8, readers: usize, ops: usize) {
+/// The tree equals `oracle` and passes its invariants. Only meaningful when
+/// no other thread uses the tree.
+fn check_quiescent(tree: &Tree, oracle: BTreeMap<Vec<u8>, Vec<u8>>) {
+    let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
+    assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
+    assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+/// Sets the flag when dropped, so a background loop stops even when the
+/// test panics; otherwise its scope would never join and the test would
+/// hang until the watchdog fires.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The threads of [`run`] on a shared tree, so other threads may use it
+/// meanwhile; returns the union of the writers' oracles.
+fn run_shared(tree: &Tree, writers: u8, readers: usize, ops: usize) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let max_value = tree.config().max_value_len;
     let stop = AtomicBool::new(false);
-    let oracle = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let handles: Vec<_> = (0..writers)
             .map(|id| {
                 scope.spawn({
@@ -198,20 +219,17 @@ fn run_shared(tree: &Tree, writers: u8, readers: usize, ops: usize) {
             })
             .collect();
 
+        let stopping = StopOnDrop(&stop);
         let mut oracle = BTreeMap::new();
         for handle in handles {
             oracle.extend(handle.join().unwrap());
         }
-        stop.store(true, Ordering::Relaxed);
+        drop(stopping);
         for handle in others {
             assert!(handle.join().unwrap() > 0);
         }
         oracle
-    });
-
-    let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
-    assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
-    assert_eq!(tree.check_invariants(), Ok(()));
+    })
 }
 
 /// Tiny nodes force frequent leaf splits and root growth.
@@ -305,17 +323,21 @@ fn threads_agree_under_constant_eviction() {
             };
             let stop = AtomicBool::new(false);
             let tree = Tree::in_memory(config).unwrap();
-            std::thread::scope(|scope| {
+            let oracle = std::thread::scope(|scope| {
                 let flusher = scope.spawn(|| {
                     while !stop.load(Ordering::Relaxed) {
                         tree.flush().unwrap();
                         assert!(tree.circular_buffer_used() <= bytes);
                     }
                 });
-                run_shared(&tree, 4, 4, 1500);
-                stop.store(true, Ordering::Relaxed);
+                let stopping = StopOnDrop(&stop);
+                let oracle = run_shared(&tree, 4, 4, 1500);
+                drop(stopping);
                 flusher.join().unwrap();
+                oracle
             });
+            // Only now is the tree quiescent: a flush merge may split a leaf.
+            check_quiescent(&tree, oracle);
             assert!(tree.height() >= 3);
             tree.flush().unwrap();
             let expected: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
@@ -369,4 +391,43 @@ fn a_writer_waits_while_every_block_is_claimed() {
         assert_eq!(tree.get(&[0xfe, 19]), Ok(Some(vec![2; 16])));
         assert_eq!(tree.check_invariants(), Ok(()));
     });
+}
+
+/// Twelve writers on interleaved keys (the writer ID is the last byte), so
+/// every split races with splits of its neighbours and of their parents.
+/// Ascending order splits the rightmost path repeatedly; a scrambled order
+/// spreads splits over the tree.
+#[test]
+fn twelve_writers_on_interleaved_keys_split_concurrently() {
+    for ascending in [true, false] {
+        with_watchdog(Duration::from_secs(120), move || {
+            let tree = Tree::in_memory(tiny()).unwrap();
+            let oracle: BTreeMap<_, _> = std::thread::scope(|scope| {
+                let writers: Vec<_> = (0..12u8)
+                    .map(|id| {
+                        let tree = &tree;
+                        scope.spawn(move || {
+                            let mut oracle = BTreeMap::new();
+                            for n in 0..1500u16 {
+                                let n = if ascending { n } else { n.wrapping_mul(40503) };
+                                let key = vec![(n >> 8) as u8, n as u8, id];
+                                let value = value(&key, 1, usize::from(id % 4));
+                                tree.put(&key, &value).unwrap();
+                                oracle.insert(key, value);
+                            }
+                            oracle
+                        })
+                    })
+                    .collect();
+                writers
+                    .into_iter()
+                    .flat_map(|writer| writer.join().unwrap())
+                    .collect()
+            });
+            assert!(tree.height() >= 4, "height {}", tree.height());
+            let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
+            assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
+            assert_eq!(tree.check_invariants(), Ok(()));
+        });
+    }
 }
