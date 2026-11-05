@@ -17,7 +17,7 @@ the protocol that uses these locks.
 
 ```mermaid
 flowchart LR
-    Tree --> Inner["RwLock&lt;InnerStore&gt;: derived, in memory"]
+    Tree --> Inner["Inner: root word + frames, derived, in memory"]
     Tree --> Map["LeafMap"]
     Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
     Map --> CB["CircularBuffer: mini-page blocks"]
@@ -381,8 +381,10 @@ The write-ahead log and crash atomicity are separate components. The page header
 ## Baselines
 
 All baselines are informational and single-threaded. They live in the tree
-tests as ignored benchmarks. Contended numbers are not taken on macOS;
-[plan 0016](../plans/0016-bf-tree-concurrency.md) takes them on Linux.
+tests as ignored benchmarks. Contended numbers live in the
+[concurrency design](bf-tree-concurrency.md#measurements)
+([plan 0016](../plans/0016-bf-tree-concurrency.md)): macOS numbers with
+their caveats, and Linux numbers once the Linux run is done.
 
 ### Mini-pages, write-through, eviction, and caching (plans 0012 to 0015)
 

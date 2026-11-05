@@ -1,6 +1,6 @@
 # 0016: Concurrent inner nodes with version-locked frames
 
-**Status:** Agreed
+**Status:** Implemented (Linux measurements pending)
 
 **Design references:** [Concurrency](../design/bf-tree-concurrency.md)
 (created by plan 0012, completed by this stack),
@@ -648,7 +648,7 @@ Resolved:
 | Concurrent splits | contended-split tests, tiny nodes, 12 threads, watchdog | Union oracle agrees; invariants hold |
 | Concurrent model | `-- concurrent` filter | Overlapping-key, monotonic, eviction, and policy cases pass; budget holds |
 | Soak | `tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored concurrent_soak` | Passes |
-| Benchmarks | `tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline_` at diff 2 and the tip | Recorded; single thread within about 10%; reads scale at least as well as the interim design |
+| Benchmarks | `tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::` at diff 2 and the tip | Recorded; single thread within about 10%; reads scale at least as well as the interim design |
 | Formatting and lints | `tools/fmt.sh`; `tools/clippy.sh` | Clean |
 | Buck2 tests | `tools/buck2 test //crates/... //bin/... //go/...` | Pass |
 | Generated files | `tools/autocargo --check`; `tools/gobuckify-remote --check` | Clean |
@@ -669,8 +669,54 @@ Single-thread component numbers may come from either platform, labelled.
 - [x] Diff 6: lock-free descent.
 - [x] Diff 7: concurrent propagation and root growth.
 - [x] Diff 8: concurrent model extensions and soak.
-- [ ] Diff 9: design documents, measurements, roadmap.
-- [ ] Stack-wide verification.
+- [x] Diff 9: design documents, measurements, roadmap.
+- [x] Stack-wide verification on macOS.
+- [ ] Linux: container check, contended benchmarks, and soak (needs a working Docker engine).
+
+## Verification outcomes (2026-11-05)
+
+| Check | Outcome |
+| --- | --- |
+| Frames | `tests/frames.rs`: a read validates until a publication; a held frame gives `Retry`; an unchanged release restores the version; snapshots are immutable; 4 writers doing 2000 locked increments each lose no update (version 16000); 2 writers making 20,000 publications each against 4 readers produce no torn image, and every validated read holds the image published at its version. 20 of 20 release runs. |
+| Reader protocol | `tests/route.rs`: a held frame makes `try_descend` return `Retry` at once; a route survives splits under other parents but not under its own; a leaf-root route is anchored at the root word and changed by root growth; a route under the root changes when the root grows; `confirm` rejects a stale parent and releases it unchanged; `find_parent` finds the root as the parent until it grows. |
+| Concurrent splits | `twelve_writers_on_interleaved_keys_split_concurrently` (leaf capacity 256, inner capacity 128; ascending and scrambled orders): height 4 or more, the union oracle agrees, invariants hold. |
+| Contention model | `tests/contention.rs`: overlapping writers (6 writers, 6 readers and scanners, 1500 operations per phase, two phases with `flush` and reopen) for record caching, page caching with full pages, and no caching, on a `MemStore` with a 1 KiB circular buffer and a `FileStore` with a 2 KiB circular buffer; plus an 8-writer run with 512-byte leaves. Every key ends with one of its writers' last writes; the budget holds; invariants hold at quiescence. |
+| Repeated runs | Concurrent, route, frames, and contention suites: 30 of 30 and 20 of 20 release runs; 48 of 48 debug runs with 12 copies in parallel (the load that exposed the test flaw recorded in Discoveries). |
+| Soak | `concurrent_soak` on macOS for 30 s: 125 rounds, 12 threads, pass. Linux soak pending. |
+| Benchmarks | macOS only (Apple M4 Pro, 12 cores; release; `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::`; 1M 8-byte keys, 16-byte values, 32 MiB buffer, 1 s per point). Before is diff 2 (interim lock), after is the tip, same harness. Full tables in the [concurrency design](../design/bf-tree-concurrency.md#measurements). |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (327 tests), and `go vet` and `go test` pass. Miri was not needed: the stack does not change `crates/bf-tree-circular-buffer`. |
+| Pending | Linux container check (diff 3: `tools/linux-run tools/buck2 test //crates/bf-tree/...`), Linux contended benchmarks at diff 2 and the tip, and the Linux soak. The local Docker Desktop engine returned HTTP 500 for every API call during this work. |
+
+Single-thread components (ns per operation, before and after): descent
+126–132 and 127–129; leaf S lock and unlock 6.1 and 6.2; leaf X lock and
+unlock 2.8 and 2.8; `get_with` on a hot leaf 170–177 and 197–201 (+15%);
+`put` on random leaves 587–625 and 610–642.
+
+Throughput (M ops/s at 1, 2, 4, 8, and 12 threads):
+
+| Workload | Before | After |
+| --- | --- | --- |
+| Record caching, get | 1.44, 2.92, 3.88, 2.10, 1.63 | 1.39, 2.91, 6.36, 12.26, 14.19 |
+| Record caching, put | 1.53, 3.35, 4.30, 2.04, 1.62 | 1.47, 3.40, 6.94, 12.87, 14.31 |
+| Record caching, 50/50 | 1.64, 3.25, 4.13, 2.08, 1.64 | 1.62, 3.42, 6.91, 13.08, 14.75 |
+| Page caching, get | 1.62, 3.26, 4.55, 2.13, 1.67 | 1.57, 3.39, 6.79, 9.02, 6.06 |
+| Page caching, put | 1.53, 3.32, 4.16, 2.04, 1.63 | 1.53, 3.43, 7.00, 12.77, 14.26 |
+| Page caching, 50/50 | 1.51, 3.09, 4.66, 2.15, 1.67 | 1.48, 3.12, 6.19, 9.76, 9.81 |
+| Hot set 1 leaf (117 keys), get | 5.24, 5.52, 3.64, 2.25, 2.00 | 4.66, 6.74, 4.15, 2.45, 2.10 |
+| Hot set 1 leaf, 90/10 | 5.23, 5.23, 5.98, 2.44, 2.36 | 4.55, 6.44, 4.24, 2.81, 2.60 |
+| Hot set 32 leaves (3945 keys), get | 4.66, 7.37, 3.33, 1.88, 1.52 | 4.29, 7.32, 13.49, 24.18, 26.95 |
+| Hot set 32 leaves, 90/10 | 4.68, 7.44, 3.33, 1.89, 1.52 | 4.28, 7.79, 12.85, 22.52, 24.27 |
+
+Interpretation: before, every descent wrote the cache line of the one
+inner `RwLock`, so throughput fell beyond 4 threads. After, descents write
+no shared cache line, and throughput scales to 12 threads on uniform keys
+and on a 32-leaf hot set. A single hot leaf stays bound by its leaf lock
+(the macOS `RwLock`, which parks readers under reader-reader contention).
+Page-caching `get` flattens at 8 to 12 threads; this was not investigated
+(possibly full-page promotion contention or macOS reader parking).
+Single-thread uniform `get` and `put` stay within about 5 percent; the
+hot-leaf `get_with` component regresses about 15 percent, above the plan's
+10 percent target (see Discoveries).
 
 ## Discoveries and plan changes
 
@@ -701,6 +747,36 @@ Single-thread component numbers may come from either platform, labelled.
   diff 7. The test now checks after the flusher stops, and background
   loops stop through a drop guard, so a failure reports itself instead of
   hanging.
+- **Single-thread hot-leaf regression, deferred to plan 0023.** The
+  `get_with` component on one hot leaf is about 15 percent slower than
+  under the interim lock (197–201 ns against 170–177 ns), above the 10
+  percent target. Uniform single-thread `get` and `put` stay within about
+  5 percent, and the descent component over keys spread across the tree
+  did not change. The likely cause is one `arc-swap` load per level, each
+  with a `SeqCst` read-modify-write, which shows only when the whole
+  descent is cached. This is not confirmed.
+  [Plan 0023](0023-bf-tree-io-perf.md) should measure it and consider a
+  cheaper per-level load, for example a cached `arc-swap` load.
+- **The before-and-after benchmarks are from macOS.** The plan required
+  contended numbers from the Linux recipe. The local Docker engine was
+  unavailable, so the stack recorded macOS numbers at diff 2 and at the
+  tip with the same harness and labelled them. Linux numbers, the Linux
+  soak, and diff 3's container check remain open in Progress.
+- **The soak test is `concurrent_soak` in `tests/contention.rs`.** It runs
+  rounds of the contention model across caching policies, buffer sizes
+  (1, 2, and 4 KiB), and backends for `PEPPYDB_SOAK_SECS` seconds
+  (default 60). `tools/linux-run` forwards `PEPPYDB_SOAK_SECS` (added to
+  diff 3 when the docs were written).
+- **Use the `tests::bench::` filter.** The `baseline_` filter in the
+  verification strategy also matches `baseline_throughput` and
+  `baseline_file_store` in `tests/model.rs`. The recorded runs, and the
+  comments in `bench.rs` and `tools/linux-run` (corrected in diffs 2 and
+  3), use `tests::bench::`, which selects exactly the three benchmarks of
+  this stack.
+- **`tools/linux-run` uses volumes, not a Buck2 isolation directory.**
+  Linux build outputs live in named volumes mounted over `buck-out/` and
+  `target/`, which keeps them apart from the host's as the Agent notes
+  require.
 
 ## Agent notes
 

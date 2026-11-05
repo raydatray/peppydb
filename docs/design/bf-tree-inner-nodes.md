@@ -49,8 +49,10 @@ buffer unchanged.
 
 The header is structural only. Upstream's 32-byte header also holds an
 optimistic-lock version, a disk offset, and a snapshot version with a root
-flag. peppydb keeps that state outside the node image, in an owning frame, a
-side table, or the tree:
+flag. peppydb keeps that state outside the node image. The lock version is
+the owning frame's `version` word
+([concurrency](bf-tree-concurrency.md#frames)); the tree keeps the root
+in its own root word:
 
 - An `AtomicU64` lock cannot live in an unaligned byte view.
 - `init` and splitting overwrite the whole buffer, which would clobber an
@@ -272,21 +274,24 @@ decode an unknown child kind or the reserved ID as a valid ID. Their results
 are meaningless for bytes that no valid node contains. This differs from
 `Page`, whose reads may panic on invalid bytes.
 
-The reason is optimistic latch coupling. A reader reads a version, works on the
-node without locking, and retries if the version changed. Such a reader can
-observe a node in the middle of a write and must survive it. Total reads matter
-already: `InnerNode` publicly derives `zerocopy`'s `FromBytes`, so safe code can
-view any buffer of a valid length as a node.
+Total reads were chosen for optimistic latch coupling that reads node bytes in
+place, where a reader can observe a node in the middle of a write. The tree's
+frames do not need them: a writer edits a private draft and publishes a new
+immutable image, so a reader never sees a node in the middle of a write
+([plan 0016](../plans/0016-bf-tree-concurrency.md)). Total reads stay because
+`InnerNode` publicly derives `zerocopy`'s `FromBytes`, so safe code can view
+any buffer of a valid length as a node, and keeping them costs nothing.
 
 Mutating methods assume valid bytes; nothing checks stored bytes yet. A
 validating constructor for nodes loaded from storage is future work, which
 should also decide whether the public derive stays.
 
-The layout constrains the future concurrent owner. The version word lives in
-the owning frame, not the node image. An inner node stores no interval, so a
-reader cannot check from the node alone that it reached the right one. A
-concurrent descent must re-validate the parent's version after it reads a child
-reference.
+The layout shapes the concurrent owner. The version word lives in the owning
+frame, not the node image. An inner node stores no interval, so a reader
+cannot check from the node alone that it reached the right one. The tree's
+descent therefore validates the parent's version (or the root word) after it
+reads each child reference
+([concurrency](bf-tree-concurrency.md#validated-descent)).
 
 ## `InnerNode` in the tree
 
@@ -302,15 +307,22 @@ The node provides local operations; its owner composes them:
 The owner holds node buffers, resolves IDs to them, and enforces the admission
 limit. Only the owner can check that the parts agree: that child heights match,
 that leaf fences match parent separators, and that each ID refers to a live
-node. [BF-Tree structure](bf-tree-structure.md) describes the current owner,
-`Tree`.
+node. The owner is `Inner` in the `bf-tree` crate: each node lives in a frame
+as an immutable 4 KiB image, of which the node uses the first `capacity`
+bytes. Readers call `route` on a published image; a writer runs `try_insert`
+and `split_with_insert` on a private draft and publishes it. A new sibling or
+root is built in an owned image and allocated complete.
+[BF-Tree structure](bf-tree-structure.md) describes how `Tree` uses it, and
+the [concurrency design](bf-tree-concurrency.md#frames) describes the frames.
 
 ## Boundaries
 
-The node is a primitive: it stores and routes, and `Tree` decides when to
-split, propagate, and grow the root. Node ownership through stable frames,
-a reader synchronization protocol, and persistence of inner nodes belong to
-the components that add them and are not part of this format.
+The node is a primitive: it stores and routes, and the tree decides when to
+split, propagate, and grow the root. Node ownership through frames and the
+reader synchronization protocol live in `bf-tree`
+([plan 0016](../plans/0016-bf-tree-concurrency.md)). Persistence of inner
+nodes does not exist; the tree rebuilds them from leaf fences on open. None
+of these is part of this format.
 
 ## References
 
