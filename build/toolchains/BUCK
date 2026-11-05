@@ -22,8 +22,11 @@ RELEASE_FLAGS = [
 system_rust_toolchain(
     name = "rust",
     default_edition = "2024",
-    # `-Funsafe_code` was `[workspace.lints.rust] unsafe_code = "forbid"`.
-    rustc_flags = ["-Funsafe_code"] + select({
+    # `-Dunsafe_code` is `[workspace.lints.rust] unsafe_code = "deny"`. Deny,
+    # not forbid, so that a crate on the tools/check-unsafe allowlist can opt
+    # in with `#![allow(unsafe_code)]`. Third-party crates are built with
+    # `--cap-lints=allow` by the prelude and are not affected.
+    rustc_flags = ["-Dunsafe_code"] + select({
         "root//build:mode-release": RELEASE_FLAGS,
         "DEFAULT": [],
     }),

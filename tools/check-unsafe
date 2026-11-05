@@ -1,0 +1,40 @@
+#!/bin/sh
+# Fail if a first-party crate outside the allowlist can use unsafe code.
+#
+# The toolchain denies `unsafe_code` everywhere (build/toolchains/BUCK), so an
+# `unsafe` block fails to build unless its crate lowers the lint. This check
+# rejects any such opt-out outside the allowlist: an `allow`, `warn`, or
+# `expect` attribute naming `unsafe_code`, or a rustc flag in a BUCK file that
+# lowers it or caps lints. Adding a crate to the allowlist requires an approved
+# plan that shows no safe design meets the need (see AGENTS.md).
+set -eu
+cd "$(dirname "$0")/.."
+
+# Crate directories that may contain unsafe code, one per line.
+ALLOWLIST="
+"
+
+attr='(allow|warn|expect)[[:space:]]*\([^)]*unsafe_code'
+flag='-[AW][[:space:]]*unsafe_code|--(allow|warn)[= ]unsafe_code|--cap-lints'
+
+status=0
+for file in $(find crates bin \( -name '*.rs' -o -name BUCK \) -type f | sort); do
+    allowed=false
+    for dir in $ALLOWLIST; do
+        case "$file" in "$dir"/*) allowed=true ;; esac
+    done
+    $allowed && continue
+    case "$file" in
+        *.rs) pattern=$attr ;;
+        *) pattern="$attr|$flag" ;;
+    esac
+    if grep -En "$pattern" "$file" >/dev/null; then
+        grep -En "$pattern" "$file" | sed "s|^|$file:|" >&2
+        status=1
+    fi
+done
+
+if [ "$status" -ne 0 ]; then
+    echo "check-unsafe: only allowlisted crates may opt out of the unsafe_code lint" >&2
+fi
+exit "$status"

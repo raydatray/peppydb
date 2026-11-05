@@ -16,4 +16,4 @@ thiserror = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"

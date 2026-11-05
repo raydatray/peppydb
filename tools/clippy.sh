@@ -1,10 +1,12 @@
 #!/bin/sh
-# `cargo clippy --workspace --all-targets -- -D warnings` for the Buck2 build.
+# `cargo clippy --workspace --all-targets -- -D warnings` for the Buck2 build,
+# after the unsafe-code allowlist check (tools/check-unsafe).
 # Buck2 writes clippy output to a [clippy.txt] subtarget of each Rust target
 # instead of failing the build, so build them all and fail if any is non-empty.
 set -eu
 cd "$(dirname "$0")/.."
 tools/check-tools
+tools/check-unsafe
 
 targets=$(tools/buck2 uquery 'kind("rust_(library|binary|test)", //crates/... + //bin/...)' 2>/dev/null \
     | sed 's/$/[clippy.txt]/')
