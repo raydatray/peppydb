@@ -242,7 +242,7 @@ sequenceDiagram
                 W->>S: write_through(B)
             else needs a split
                 W->>S: write_through(B, right)
-                W->>I: install separator (write lock; finds the parent by the separator)
+                W->>I: install separator (write lock, finds the parent by the separator)
             end
             W->>P: free(block) (stays claimed)
         end

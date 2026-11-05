@@ -247,9 +247,9 @@ sequenceDiagram
     participant G as gate
     participant S as store
     participant H as hook (engine: wal.sync_to)
-    K->>K: N = applied; pass over every leaf
+    K->>K: N = applied, pass over every leaf
     K->>G: exclusive
-    K->>K: W = write_seq; A = last_seq
+    K->>K: W = write_seq, A = last_seq
     K->>G: release
     K->>S: sync
     K->>H: before_commit(CommitPoint { N, A })

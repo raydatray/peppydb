@@ -239,16 +239,16 @@ within a process. Plan 0018's checkpoint argument depends on this rule.
 
 ```mermaid
 flowchart TD
-    S[select superblock copy; configuration and State] --> R[read every slot]
+    S[select superblock copy, configuration and State] --> R[read every slot]
     R --> Z{all zeros?}
     Z -->|yes| F[free]
-    Z -->|no| V[Page::validate; fences; limits]
+    Z -->|no| V[Page::validate, fences, limits]
     V --> N{names a leaf?}
     N -->|no| E1[InconsistentLeaves]
     N -->|yes| D{leaf already claimed?}
     D -->|yes| E2[InconsistentLeaves: duplicate leaf]
     D -->|no| M[slots: leaf -> slot]
-    M --> T[tile; bulk-build inner nodes]
+    M --> T[tile, bulk-build inner nodes]
     T --> H[leaf IDs with no page are holes: entry freed, NO_SLOT]
 ```
 

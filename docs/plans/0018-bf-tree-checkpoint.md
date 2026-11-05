@@ -178,7 +178,7 @@ sequenceDiagram
     K->>K: lock checkpointing mutex
     K->>T: N = applied
     loop every leaf index, re-reading the table length
-        K->>T: under the leaf lock: merge the mini-page; write back a dirty Full page
+        K->>T: under the leaf lock: merge the mini-page, write back a dirty Full page
     end
     K->>G: acquire exclusive
     K->>T: W = write_seq
@@ -256,18 +256,18 @@ flowchart TD
     A[State from the selected superblock: N, W] --> B[read every slot]
     B --> Z{all zeros?}
     Z -->|yes| F[release]
-    Z -->|no| H[read the header before validation; max_seen = max of write_seq]
+    Z -->|no| H[read the header before validation, max_seen = max of write_seq]
     H --> W1{write_seq > W?}
     W1 -->|yes| X[erase list]
     W1 -->|no| V{Page::validate, fences, limits, names a leaf?}
     V -->|no| SU[suspect]
-    V -->|yes| C[candidate: keep the highest write_seq per leaf; release the loser]
+    V -->|yes| C[candidate: keep the highest write_seq per leaf, release the loser]
     SU --> SR{names no leaf, or its leaf has a candidate with write_seq >= its claim?}
     SR -->|yes| F
     SR -->|no| E[CorruptSlot]
     X --> ER[write zeros to each, sync, then release]
-    C --> T[tile; bulk-build; holes]
-    T --> R["write_seq counter = max(max_seen, W); applied = last_seq = N"]
+    C --> T[tile, bulk-build, holes]
+    T --> R["write_seq counter = max(max_seen, W), applied = last_seq = N"]
 ```
 
 | What a slot holds after a crash | `open` |

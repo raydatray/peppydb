@@ -71,12 +71,12 @@ flowchart TD
     B -->|PageFull| C[remove old version]
     C --> D{gap + holes cover record?}
     D -->|yes| E[compact if needed, insert] --> Z
-    D -->|no| F[allocate right leaf; Page::split_with_insert]
+    D -->|no| F[allocate right leaf, Page::split_with_insert]
     F --> G{parent on path?}
     G -->|no| H[new root: first = old root, insert separator] --> Z
     G -->|yes| I{parent.try_insert}
     I -->|ok| Z
-    I -->|NodeFull| J[allocate right inner; InnerNode::split_with_insert] --> G
+    I -->|NodeFull| J[allocate right inner, InnerNode::split_with_insert] --> G
 ```
 
 Propagation is the same at every level. When the path is exhausted, a new

@@ -203,7 +203,7 @@ flowchart TD
     C --> D[copy reader into tree.bf.partial]
     D --> E[sync_all the partial file]
     E --> F{"FileStore::open + Tree::open on the partial:<br/>valid, limits == options.tree?"}
-    F -->|no| X[delete partial; Error::Options or Error::Tree]
+    F -->|no| X[delete partial, Error::Options or Error::Tree]
     F -->|yes| G[rename partial over tree.bf]
     G --> H[sync the directory]
     H --> I[open Db at path, keeping LOCK]

@@ -232,14 +232,14 @@ sequenceDiagram
     participant L as Leaf L lock
     participant W as Writer (splits L)
     R->>Root: load: G
-    R->>G: read: version vg (even); route k to P
+    R->>G: read: version vg (even), route k to P
     R->>Root: check: still G
-    R->>P: read: version vp (even); route k to L
+    R->>P: read: version vp (even), route k to L
     R->>G: validate vg: unchanged
-    W->>L: holds X; merge split L into L and L'
+    W->>L: holds X, merge split L into L and L'
     W->>P: write(): vp to vp+1 (odd)
     R->>L: S lock (waits for W)
-    W->>P: insert separator; publish image, then vp+2
+    W->>P: insert separator, publish image, then vp+2
     W->>L: release
     R->>P: route_changed: vp+2 is not vp
     Note over R: release L, spin, restart from the root
@@ -401,7 +401,7 @@ the crate's documentation.
 
 ```mermaid
 flowchart LR
-    L["leaf lock: at most 1 reachable; a split also X-locks a fresh right leaf"]
+    L["leaf lock: at most 1 reachable, a split also X-locks a fresh right leaf"]
     --> F["frame write locks, bottom-up by level"]
     --> R["root_grow"]
     --> G["write-through gate, shared (from 0018)"]

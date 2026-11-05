@@ -143,14 +143,14 @@ leaf in ID order, then syncs. `Drop` does not flush.
 
 ```mermaid
 flowchart TD
-    S[configuration from superblock; validate] --> V[read every slot]
+    S[configuration from superblock, validate] --> V[read every slot]
     V --> Z{all zeros?}
     Z -->|yes| F[free the slot in the store]
-    Z -->|no| P[Page::validate; fences present; keys and values within limits]
+    Z -->|no| P[Page::validate, fences present, keys and values within limits]
     P --> T{fences tile the key space?}
     T -->|no| E[InconsistentLeaves]
     T -->|yes| B[bulk-build inner levels from lower fences]
-    B --> R[set root; no leaf resident]
+    B --> R[set root, no leaf resident]
 ```
 
 1. The configuration comes from the superblock and must pass

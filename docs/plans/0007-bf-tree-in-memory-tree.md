@@ -251,13 +251,13 @@ flowchart TD
     B -->|ok| Z[done]
     B -->|PageFull| C{reclaimable covers it?}
     C -->|yes| D[compact, retry once] --> Z
-    C -->|no| E[alloc right leaf; Page::split_with_insert]
+    C -->|no| E[alloc right leaf, Page::split_with_insert]
     E --> F[separator, Leaf right]
     F --> G{parent on path?}
     G -->|no| H[new root InnerNode first=old root, insert sep] --> Z
     G -->|yes| I{parent.try_insert}
     I -->|ok| Z
-    I -->|NodeFull| J[alloc right inner; split_with_insert]
+    I -->|NodeFull| J[alloc right inner, split_with_insert]
     J --> F2[separator, Inner right] --> G
 ```
 
