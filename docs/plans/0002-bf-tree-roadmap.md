@@ -85,7 +85,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | 3. In-memory tree structure | 2 | Inner-node routing, root growth, and byte-aware splits. [Completed plan 0006](0006-bf-tree-inner-node.md) delivers the local routing-node primitive; [completed plan 0007](0007-bf-tree-in-memory-tree.md) composes a single-threaded tree with leaf splits, propagation, and scans. Milestone complete. |
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. [Completed plan 0008](0008-bf-tree-leaf-store.md) delivers the page-store boundary with memory and file backends, stored-page validation, the leaf mapping table, flush, and reopen from leaf fences. Milestone complete. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. Draft plans: [0011](0011-bf-tree-mini-page.md) (single-leaf overlay; its write loop allocates from the circular buffer of plan 0010, so plan 0010 lands first), [0012](0012-bf-tree-shared-tree.md) (shared tree foundation: `&self` operations, leaf locks, one write-through path), and [0013](0013-bf-tree-mini-tree.md) (tree integration). |
-| 6. Bounded circular buffer | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. Draft plans: [0010](0010-bf-tree-circular-buffer.md) (circular buffer component; lands before plan 0011, ahead of the rest of milestone 5) and [0014](0014-bf-tree-eviction.md) (eviction and the second chance). |
+| 6. Bounded circular buffer | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. [Completed plan 0010](0010-bf-tree-circular-buffer.md) delivers the circular buffer component, recorded in the [circular buffer design](../design/bf-tree-circular-buffer.md); it landed before plan 0011, ahead of the rest of milestone 5. Draft plan: [0014](0014-bf-tree-eviction.md) (eviction and the second chance) completes the milestone. |
 | 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. Draft plan: [0015](0015-bf-tree-caching.md). |
 | 8. Concurrency | Integrated operations and circular buffer | Optimistic inner-node traversal, leaf locks, and safe concurrent allocation/reclamation. Draft plan: [0016](0016-bf-tree-concurrency.md) (version-locked inner frames; leaf locks and circular-buffer concurrency arrive earlier, in 0010 to 0014). |
 | 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. Draft plans: [0017](0017-bf-tree-store-format.md) (store format), [0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, recovery), [0019](0019-bf-tree-apply.md) (apply, log hook, snapshots), [0020](0020-engine-wal.md) (WAL), [0021](0021-engine-db.md) (`Db`), [0022](0022-engine-external.md) (external-log mode), and [0023](0023-bf-tree-io-perf.md) (direct I/O and measurements). |
@@ -183,6 +183,7 @@ the completed concurrent, larger-than-memory engine.
   chooses final interface shapes: [0010](0010-bf-tree-circular-buffer.md) through
   [0023](0023-bf-tree-io-perf.md).
 - [x] Agree on plan 0010's circular buffer, unsafe-code policy, and stack.
+- [x] Implement and verify the circular buffer stack (plan 0010).
 - [ ] Agree on plan 0011's page changes, mini-page interfaces, and stack.
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
@@ -201,10 +202,12 @@ complete. [Plan 0008](0008-bf-tree-leaf-store.md) delivered the page-store
 boundary with memory and file backends, a leaf mapping table with
 load-on-access, and reopen by rebuilding inner nodes from leaf fences,
 recorded in the [leaf storage design](../design/bf-tree-leaf-store.md).
-Milestone 4 is complete. Next, review [plan 0010](0010-bf-tree-circular-buffer.md):
-the circular buffer component, which the single-leaf mini-page overlay
-([plan 0011](0011-bf-tree-mini-page.md)) allocates from. Plans 0010 to 0023
-are drafts in build order and are agreed one at a time.
+Milestone 4 is complete. [Plan 0010](0010-bf-tree-circular-buffer.md) is
+complete: a bounded circular buffer over one slab, the repository's only
+crate with `unsafe` code, checked under Miri through Buck2. Next, review
+[plan 0011](0011-bf-tree-mini-page.md): the single-leaf mini-page overlay,
+which allocates from it. Plans 0011 to 0023 are drafts in build order and
+are agreed one at a time.
 
 ## Sources
 

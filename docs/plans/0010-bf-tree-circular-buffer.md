@@ -1,6 +1,6 @@
 # 0010: Bounded circular buffer component
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [leaf store](../design/bf-tree-leaf-store.md),
 [build system](../design/build-system.md) (crate boundaries, the unsafe-code
@@ -727,9 +727,31 @@ asserts `used() <= capacity()`. At the end every block is returned,
 - [x] Diff 4: slab, bump allocation, fillers, budget.
 - [x] Diff 5: holes and the second-chance region.
 - [x] Diff 6: claims.
-- [ ] Diff 7: model, stress, Miri sizes, documentation.
-- [ ] Stack-wide verification; create `bf-tree-circular-buffer.md`; update
+- [x] Diff 7: model, stress, Miri sizes, documentation.
+- [x] Stack-wide verification; create `bf-tree-circular-buffer.md`; update
   the roadmap.
+
+### Verification outcomes (2026-11-04)
+
+All on an Apple M4 Pro (macOS, 12 cores):
+
+| Check | Outcome |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `tools/check-unsafe`) | Clean; 13 targets |
+| `tools/buck2 test //crates/... //bin/... //go/...` | 13 targets pass |
+| Circular buffer unit tests, debug and `@build/mode/release` | 30 pass, 1 ignored (the benchmark) |
+| Model | Exact agreement over 4 buffers x 4 percents x 4 seeds x 4000 steps; two injected bugs (reusing holes in the region, claiming the newest block) were each caught |
+| Stress | 4 threads x 20,000 operations, percents 0 and 50; `used() == 0` and `allocs + reuses == frees` at the end |
+| Miri (`@build/mode/miri`, nightly 2026-11-01) | 30 pass in 44 s, including the threaded stress test (2 threads); no undefined behaviour, data race, or leak; a deliberate leak and a deliberate out-of-bounds read were each reported |
+| Unsafe policy | A scratch `unsafe` block fails the build; a scratch `#![allow(unsafe_code)]` outside the allowlist fails `tools/check-unsafe` |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check` | Clean |
+| `cargo test --workspace --locked` | 198 pass |
+| `go vet`, `go test` | Pass |
+| Default mode never downloads the nightly | `cquery` shows no nightly or Miri dependency |
+| `circular_buffer_cost` | 37, 81, and 123 ns per alloc plus free at 10^4, 10^5, and 3 x 10^5 live blocks (see the design document) |
+
+Not run: contended benchmarks on Linux, and ThreadSanitizer (optional in
+this plan).
 
 ## Discoveries and plan changes
 
@@ -784,6 +806,14 @@ asserts `used() <= capacity()`. At the end every block is returned,
   could land in a smaller hole and overlap the next block, so `alloc` now
   panics on it in every build. `free` also checks the block's span against
   its metadata.
+- **Diff 7: test sizes and an observation.** The hole order is LIFO within
+  a class (as upstream), so the model encodes it and predicts every
+  outcome exactly, which is stronger than the planned "one of the eligible
+  holes". Under Miri the model runs 2 buffers x 2 percents x 150 steps,
+  which keeps the required check under a minute. The benchmark showed that
+  with spare capacity almost every allocation reuses a hole, because reuse
+  does not move the tail and so holes rarely age into the region; plan 0023
+  measures this under eviction pressure.
 
 ## Agent notes
 
