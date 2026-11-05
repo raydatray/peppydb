@@ -9,10 +9,12 @@
 mod class;
 mod mini;
 mod refs;
+mod write;
 
 pub use class::SizeClasses;
 pub use mini::{Apply, Lookup, Mini, MiniPage};
 pub use refs::RefBits;
+pub use write::{BufferError, WriteOutcome, buffer};
 
 /// Leaf limits from which no size-class ladder can be derived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
