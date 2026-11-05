@@ -9,7 +9,7 @@
 //! ```
 //! use bf_tree::{Tree, TreeConfig};
 //!
-//! let mut tree = Tree::in_memory(TreeConfig::default()).unwrap();
+//! let tree = Tree::in_memory(TreeConfig::default()).unwrap();
 //! for i in 0..1000u32 {
 //!     tree.put(&i.to_be_bytes(), b"value").unwrap();
 //! }

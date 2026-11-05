@@ -22,7 +22,7 @@ impl Tree {
     /// [`Tree::flush`], rebuilding the routing layer from leaf fences.
     ///
     /// The configuration comes from the store's superblock. Every slot is
-    /// read once: all-zero slots are free (allocated but never flushed) and
+    /// read once: all-zero slots are free (allocated but never written) and
     /// are returned to the store for reuse; every other slot must pass
     /// [`Page::validate`], carry fences, and respect the configured key and
     /// value limits. The leaves must tile the key space, so a store with a
@@ -41,7 +41,7 @@ impl Tree {
             let is_free = bytes.iter().all(|&byte| byte == 0);
             freed.push(is_free);
             if is_free {
-                // A slot allocated but never flushed. Return it to the store's
+                // A slot allocated but never written. Return it to the store's
                 // free list; a backend that rescanned on open already has it.
                 match store.free(id) {
                     Ok(()) | Err(StoreError::FreedSlot(_)) => continue,

@@ -92,8 +92,7 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
     /// Hand out a zeroed slot: a freed slot if any, else a new one at the end.
     fn alloc(&self) -> Result<LeafId, StoreError>;
 
-    /// Zero a slot and return it for reuse. Unused by this stack's tree; it
-    /// exists so the boundary is stable when leaf merging arrives.
+    /// Zero a slot and return it for reuse.
     fn free(&self, id: LeafId) -> Result<(), StoreError>;
 
     /// Copy a slot into `buf`. A freed slot reads as zeros.

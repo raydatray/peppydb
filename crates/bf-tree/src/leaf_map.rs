@@ -128,8 +128,10 @@ impl LeafMap {
     /// Return a fresh, never-reachable slot to the store, for a split that
     /// failed after `alloc`.
     pub(super) fn discard(&self, mut leaf: LeafWrite<'_>) -> Result<(), TreeError> {
-        leaf._entry.freed = true;
+        // Free the slot first: if that fails, the entry stays live and the
+        // slot keeps what was written, rather than claiming a free slot.
         self.store.free(leaf.id)?;
+        leaf._entry.freed = true;
         Ok(())
     }
 
