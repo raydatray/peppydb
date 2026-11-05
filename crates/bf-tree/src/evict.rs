@@ -7,7 +7,7 @@
 //! both a self-deadlock (the victim is the writer's own leaf) and an ABBA
 //! deadlock between evicting writers.
 
-use super::leaf_map::with_scratch;
+use super::leaf_map::{Locked, Residency, with_scratch};
 use super::{Tree, TreeError};
 use bf_tree_circular_buffer::{Claim, Victim};
 
@@ -74,6 +74,21 @@ impl Tree {
             drop(leaf);
             self.leaves.circular_buffer.retire(victim);
             return Ok(());
+        }
+        // A full page: write it back if dirty, then free it.
+        if let Residency::Full(_) = leaf.residency() {
+            return match self.leaves.release_full(&mut leaf) {
+                Ok(()) => {
+                    drop(leaf);
+                    self.leaves.circular_buffer.retire(victim);
+                    Ok(())
+                }
+                Err(error) => {
+                    drop(leaf);
+                    self.leaves.circular_buffer.unclaim(victim);
+                    Err(error)
+                }
+            };
         }
         match with_scratch(|scratch| self.merge_leaf(&mut leaf, scratch)) {
             Ok(split) => {

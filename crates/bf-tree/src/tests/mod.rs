@@ -7,6 +7,7 @@ mod concurrent;
 mod config;
 mod disk;
 mod evict;
+mod full;
 mod model;
 mod open;
 mod overlay;
@@ -33,6 +34,9 @@ fn config(
         max_value_len,
         circular_buffer_bytes: TEST_BUFFER_BYTES,
         second_chance_percent: DEFAULT_SECOND_CHANCE_PERCENT,
+        // Off by default in tests, which assert residency and store writes;
+        // tests of full pages and the policy models turn it on.
+        write_load_full_page: false,
     }
 }
 

@@ -237,11 +237,12 @@ fn flush_and_reopen_on_file_matches_the_oracle() {
 /// relocation, the default, and relocation on every access.
 #[test]
 fn tiny_circular_buffers_match_the_oracle_through_eviction() {
-    for bytes in [1024, 2048] {
+    for (bytes, full) in [(1024, false), (2048, true), (1024, true)] {
         for percent in [0, 10, 100] {
             let config = TreeConfig {
                 circular_buffer_bytes: bytes,
                 second_chance_percent: percent,
+                write_load_full_page: full,
                 ..config(256, 128, 8, 16)
             };
             run(config, Keys::Uniform, 0xe71c + u64::from(percent), 900, 3);

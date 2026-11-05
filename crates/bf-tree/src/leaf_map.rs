@@ -30,15 +30,18 @@ pub(super) struct LeafMap {
 pub(super) struct LeafEntry {
     /// The slot holds no page.
     freed: bool,
-    /// A circular-buffer block holding this leaf's mini-page.
+    /// A circular-buffer block holding this leaf's mini-page, or, without
+    /// `refs`, its full page.
     block: Option<Block>,
-    /// Reference bits for the mini-page's slots; `Some` exactly when `block`
-    /// is.
+    /// Reference bits for the mini-page's slots; `Some` exactly when the
+    /// block is a mini-page.
     refs: Option<Box<RefBits>>,
     /// Changes (wrapping) on every block change: allocation, growth,
-    /// relocation, merge. A read's hint applies only if it is unchanged.
+    /// relocation, merge, promotion. A read's hint applies only if it is
+    /// unchanged.
     version: u32,
-    // Plan 0015 adds `dirty`. The size test guards the entry.
+    /// A full page is newer than the store. False in every other state.
+    dirty: bool,
 }
 
 /// What a leaf holds in memory besides its base page in the store.
@@ -48,6 +51,9 @@ pub(super) enum Residency<'e> {
         page: &'e MiniPage,
         refs: &'e RefBits,
     },
+    /// The circular buffer holds the complete leaf; it answers every key in
+    /// the leaf's range.
+    Full(&'e Page),
 }
 
 impl LeafEntry {
@@ -57,8 +63,15 @@ impl LeafEntry {
                 page: MiniPage::from_bytes(block.as_ref()),
                 refs,
             },
-            _ => Residency::Base,
+            (Some(block), None) => Residency::Full(
+                zerocopy::FromBytes::ref_from_bytes(block.as_ref()).expect("a full page"),
+            ),
+            (None, _) => Residency::Base,
         }
+    }
+
+    fn bump(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 }
 
@@ -123,13 +136,51 @@ impl Locked for LeafWrite<'_> {
 impl LeafWrite<'_> {
     /// Move the mini-page's two handles out of the entry; no bytes move.
     /// Bumps the version: whatever goes back may be a different block.
+    /// A full page is left in place, and `None` returned.
     pub(super) fn take_mini(&mut self) -> Option<Mini> {
-        self.entry.version = self.entry.version.wrapping_add(1);
-        match (self.entry.block.take(), self.entry.refs.take()) {
-            (Some(block), Some(refs)) => Some(Mini { block, refs }),
-            (None, None) => None,
-            _ => unreachable!("refs are present exactly with a block"),
+        self.entry.bump();
+        let refs = self.entry.refs.take()?;
+        let block = self.entry.block.take().expect("refs come with a block");
+        Some(Mini { block, refs })
+    }
+
+    /// Move a full page's block and dirty flag out of the entry; the leaf
+    /// becomes `Base`. `None` unless the leaf is `Full`.
+    pub(super) fn take_full(&mut self) -> Option<(Block, bool)> {
+        if self.entry.refs.is_some() || self.entry.block.is_none() {
+            return None;
         }
+        self.entry.bump();
+        let dirty = std::mem::take(&mut self.entry.dirty);
+        Some((self.entry.block.take().expect("checked above"), dirty))
+    }
+
+    /// Make the leaf `Full` with `block`, which holds its complete page.
+    pub(super) fn set_full(&mut self, block: Block, dirty: bool) {
+        debug_assert!(self.entry.block.is_none());
+        self.entry.bump();
+        self.entry.block = Some(block);
+        self.entry.dirty = dirty;
+    }
+
+    /// The full page, for a direct write. Does not bump the version: no hint
+    /// depends on a full page's content.
+    pub(super) fn full_mut(&mut self) -> Option<&mut Page> {
+        if self.entry.refs.is_some() {
+            return None;
+        }
+        let block = self.entry.block.as_mut()?;
+        Some(zerocopy::FromBytes::mut_from_bytes(block.as_mut()).expect("a full page"))
+    }
+
+    pub(super) fn mark_dirty(&mut self) {
+        debug_assert!(self.entry.block.is_some() && self.entry.refs.is_none());
+        self.entry.dirty = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_dirty(&self) -> bool {
+        self.entry.dirty
     }
 
     /// Move a mini-page's handles back into the entry.
@@ -206,6 +257,7 @@ impl LeafMap {
         for entry in self.entries.iter() {
             let mut entry = entry.write();
             entry.refs = None;
+            entry.dirty = false;
             if let Some(block) = entry.block.take() {
                 self.circular_buffer.free(block);
             }
@@ -247,6 +299,29 @@ impl LeafMap {
         }
     }
 
+    /// Write a dirty full page back to the store and mark it clean. Nothing
+    /// to do for a clean full page or any other residency.
+    pub(super) fn write_back(&self, leaf: &mut LeafWrite<'_>) -> Result<(), TreeError> {
+        if !leaf.entry.dirty || leaf.entry.refs.is_some() {
+            return Ok(());
+        }
+        let id = leaf.id;
+        let block = leaf.entry.block.as_mut().expect("a dirty leaf is full");
+        self.write_through(&mut [(id, block.as_mut())])?;
+        leaf.entry.dirty = false;
+        Ok(())
+    }
+
+    /// Release a full page: write it back if dirty, then free its block. The
+    /// leaf becomes `Base`. On a write error the leaf stays `Full` and dirty.
+    pub(super) fn release_full(&self, leaf: &mut LeafWrite<'_>) -> Result<(), TreeError> {
+        self.write_back(leaf)?;
+        if let Some((block, _)) = leaf.take_full() {
+            self.circular_buffer.free(block);
+        }
+        Ok(())
+    }
+
     /// Whether `leaf`'s entry still holds the block that `victim` names.
     pub(super) fn holds(&self, leaf: &LeafWrite<'_>, victim: &Victim) -> bool {
         leaf.entry
@@ -271,7 +346,7 @@ impl LeafMap {
     pub(super) fn buffered(&self) -> usize {
         self.entries
             .iter()
-            .filter(|entry| entry.read().block.is_some())
+            .filter(|entry| entry.read().refs.is_some())
             .count()
     }
 
@@ -428,13 +503,19 @@ impl LeafMap {
         let leaf = self.read(id).ok()?;
         match leaf.residency() {
             Residency::Mini { page, .. } => Some(zerocopy::IntoBytes::as_bytes(page).to_vec()),
-            Residency::Base => None,
+            Residency::Full(_) | Residency::Base => None,
         }
     }
 
-    /// A copy of leaf `id`'s base page, read under its shared lock.
+    /// A copy of leaf `id`'s base page, read under its shared lock: its full
+    /// page if it has one.
     pub(super) fn page_copy(&self, id: LeafId) -> Result<Vec<u8>, TreeError> {
         let leaf = self.read(id)?;
+        // A full page is the leaf's current base page, possibly newer than
+        // the store.
+        if let Residency::Full(page) = leaf.residency() {
+            return Ok(zerocopy::IntoBytes::as_bytes(page).to_vec());
+        }
         let mut bytes = vec![0; self.store.page_size()];
         self.load_base(&leaf, &mut bytes)?;
         Ok(bytes)

@@ -42,6 +42,11 @@ impl Tree {
                 Lookup::Absent => Some(None),
                 Lookup::Miss => None,
             },
+            // A full page is the complete leaf.
+            Residency::Full(page) => {
+                page.check_key(key)?;
+                Some(page.get(key)?.and_then(|record| record.state.value()))
+            }
             Residency::Base => None,
         };
         let result = match buffered {

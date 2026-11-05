@@ -73,6 +73,18 @@ impl Tree {
         if !buffer.in_second_chance(addr) {
             return;
         }
+        if let Some((old, dirty)) = leaf.take_full() {
+            let size = old.as_ref().len();
+            match buffer.alloc(size, Kind::Full, leaf.id()) {
+                Ok(mut fresh) => {
+                    fresh.as_mut().copy_from_slice(old.as_ref());
+                    leaf.set_full(fresh, dirty);
+                    buffer.free(old);
+                }
+                Err(_) => leaf.set_full(old, dirty),
+            }
+            return;
+        }
         let Some(mini) = leaf.take_mini() else {
             return;
         };
