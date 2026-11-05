@@ -11,7 +11,7 @@ mod mini;
 mod refs;
 
 pub use class::SizeClasses;
-pub use mini::{Lookup, MiniPage};
+pub use mini::{Apply, Lookup, Mini, MiniPage};
 pub use refs::RefBits;
 
 /// Leaf limits from which no size-class ladder can be derived.
