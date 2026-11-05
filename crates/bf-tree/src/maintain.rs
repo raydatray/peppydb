@@ -85,6 +85,14 @@ impl Tree {
         self.policy.roll(self.config.read_promotion_percent)
     }
 
+    /// The hint of a scan over a leaf: a leaf with no buffered state rolls
+    /// the scan rate to keep its page. A scan never merges, so a leaf with
+    /// a mini-page is left alone.
+    pub(super) fn scan_hint(&self, leaf: &impl Locked) -> Option<Hint> {
+        let base = matches!(leaf.residency(), Residency::Base);
+        (base && self.policy.roll(self.config.scan_promotion_percent)).then_some(Hint::Promote)
+    }
+
     /// The hint of a promoting read of `key`, which found `value` in the
     /// base page: cache the record or the absence, or keep the page.
     pub(super) fn read_hint(&self, key: &[u8], value: Option<&[u8]>) -> Hint {
