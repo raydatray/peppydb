@@ -49,7 +49,7 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
     let store = tree.leaves.into_store();
     let tree = Tree::assemble(
         tree.config,
-        tree.inner.into_inner(),
+        tree.inner,
         LeafMap::for_config(store, (0..leaves).map(|_| false), &tree.config).unwrap(),
     );
     let key = 7u32.to_be_bytes();
@@ -87,7 +87,7 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
     let store = tree.leaves.into_store();
     let tree = Tree::assemble(
         tree.config,
-        tree.inner.into_inner(),
+        tree.inner,
         LeafMap::for_config(store, [true], &tree.config).unwrap(),
     );
     assert_eq!(
@@ -116,7 +116,7 @@ fn corrupt_stored_leaves_are_reported_on_load() {
 
     let tree = Tree::assemble(
         config,
-        InnerStore::new(config.inner_capacity, ChildRef::Leaf(id)),
+        Inner::new(config.inner_capacity, ChildRef::Leaf(id)),
         LeafMap::for_config(Box::new(store), [false], &config).unwrap(),
     );
     assert_eq!(
@@ -139,7 +139,7 @@ fn a_split_loads_the_left_leaf_from_the_store() {
     let store = tree.leaves.into_store();
     let tree = Tree::assemble(
         tree.config,
-        tree.inner.into_inner(),
+        tree.inner,
         LeafMap::for_config(store, [false], &tree.config).unwrap(),
     );
 

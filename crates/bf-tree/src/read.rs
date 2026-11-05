@@ -1,16 +1,15 @@
-use std::sync::atomic::Ordering;
-
+use super::inner::Anchor;
 use super::leaf_map::{LeafWrite, Locked, Residency, with_scratch};
 use super::{Tree, TreeError};
 use bf_tree_mini_page::Lookup;
 use bf_tree_node_id::LeafId;
 use bf_tree_page::RecordState;
 
-/// A leaf chosen by routing, and the routing version it was chosen under.
+/// A leaf chosen by routing, and what validates the route.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Route {
     pub(super) leaf: LeafId,
-    version: u64,
+    pub(super) anchor: Anchor,
 }
 
 impl Tree {
@@ -74,26 +73,21 @@ impl Tree {
     /// Number of levels, counting the leaf level: a single-leaf tree has
     /// height 1.
     pub fn height(&self) -> usize {
-        self.inner.read().height()
+        self.inner.height()
     }
 
-    /// Route `key` to its leaf under the inner read lock, and note the
-    /// version. The lock is released on return.
+    /// Route `key` to its leaf without taking a lock, and note what
+    /// validates the route.
     pub(super) fn route(&self, key: &[u8]) -> Route {
-        let inner = self.inner.read();
-        // Written only under the write lock, so stable while we hold read.
-        let version = self.inner_version.load(Ordering::Relaxed);
-        Route {
-            leaf: inner.find_leaf(key),
-            version,
-        }
+        let (leaf, anchor) = self.inner.descend(key);
+        Route { leaf, anchor }
     }
 
-    /// Whether a structural change happened since `route` was taken. Called
-    /// after locking the routed leaf: a split of that leaf bumps the version
+    /// Whether the route may be stale. Called after locking the routed leaf:
+    /// a split of that leaf publishes its new parent image (or root word)
     /// before the splitter releases the leaf's lock.
     pub(super) fn route_changed(&self, route: &Route) -> bool {
-        self.inner_version.load(Ordering::Acquire) != route.version
+        self.inner.check(route.anchor).is_err()
     }
 
     /// Lock the leaf that owns `key` exclusively and run `f` on it: route,
@@ -116,6 +110,6 @@ impl Tree {
     /// Route `key` to its leaf; a test aid that ignores concurrency.
     #[cfg(test)]
     pub(super) fn find_leaf(&self, key: &[u8]) -> LeafId {
-        self.inner.read().find_leaf(key)
+        self.inner.descend(key).0
     }
 }

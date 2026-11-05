@@ -109,9 +109,9 @@ fn tile_reports_every_inconsistency() {
 /// invariant checker can compare fences with the routing intervals.
 fn built(n: u32, inner_capacity: usize) -> Tree {
     let config = config(256, inner_capacity, 8, 16);
-    let mut tree = Tree::assemble(
+    let tree = Tree::assemble(
         config,
-        InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaf(0))),
+        Inner::new(config.inner_capacity, ChildRef::Leaf(leaf(0))),
         LeafMap::for_config(
             Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
             [],
@@ -135,8 +135,8 @@ fn built(n: u32, inner_capacity: usize) -> Tree {
         }
         tree.leaves.overwrite(bounds.id, &mut bytes).unwrap();
     }
-    let inner = tree.inner.get_mut();
-    inner.root = build_inner(inner, &leaves).unwrap();
+    tree.inner
+        .set_root(build_inner(&tree.inner, &leaves).unwrap());
     tree
 }
 
@@ -209,13 +209,13 @@ fn a_trailing_single_child_borrows_from_its_neighbour() {
     // Four children per node: 5 leaves would leave the last node with one
     // child, so the split becomes 3 + 2.
     let tree = built(5, 64);
-    let inner = tree.inner.read();
-    let ChildRef::Inner(root) = inner.root else {
+    let ChildRef::Inner(root) = tree.inner.root() else {
         panic!("root is inner");
     };
-    let children: Vec<_> = (0..inner.node(root).child_count())
-        .map(|index| match inner.node(root).child_at(index).unwrap() {
-            ChildRef::Inner(id) => inner.node(id).child_count(),
+    let root = tree.inner.snapshot(root);
+    let children: Vec<_> = (0..root.node().child_count())
+        .map(|index| match root.node().child_at(index).unwrap() {
+            ChildRef::Inner(id) => tree.inner.snapshot(id).node().child_count(),
             ChildRef::Leaf(_) => panic!("leaves sit below the second level"),
         })
         .collect();

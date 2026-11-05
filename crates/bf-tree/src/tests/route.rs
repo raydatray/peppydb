@@ -1,7 +1,8 @@
-//! Routes taken under the inner read lock, and their validation against
-//! later structural changes.
+//! Lock-free routes, and their validation against later structural changes.
 
 use super::*;
+use crate::frames::Retry;
+use crate::inner::Anchor;
 
 fn small() -> Tree {
     Tree::in_memory(config(256, 128, 8, 16)).unwrap()
@@ -102,5 +103,92 @@ fn a_write_through_a_stale_route_lands_in_the_right_half() {
     assert_eq!(holds(&tree, right, &target), (false, true));
     assert_eq!(holds(&tree, stale.leaf, &target), (false, false));
     assert_eq!(tree.get(&target), Ok(Some(b"v".to_vec())));
+    assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+/// The parent frame of the leaf that owns `key`, or `None` for a leaf root.
+fn parent_of(tree: &Tree, key: &[u8]) -> Option<InnerId> {
+    tree.locate(key).1.last().map(|&(id, _)| id)
+}
+
+/// Put keys just above `base` until the leaf count grows.
+fn split_near(tree: &Tree, base: u32) {
+    let leaves = tree.leaf_count();
+    let mut i = 1;
+    while tree.leaf_count() == leaves {
+        assert!(i < 500, "no split near {base}");
+        tree.put(&key(base + i), &[2; 16]).unwrap();
+        i += 1;
+    }
+}
+
+/// A tree of height 3 or more over sparse keys `i * 1000`.
+fn tall() -> (Tree, Vec<u32>) {
+    let tree = small();
+    let keys: Vec<_> = (0..400).map(|i| i * 1000).collect();
+    for &k in &keys {
+        tree.put(&key(k), &[1; 16]).unwrap();
+    }
+    assert!(tree.height() >= 3, "height {}", tree.height());
+    (tree, keys)
+}
+
+#[test]
+fn a_held_frame_makes_a_descent_retry_at_once() {
+    let (tree, _) = tall();
+    let ChildRef::Inner(root) = tree.root() else {
+        panic!("an inner root");
+    };
+    assert!(tree.inner.try_descend(&key(0), |_, _| {}).is_ok());
+    let guard = tree.inner.frames().get(root).write();
+    assert_eq!(tree.inner.try_descend(&key(0), |_, _| {}), Err(Retry));
+    drop(guard);
+    let (leaf, _) = tree.inner.try_descend(&key(0), |_, _| {}).unwrap();
+    assert_eq!(leaf, tree.find_leaf(&key(0)));
+}
+
+#[test]
+fn a_route_survives_splits_under_other_parents_but_not_its_own() {
+    let (tree, keys) = tall();
+    let (first, last) = (keys[0], *keys.last().unwrap());
+    let parent = parent_of(&tree, &key(first)).unwrap();
+    assert_ne!(parent_of(&tree, &key(last)), Some(parent));
+    let route = tree.route(&key(first));
+    assert!(matches!(route.anchor, Anchor::Parent(id, _) if id == parent));
+
+    split_near(&tree, last);
+    assert_ne!(parent_of(&tree, &key(first)), parent_of(&tree, &key(last)));
+    assert!(!tree.route_changed(&route), "another parent changed");
+
+    split_near(&tree, first);
+    assert!(tree.route_changed(&route), "its own parent changed");
+    assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+#[test]
+fn a_leaf_root_route_is_anchored_at_the_root_word() {
+    let tree = small();
+    let route = tree.route(&key(0));
+    assert!(matches!(route.anchor, Anchor::Root(_)));
+    split_near(&tree, 0);
+    assert!(tree.route_changed(&route), "the root grew");
+    assert!(matches!(tree.route(&key(0)).anchor, Anchor::Parent(..)));
+}
+
+#[test]
+fn a_route_under_the_root_changes_when_the_root_grows() {
+    let tree = small();
+    let mut i = 0;
+    while tree.height() < 2 {
+        tree.put(&key(i * 1000), &[1; 16]).unwrap();
+        i += 1;
+    }
+    let route = tree.route(&key(0));
+    while tree.height() < 3 {
+        tree.put(&key(i * 1000), &[1; 16]).unwrap();
+        i += 1;
+    }
+    assert!(tree.route_changed(&route));
+    assert!(!tree.route_changed(&tree.route(&key(0))));
     assert_eq!(tree.check_invariants(), Ok(()));
 }

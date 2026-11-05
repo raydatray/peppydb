@@ -9,8 +9,8 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use super::inner::Inner;
 use super::leaf_map::LeafMap;
-use super::store::InnerStore;
 use super::{Tree, TreeConfig, TreeError};
 use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, LeafId};
@@ -100,8 +100,8 @@ impl Tree {
         }
 
         let leaves = tile(leaves)?;
-        let mut inner = InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaves[0].id));
-        inner.root = build_inner(&mut inner, &leaves)?;
+        let inner = Inner::new(config.inner_capacity, ChildRef::Leaf(leaves[0].id));
+        inner.set_root(build_inner(&inner, &leaves)?);
 
         Ok(Self::assemble(
             config,
@@ -183,10 +183,7 @@ pub(super) fn tile(mut leaves: Vec<LeafBounds>) -> Result<Vec<LeafBounds>, TreeE
 /// the tree invariants forbid; it borrows the last entry of its left
 /// neighbour instead. Under the admission rule a full node holds at least
 /// two separators, so the neighbour keeps at least one.
-pub(super) fn build_inner(
-    inner: &mut InnerStore,
-    leaves: &[LeafBounds],
-) -> Result<ChildRef, TreeError> {
+pub(super) fn build_inner(inner: &Inner, leaves: &[LeafBounds]) -> Result<ChildRef, TreeError> {
     // Each entry is a child and the separator to its left; the first entry
     // of a level has none.
     let mut level: Vec<Entry> = leaves
@@ -204,15 +201,15 @@ pub(super) fn build_inner(
         for range in groups {
             let entries = &level[range];
             let (separator, first) = &entries[0];
-            let id = inner.alloc();
-            let node = InnerNode::init(inner.get_mut(id), *first)?;
-            for (separator, child) in &entries[1..] {
-                let key = separator
-                    .as_deref()
-                    .expect("every child after the first has a separator");
-
-                node.try_insert(key, *child)?;
-            }
+            let id = inner.alloc_with(|bytes| {
+                let node = InnerNode::init(bytes, *first)?;
+                entries[1..].iter().try_for_each(|(separator, child)| {
+                    let key = separator
+                        .as_deref()
+                        .expect("every child after the first has a separator");
+                    node.try_insert(key, *child)
+                })
+            })?;
             above.push((separator.clone(), ChildRef::Inner(id)));
         }
 
