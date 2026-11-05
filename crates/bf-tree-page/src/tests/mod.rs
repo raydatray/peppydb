@@ -6,6 +6,7 @@ mod compact;
 mod fence;
 mod key;
 mod layout;
+mod merge;
 mod model;
 mod prefix;
 mod read;

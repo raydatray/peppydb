@@ -173,7 +173,7 @@ pub(super) struct SplitImages {
 }
 
 impl<K> Fence<K> {
-    fn map<T>(self, f: impl FnOnce(K) -> T) -> Fence<T> {
+    pub(super) fn map<T>(self, f: impl FnOnce(K) -> T) -> Fence<T> {
         match self {
             Self::Unbounded => Fence::Unbounded,
             Self::Key(key) => Fence::Key(f(key)),
@@ -182,7 +182,7 @@ impl<K> Fence<K> {
 }
 
 impl Fence<Vec<u8>> {
-    fn as_slice(&self) -> Fence<&[u8]> {
+    pub(super) fn as_slice(&self) -> Fence<&[u8]> {
         match self {
             Self::Unbounded => Fence::Unbounded,
             Self::Key(key) => Fence::Key(key),
