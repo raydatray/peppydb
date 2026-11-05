@@ -13,6 +13,17 @@
 //! A [`Block`] is the only handle to its bytes. Metadata lives behind one
 //! mutex, which is never held while block bytes are read, written, or zeroed.
 //!
+//! # Eviction
+//!
+//! An evictor calls [`CircularBuffer::claim_victim`] with no lock held. The
+//! claimed block is never reused and the head waits for it. The evictor then
+//! locks the owner and checks whether its entry still holds the block
+//! ([`Block::is`]). If it does, the evictor writes the contents back, takes
+//! the block out, returns it with [`CircularBuffer::free`], and calls
+//! [`CircularBuffer::retire`]. If it does not, the owner already freed the
+//! block, and the evictor only retires it. A [`Victim`] gives no access to
+//! bytes.
+//!
 //! ```
 //! use bf_tree_circular_buffer::{BLOCK_HEADER_BYTES, CircularBuffer, Kind};
 //! use bf_tree_node_id::LeafId;
@@ -62,6 +73,35 @@ pub const BLOCK_HEADER_BYTES: usize = 16;
 pub enum Kind {
     Mini,
     Full,
+}
+
+/// A block claimed for eviction. It names the block; it gives no access to
+/// its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Victim {
+    /// The block's logical address.
+    pub addr: usize,
+    pub kind: Kind,
+    /// The leaf the block was allocated for.
+    pub owner: LeafId,
+    seq: u64,
+}
+
+impl Victim {
+    pub(crate) fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+/// The outcome of [`CircularBuffer::claim_victim`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// The oldest live block, now claimed by the caller.
+    Victim(Victim),
+    /// Every live block is claimed by another evictor.
+    Busy,
+    /// The buffer holds no live block.
+    Empty,
 }
 
 /// The circular buffer has no room for the allocation.
@@ -198,19 +238,18 @@ impl CircularBuffer {
         owner: LeafId,
     ) -> Result<Block, CircularBufferFull> {
         let class = self.class(size);
-        let _ = (kind, owner);
         let len = u32::try_from(size).expect("classes fit in u32");
 
         let (seq, addr) = {
             let mut state = self.lock_state();
-            let reserved = match state.take_hole(class, self.second_chance) {
+            let reserved = match state.take_hole(class, self.second_chance, kind, owner) {
                 Some(hole) => {
                     state.metrics.reuses += 1;
                     hole
                 }
                 None => {
                     let bumped = state
-                        .bump(self.capacity, BLOCK_HEADER_BYTES + size)
+                        .bump(self.capacity, BLOCK_HEADER_BYTES + size, kind, owner)
                         .ok_or(CircularBufferFull)?;
                     state.metrics.allocs += 1;
                     self.tail.store(state.tail, Ordering::Relaxed);
@@ -232,7 +271,8 @@ impl CircularBuffer {
     ///
     /// A block at the head or in the second-chance region becomes a tombstone;
     /// any other block becomes a hole for its class. The head then moves past
-    /// every dead block at the front.
+    /// every dead block at the front. A claimed block stays claimed until its
+    /// evictor retires it.
     pub fn free(&self, block: Block) {
         assert!(
             self.slab.contains(block.ptr(), block.span()),
@@ -244,14 +284,21 @@ impl CircularBuffer {
         let meta = state
             .get(block.seq())
             .filter(|meta| meta.addr == block.addr() && meta.span == block.span());
-        assert!(
-            meta.is_some_and(|meta| meta.state == BlockState::Live),
-            "block is not a live block of this circular buffer"
-        );
+        let claimed = match meta.map(|meta| (meta.state, meta.freed_while_claimed)) {
+            Some((BlockState::Live, _)) => false,
+            Some((BlockState::Evicting, false)) => true,
+            _ => panic!("block is not a live block of this circular buffer"),
+        };
 
         let class = self.class(block.as_ref().len());
         let seq = block.seq();
-        if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
+        if claimed {
+            // The evictor's `retire` makes it dead.
+            state
+                .get_mut(seq)
+                .expect("checked above")
+                .freed_while_claimed = true;
+        } else if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
             state.get_mut(seq).expect("checked above").state = BlockState::Tombstone;
             state.metrics.tombstones += 1;
         } else {
@@ -260,6 +307,47 @@ impl CircularBuffer {
         state.outstanding -= 1;
         state.metrics.frees += 1;
         state.advance_head();
+    }
+
+    /// Claim the oldest live block for eviction. Dead blocks at the head are
+    /// passed first. The claimed block is never reused, and the head waits
+    /// until it is retired or unclaimed.
+    pub fn claim_victim(&self) -> Claim {
+        let mut state = self.lock_state();
+        state.advance_head();
+        match state.claim_oldest() {
+            Ok((seq, meta)) => Claim::Victim(Victim {
+                addr: meta.addr,
+                kind: meta.kind,
+                owner: meta.owner.expect("live blocks have an owner"),
+                seq,
+            }),
+            Err(true) => Claim::Busy,
+            Err(false) => Claim::Empty,
+        }
+    }
+
+    /// Give a claim back without evicting. If the owner freed the block in
+    /// the meantime, this retires it instead, so it cannot become a live
+    /// block without a handle.
+    pub fn unclaim(&self, victim: Victim) {
+        let mut state = self.lock_state();
+        let freed = claimed(&state, &victim);
+        if freed {
+            retire_claimed(&mut state, victim.seq);
+        } else {
+            state.get_mut(victim.seq).expect("checked above").state = BlockState::Live;
+        }
+    }
+
+    /// Finish an eviction. The owner must have returned the block with
+    /// `free` while it was claimed; this panics otherwise, because the head
+    /// would pass bytes that a handle still covers.
+    pub fn retire(&self, victim: Victim) {
+        let mut state = self.lock_state();
+        let freed = claimed(&state, &victim);
+        assert!(freed, "retire requires the block to be freed first");
+        retire_claimed(&mut state, victim.seq);
     }
 
     /// Whether the block at logical address `addr` is in the second-chance
@@ -316,6 +404,25 @@ impl Drop for CircularBuffer {
             self.slab.leak();
         }
     }
+}
+
+/// Check that `victim` names a claimed block of this buffer, and return
+/// whether its owner has freed it.
+fn claimed(state: &State, victim: &Victim) -> bool {
+    let meta = state
+        .get(victim.seq)
+        .filter(|meta| meta.addr == victim.addr);
+    match meta {
+        Some(meta) if meta.state == BlockState::Evicting => meta.freed_while_claimed,
+        _ => panic!("victim is not a claimed block of this circular buffer"),
+    }
+}
+
+/// Mark a claimed, freed block evicted and move the head past it if it can.
+fn retire_claimed(state: &mut State, seq: u64) {
+    state.get_mut(seq).expect("checked by `claimed`").state = BlockState::Evicted;
+    state.metrics.retired += 1;
+    state.advance_head();
 }
 
 /// Debug builds record each block's sequence number and length in its
