@@ -86,7 +86,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | 4. Leaf storage and mapping | Page format; tree for integration | Stable leaf IDs and a page-store boundary, first with a test backend and then file I/O. [Completed plan 0008](0008-bf-tree-leaf-store.md) delivers the page-store boundary with memory and file backends, stored-page validation, the leaf mapping table, flush, and reopen from leaf fences. Milestone complete. |
 | 5. Mini-page composition | 2, 4 | Test one leaf plus its overlay, then integrate growth, merge, and split behavior into the tree. [Completed plan 0011](0011-bf-tree-mini-page.md) delivers the single-leaf overlay, recorded in the [mini-page design](../design/bf-tree-mini-page.md); its write loop allocates from the circular buffer of plan 0010. [Completed plan 0012](0012-bf-tree-shared-tree.md) delivers the shared tree foundation: `&self` operations, leaf locks, and one write-through path, recorded in the [concurrency design](../design/bf-tree-concurrency.md). [Completed plan 0013](0013-bf-tree-mini-tree.md) delivers the tree integration: blind writes into mini-pages backed by the circular buffer, merges and merge splits, reads and scans through the overlay, and flush merges, recorded in the [mini-page design](../design/bf-tree-mini-page.md#in-the-tree). Milestone complete. |
 | 6. Bounded circular buffer | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. [Completed plan 0010](0010-bf-tree-circular-buffer.md) delivers the circular buffer component, recorded in the [circular buffer design](../design/bf-tree-circular-buffer.md); it landed before plan 0011, ahead of the rest of milestone 5. [Completed plan 0014](0014-bf-tree-eviction.md) delivers eviction under the fixed budget (a writer releases its leaf lock, evicts the oldest blocks by merging them into their base pages, and retries) and the second chance (relocation of accessed aging blocks on writes, and through hints on reads and scans), recorded in the [circular buffer design](../design/bf-tree-circular-buffer.md#use-in-the-tree). Milestone complete. |
-| 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. Draft plan: [0015](0015-bf-tree-caching.md). |
+| 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. [Completed plan 0015](0015-bf-tree-caching.md) delivers the caching policy: reads served by the base page cache records and absences or promote the page, scans promote untouched leaves, write-driven merges keep the merged page, full pages take writes directly and are written back only when dirty, and hints evict only full pages and clean mini-pages, recorded in the [caching design](../design/bf-tree-caching.md). Milestone complete. |
 | 8. Concurrency | Integrated operations and circular buffer | Optimistic inner-node traversal, leaf locks, and safe concurrent allocation/reclamation. Draft plan: [0016](0016-bf-tree-concurrency.md) (version-locked inner frames; leaf locks and circular-buffer concurrency arrive earlier, in 0010 to 0014). |
 | 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. Draft plans: [0017](0017-bf-tree-store-format.md) (store format), [0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, recovery), [0019](0019-bf-tree-apply.md) (apply, log hook, snapshots), [0020](0020-engine-wal.md) (WAL), [0021](0021-engine-db.md) (`Db`), [0022](0022-engine-external.md) (external-log mode), and [0023](0023-bf-tree-io-perf.md) (direct I/O and measurements). |
 
@@ -189,6 +189,7 @@ the completed concurrent, larger-than-memory engine.
 - [x] Implement and verify the shared tree stack (plan 0012).
 - [x] Implement and verify the mini-page integration stack (plan 0013).
 - [x] Implement and verify the eviction stack (plan 0014).
+- [x] Implement and verify the caching stack (plan 0015).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -221,10 +222,15 @@ pages in place or by a split, reads and scans go through the overlay, and
 [Plan 0014](0014-bf-tree-eviction.md) is complete: a full circular buffer
 makes a writer evict the oldest blocks with no leaf lock held and retry, so
 no circular-buffer error reaches callers, and accessed blocks near the
-head get a second chance at the tail. Milestone 6 is complete. Next is
-[plan 0015](0015-bf-tree-caching.md), record caching, negative caching,
-and full-page promotion, which starts milestone 7. Plans 0015 to 0023 are
-drafts in build order and are agreed one at a time.
+head get a second chance at the tail. Milestone 6 is complete.
+[Plan 0015](0015-bf-tree-caching.md) is complete: reads and scans leave
+cached records, cached absences, or whole pages in the circular buffer by
+configurable rates, full pages take writes directly, and every policy
+agrees with the oracle under tiny buffers, reopen, and concurrency,
+recorded in the [caching design](../design/bf-tree-caching.md). Milestone 7
+is complete. Next is [plan 0016](0016-bf-tree-concurrency.md),
+version-locked inner frames, which starts milestone 8. Plans 0016 to 0023
+are drafts in build order and are agreed one at a time.
 
 ## Sources
 

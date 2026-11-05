@@ -1,9 +1,9 @@
 # 0015: Caching policy and full pages
 
-**Status:** Agreed
+**Status:** Complete
 
-**Design references:** [Caching policy](../design/bf-tree-caching.md)
-(created by this stack), [circular buffer](../design/bf-tree-circular-buffer.md),
+**Design references:** [Caching policy](../design/bf-tree-caching.md),
+[circular buffer](../design/bf-tree-circular-buffer.md),
 [mini-pages](../design/bf-tree-mini-page.md),
 [concurrency](../design/bf-tree-concurrency.md),
 [tree structure](../design/bf-tree-structure.md).
@@ -633,8 +633,31 @@ Resolved:
 - [x] Diff 4: record and negative caching.
 - [x] Diff 5: scan promotion.
 - [x] Diff 6: policy models.
-- [ ] Diff 7: caching design document and roadmap.
-- [ ] Stack-wide verification.
+- [x] Diff 7: caching design document and roadmap.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-05)
+
+| Check | Outcome |
+| --- | --- |
+| Full pages | `tests/full.rs`: a write-driven merge keeps the page and later writes go in directly; a full page that overflows is written back once, released, and the record buffered; eviction writes back dirty full pages and writes nothing for clean ones; `flush` writes back dirty full pages and a reopen agrees; with `write_load_full_page` off, merges leave the leaf `Base`; relocation copies a full page and keeps it dirty; `RwLock<LeafEntry>` stays within 64 bytes. |
+| Page promotion | `tests/promote.rs`: a promoting read keeps the page and the next reads load nothing (the promotion itself costs 2 base reads, see Discoveries); a `Mini` leaf promotes by merging in place; a `Mini` leaf whose merge overflows splits (leaf count 1 to 2), keeps the left half `Full`, and agrees with the oracle; deferral evicts clean full pages without I/O; deferral stops at a dirty mini-page and unclaims it (a later `evict_one` still evicts it); a stale promotion is skipped. |
+| Generator | Rolls depend only on the seed. Rate 20 lands within 17 to 23 percent over 10,000 rolls; rates 0 and 100 are exact. |
+| Record caching | `tests/record.rs`: the second read of a present or absent key reads no base page; rate 0 caches nothing; a fill never hides a newer buffered write (`Cache` and `Phantom`, see Discoveries); a moving working set on a 2 KiB buffer over many leaves keeps being cached: second reads hit, nothing is written, and older records are freed; growth drops unreferenced clean records and keeps referenced and dirty ones; cache-only mini-pages are freed by `flush` and eviction without writes and never reach the store. |
+| Scan promotion | At scan rate 100 every scanned leaf ends `Full`, and a second scan (both forms) reads nothing; at rate 0 a scan allocates nothing; a scan over `Mini` leaves writes nothing and leaves them `Mini`. |
+| Models | `every_caching_policy_matches_the_oracle` runs 60 policies: read rate 0, 20, 100 × record or page mode × scan rate 0, 100 × write-load off or on × 1, 2, 4 KiB buffers. Backends rotate between memory, memory with reopen, and file with reopen; the second-chance share alternates between 0 and 10. Invariants and the budget are asserted after every step. Runs with all rates and the second chance at 0 assert that reads and scans leave `circular_buffer_used()` unchanged. The tiny-buffer eviction model also runs with write-load full pages. |
+| Concurrency | `threads_agree_under_constant_eviction` runs five cases: page mode with full pages at 1 KiB / 10 percent and 2 KiB / 100 percent second chance; record mode at 1 KiB / 0 percent; record mode with full pages at 2 KiB / 10 percent; no caching at 1 KiB / 10 percent. Caching cases use read and scan rates of 30, with writers, readers, scanners, and a looping `flush`. The concurrent suite passed 10 of 10 release runs after each implementation diff. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (314 tests), and `go vet` and `go test` pass. Miri was not needed: the stack does not change `crates/bf-tree-circular-buffer`. |
+
+Baseline (release, Apple M4 Pro, one million random 8-byte keys with
+16-byte values, default configuration including the default caching
+policy): in-memory put 1.55 M ops/s, get 2.04 M ops/s, scan 22 M
+records/s; `FileStore` put 1.27 M ops/s, flush 104 ms, open 28 ms, cold get
+1.07 M ops/s, warm get 1.05 M ops/s, warm scan 19.5 M records/s. The
+[leaf storage design](../design/bf-tree-leaf-store.md#baselines) records
+these numbers next to the earlier baselines. The ignored 96 GiB
+`disk_baseline` also passed (warm get 0.42 M ops/s, first-touch get
+11.8 k ops/s).
 
 ## Discoveries and plan changes
 
@@ -658,6 +681,22 @@ Resolved:
   the model uses 1, 2, and 4 KiB: about four, eight, and sixteen pages.
   The model runs 60 policy combinations; the rate-0 runs without second
   chance assert that reads and scans allocate nothing.
+- **The version alone already rejects a fill after a buffered write.**
+  The plan expected a buffered write into an existing mini-page to leave
+  the version unchanged, so that `SkippedDirty` would stop the fill.
+  In the code, every `LeafMap::buffer` call goes through `take_mini`,
+  which bumps the version, so `maintain` drops such a fill before it is
+  applied. `SkippedDirty` remains a second guard.
+  `a_fill_never_hides_a_newer_buffered_write` therefore exercises the
+  version check, and its comment says so (corrected in diff 4). The
+  mini-page crate's `apply_follows_the_record_table_cell_by_cell` covers
+  `SkippedDirty`.
+- **Deferred eviction of a full page may wait.** `finish_deferred` evicts
+  a `Full` victim through `Tree::evict`, which locks the owner with the
+  blocking `LeafMap::write` and writes back a dirty page. The reader holds
+  no lock then, so this cannot deadlock, but a read can wait for a
+  victim's owner and do one write-back. A reader never waits for its own
+  leaf's lock.
 
 ## Agent notes
 

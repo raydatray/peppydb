@@ -137,13 +137,18 @@ pub(super) struct LeafMap {
 pub(super) struct LeafEntry {
     /// The slot holds no page.
     freed: bool,
-    /// A circular-buffer block holding this leaf's mini-page.
+    /// A circular-buffer block holding this leaf's mini-page, or, without
+    /// `refs`, its full page.
     block: Option<Block>,
-    /// Reference bits for the mini-page's slots; `Some` exactly when `block` is.
+    /// Reference bits for the mini-page's slots; `Some` exactly when the
+    /// block is a mini-page.
     refs: Option<Box<RefBits>>,
     /// Changes (wrapping) on every block change: allocation, growth,
-    /// relocation, merge. A read's hint applies only if it is unchanged.
+    /// relocation, merge, promotion. A read's hint applies only if it is
+    /// unchanged.
     version: u32,
+    /// A full page is newer than the store. False in every other state.
+    dirty: bool,
 }
 
 pub(super) struct LeafRead<'m>  { id: LeafId, entry: RwLockReadGuard<'m, LeafEntry> }
@@ -187,8 +192,11 @@ under S through atomics.)
   bumps `version` (wrapping); every block change goes through it. A read
   notes the version under S, and its relocation hint applies only if the
   version is unchanged
-  ([concurrency](bf-tree-concurrency.md#hints-and-maintain)). Plan 0015
-  adds `dirty`. A test requires `size_of::<RwLock<LeafEntry>>() <= 64`.
+  ([concurrency](bf-tree-concurrency.md#hints-and-maintain)).
+  [Plan 0015](../plans/0015-bf-tree-caching.md) adds `dirty` and full
+  pages; `take_full` and `set_full` bump `version` too
+  ([caching policy](bf-tree-caching.md#residency)). A test requires
+  `size_of::<RwLock<LeafEntry>>() <= 64`.
 - `ids()` yields `0..len()` at the time of the call; `write_if_live(id)`
   X-locks a live slot or returns `None`. `flush` walks leaves by ID with
   them.
@@ -376,7 +384,7 @@ All baselines are informational and single-threaded. They live in the tree
 tests as ignored benchmarks. Contended numbers are not taken on macOS;
 [plan 0016](../plans/0016-bf-tree-concurrency.md) takes them on Linux.
 
-### Mini-pages, write-through, and eviction (plans 0012 to 0014)
+### Mini-pages, write-through, eviction, and caching (plans 0012 to 0015)
 
 `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`
 (both `baseline_throughput` and `baseline_file_store`), on an Apple M4 Pro:
@@ -391,23 +399,31 @@ default 32 MiB could not hold the buffered leaves. "After 0014" is the
 current design with eviction and the second chance
 ([plan 0014](../plans/0014-bf-tree-eviction.md)), measured with the
 default 32 MiB circular buffer; the benchmarks no longer override it.
+"After 0015" adds the default caching policy
+([plan 0015](../plans/0015-bf-tree-caching.md)): write-load full pages,
+record caching at a 20 percent read rate, and scan promotion at 20
+percent.
 
-| step | before 0012 | after 0012 | after 0013 | after 0014 (32 MiB) |
-| --- | --- | --- | --- | --- |
-| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s | 1.57 M ops/s |
-| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s | 1.65 to 1.89 M ops/s |
-| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s | ~19 M records/s |
-| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s | 1.33 M ops/s |
-| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms | 180 ms |
-| `FileStore` open | not recorded | not recorded | ~31 ms | 26 ms |
-| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s | 1.29 M ops/s |
-| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s | 25 M records/s |
+| step | before 0012 | after 0012 | after 0013 | after 0014 (32 MiB) | after 0015 (32 MiB) |
+| --- | --- | --- | --- | --- | --- |
+| `MemStore` put | 1.92 M ops/s | 0.11 M ops/s | 1.42 M ops/s | 1.57 M ops/s | 1.55 M ops/s |
+| `MemStore` get | 1.73 M ops/s | 1.96 M ops/s | 1.28 M ops/s | 1.65 to 1.89 M ops/s | 2.04 M ops/s |
+| `MemStore` scan | 140 M records/s | 27 M records/s | 17 M records/s | ~19 M records/s | 22 M records/s |
+| `FileStore` put | 1.63 M ops/s | 0.07 M ops/s | 1.15 M ops/s | 1.33 M ops/s | 1.27 M ops/s |
+| `FileStore` flush | 47 ms | 859 ms (sync only) | 226 ms | 180 ms | 104 ms |
+| `FileStore` open | not recorded | not recorded | ~31 ms | 26 ms | 28 ms |
+| `FileStore` get, warm | 1.92 M ops/s | 1.04 M ops/s | 1.02 M ops/s | 1.29 M ops/s | 1.05 M ops/s |
+| `FileStore` scan, warm | 138 M records/s | 22 M records/s | 24 M records/s | 25 M records/s | 20 M records/s |
 
 The 0014 column is not a like-for-like comparison with the 0013 column,
 because the circular-buffer budget differs. Under the smaller budget,
 eviction merges mini-pages during the put phase, so fewer leaves are
 buffered when `flush` and the reads run. The table records the outcomes;
-the causes of the differences were not investigated.
+the causes of the differences were not investigated. The 0015 column is
+one run; its differences from the 0014 column are within the run-to-run
+spread seen for 0014, except the faster `flush` (merged pages that stay as
+clean full pages need no write) and the slower warm `FileStore` get, whose
+cause was not investigated.
 
 - **Writes.** Plan 0012 regressed writes as expected: nothing stayed
   resident, so every `put` loaded, rebuilt, and wrote a full 4 KiB page.
@@ -419,8 +435,9 @@ the causes of the differences were not investigated.
   happened during the put phase, and `flush` only called `sync_data`. Now
   `flush` merges every buffered leaf (8192 leaves in this run) and then
   syncs.
-- **Reads.** Reads still load base pages; plan 0015 recovers read throughput
-  with caching. The in-memory get rate fell from 1.96 to 1.28 M ops/s after
+- **Reads.** Before plan 0015, reads always loaded base pages. Plan 0015
+  adds record, negative, and page caching; this uniform-random benchmark
+  reads each key about once, so it shows little of that benefit. The in-memory get rate fell from 1.96 to 1.28 M ops/s after
   0013. In that benchmark the keys are still buffered in mini-pages when the
   gets run, so most gets hit a mini-page. The cause of the slowdown was not
   investigated.

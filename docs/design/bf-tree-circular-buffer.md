@@ -1,13 +1,14 @@
 # Circular buffer
 
-The circular buffer bounds the memory that mini-pages, and later cached full
-pages, use. It follows the BF-Tree paper's §4 and the upstream
+The circular buffer bounds the memory that mini-pages and cached full pages
+use. It follows the BF-Tree paper's §4 and the upstream
 implementation. Its crate, `bf-tree-circular-buffer`, knows nothing about
 pages: it hands out blocks of bytes. [Plan 0010](../plans/0010-bf-tree-circular-buffer.md)
 built it; [plan 0011](../plans/0011-bf-tree-mini-page.md) allocates
 mini-pages from it, [plan 0013](../plans/0013-bf-tree-mini-tree.md) puts it
-into the tree, and [plan 0014](../plans/0014-bf-tree-eviction.md) evicts
-from it.
+into the tree, [plan 0014](../plans/0014-bf-tree-eviction.md) evicts
+from it, and [plan 0015](../plans/0015-bf-tree-caching.md) keeps full pages
+in it ([caching policy](bf-tree-caching.md)).
 
 ## Shape
 
@@ -134,18 +135,46 @@ circular buffer, owned by its `LeafMap`
   second-chance share (see [Configuration](#configuration)).
 - **Classes.** The buffer's classes are the
   [mini-page ladder](bf-tree-mini-page.md#size-classes-and-the-admission-rule)
-  followed by the leaf page size `L`. The `L` class is for full pages in
-  [plan 0015](../plans/0015-bf-tree-caching.md) and has no user yet.
-- **Ownership.** A mini-page block is owned by its leaf. The leaf's entry
-  holds the `Block` handle, and the block's owner is the leaf's ID.
+  followed by the leaf page size `L`. Full pages use the `L` class
+  ([plan 0015](../plans/0015-bf-tree-caching.md)).
+- **Ownership.** A block is owned by its leaf. The leaf's entry holds the
+  `Block` handle, and the block's owner is the leaf's ID. A leaf holds at
+  most one block: a mini-page or a full page.
   Two call sites allocate mini-page blocks, both under the leaf's X lock:
   `LeafMap::buffer` (creation and growth; growth frees the old block there
   too) and `Tree::relocate` (the second chance). `Tree::merge_leaf` frees
-  the block under the same X lock after the merged pages are written.
+  the block under the same X lock after the merged pages are written, or at
+  once for a mini-page with no dirty record.
+  Full-page blocks are covered in [Full blocks](#full-blocks).
   `LeafMap::into_store` frees every remaining block.
 - **Locking.** The buffer's mutex is innermost in the
   [lock order](bf-tree-concurrency.md#lock-order): a thread takes it under
   a leaf's X lock and never waits for a leaf lock while it holds it.
+
+### Full blocks
+
+A block of kind `Kind::Full` holds a complete leaf page of `L` bytes. The
+leaf is then `Full`: the block answers every key in the leaf's range, and
+`LeafEntry::dirty` says whether it is newer than the store. The
+[caching design](bf-tree-caching.md) describes when the tree keeps a page.
+The block's events, all under the owner's X lock:
+
+| Event | Code | Effect on the block |
+| --- | --- | --- |
+| Promotion on a read or scan | `Tree::promote` | Allocates a clean `Kind::Full` block, only if it fits without eviction. |
+| Write-driven merge | `Tree::keep_merged` | Allocates a clean block for the merged page, only if it fits without eviction. |
+| Direct write | `Tree::place` | Changes bytes in place and sets `dirty`. No allocation. |
+| Overflow | `LeafMap::release_full` | Writes the page back if dirty, then frees the block. |
+| Eviction | `Tree::evict` | Writes the page back if dirty, or only frees it if clean, then retires the claim. |
+| Relocation | `Tree::relocate` | Copies the page to a fresh `Kind::Full` block at the tail and keeps `dirty`. |
+| `flush` | `LeafMap::write_back` | Writes a dirty page back and clears `dirty`. The block stays. |
+
+Hints (promotions and cache fills) allocate only when room exists without
+eviction. When they lack room, the reader releases its lock and the
+deferred path (`Tree::finish_deferred`) evicts only `Kind::Full` blocks and
+mini-pages with no dirty record (`Tree::evict_if_clean`). It stops at a
+mini-page with a dirty record and unclaims it. See
+[Deferral](bf-tree-caching.md#deferral).
 
 ### A full buffer
 
@@ -216,14 +245,18 @@ evictions if measurements show a problem.
    (`Block::is` compares addresses). If not, the owner grew, merged, or
    relocated the block after the claim and freed it. A freed block stays
    claimed, so `evict` only retires it.
-4. Otherwise `evict` calls `Tree::merge_leaf`, the same merge that writes
-   and `flush` use. It loads the base page into thread-local scratch,
+4. If the block is a full page, `evict` calls `LeafMap::release_full`: it
+   writes the page back if `dirty`, frees the block, and makes the leaf
+   `Base`. Then `evict` retires the claim. A clean full page is evicted
+   with no store write.
+5. Otherwise `evict` calls `Tree::merge_leaf`, the same merge that writes
+   and `flush` use. A mini-page with no dirty record is freed without I/O. It loads the base page into thread-local scratch,
    merges in place or splits into a fresh right leaf, writes the result
    through, and frees the block last. A split's right guard drops before
    the owner's guard. Then `evict` retires the claim.
-5. If `merge_leaf` fails (for example, a store error), it puts the
-   mini-page back in the entry, so no buffered record is lost. `evict`
-   unclaims the block and returns the error.
+6. If `merge_leaf` or the write-back fails (for example, a store error),
+   the block stays in the entry, so no buffered record or dirty page is
+   lost. `evict` unclaims the block and returns the error.
 
 Merges never allocate from the circular buffer: both outputs go to the
 store, and the leaf becomes `Base`. Eviction can therefore always complete
@@ -262,13 +295,14 @@ Eviction itself stays strictly FIFO. The code is in
 
 1. If the leaf has no block, or the block is not in the second-chance
    region, it does nothing.
-2. It allocates a block of the same size with `Kind::Mini`. If the
+2. It allocates a block of the same size and kind. A full page is copied
+   byte for byte and keeps its `dirty` flag; the old block is freed. If the
    allocation fails, it keeps the old block. Relocation is best effort and
    never evicts: an eviction to save one block could merge other leaves,
    which inverts the priority.
-3. It copies the records with `Mini::copy_into(fresh, true)`, which drops
-   cold clean records. Before plan 0015, mini-pages hold only dirty
-   records, so the copy drops nothing yet.
+3. For a mini-page, it copies the records with
+   `Mini::copy_into(fresh, true)`, which drops clean records whose
+   reference bit is clear.
 4. It puts the fresh mini-page in the entry and frees the old block. The
    old block is in the region, so it becomes a tombstone. Until the head
    passes it, the budget is charged for both copies.
@@ -279,18 +313,21 @@ Writes and reads reach `relocate` in different ways:
   that grew the mini-page has already moved it to the tail, so relocating
   first would copy twice.
 - **Reads and scans** hold only an S lock, which cannot change the entry.
-  Under S, `Tree::note` returns `Some(Noted)` with the leaf ID, its
-  `LeafEntry::version`, and `Hint::Relocate` if the block is in the region.
+  Under S, `Tree::note` returns a `Noted` value with the leaf ID, its
+  `LeafEntry::version`, and an `aging` flag that is set if the block is in
+  the region. A read may add a caching hint to it
+  ([caching policy](bf-tree-caching.md#hints-and-their-validity)).
   After the S lock is dropped, `Tree::maintain` tries the X lock once with
-  `LeafMap::try_write`. It skips the hint if the lock is busy or the
-  version changed, and otherwise calls `relocate`. A reader never waits
+  `LeafMap::try_write`. It skips everything if the lock is busy or the
+  version changed. Otherwise it calls `relocate` if the block is aging,
+  then applies the hint. A reader never waits
   for a hint. Under sustained contention a hot block may not be relocated,
   and FIFO eviction then merges it. That is acceptable: maintenance is
   best effort.
 
-`LeafWrite::take_mini` bumps the version. Every block change (growth,
-merge, relocation) goes through `take_mini`, so one bump covers them all.
-A bump without a change only skips a hint.
+`LeafWrite::take_mini`, `take_full`, and `set_full` bump the version.
+Every block change (growth, merge, relocation, promotion, release) goes
+through one of them. A bump without a change only skips a hint.
 
 ### Configuration
 
@@ -310,8 +347,9 @@ with dead space faster. Plan 0023 measures this cost.
 ### Guarantees
 
 - **The budget is never exceeded.** `used() <= capacity` holds after every
-  operation. The model tests assert it after every step with 1 KiB and
-  2 KiB buffers.
+  operation. The model tests assert it after every step with 1, 2, and
+  4 KiB buffers and every caching policy. Full pages and cache fills
+  allocate only when room exists without eviction.
 - **No circular-buffer error reaches callers.** Under a validated
   configuration, no public operation fails because the buffer is full.
   `TreeError::CircularBufferFull` no longer exists. A write can still fail
@@ -322,7 +360,8 @@ with dead space faster. Plan 0023 measures this cost.
   including when the owner cannot be locked and when the merge fails. A
   leaked claim would hold the head forever.
 - **No buffered record is lost.** The block is freed only after the merged
-  pages are written through.
+  pages are written through. A dirty full page is freed only after it is
+  written back.
 
 ## Measurements
 
