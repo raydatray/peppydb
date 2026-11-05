@@ -2,9 +2,9 @@
 //!
 //! The tree routes through [`InnerNode`]s to fenced leaf [`Page`]s. It starts
 //! as one unbounded leaf; the first leaf split creates the first inner node.
-//! Every leaf is at the same depth. Each leaf has its own reader-writer lock,
-//! and every access loads its base page from the store; nothing stays
-//! resident.
+//! Every leaf is at the same depth and has its own reader-writer lock. Writes
+//! buffer blindly into the leaf's in-memory mini-page, which merges into the
+//! base page in the store when full or on `flush`.
 //!
 //! ```
 //! use bf_tree::{Tree, TreeConfig};
@@ -34,7 +34,7 @@ use std::sync::atomic::AtomicU64;
 
 use bf_tree_circular_buffer::CircularBuffer;
 use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
-use bf_tree_mini_page::SizeClasses;
+use bf_tree_mini_page::{BufferError, SizeClasses};
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
 use bf_tree_sync::RwLock;
@@ -100,9 +100,12 @@ impl TreeConfig {
     /// Check the capacities and the admission rule that lets every split succeed.
     ///
     /// With leaf capacity `L`, inner capacity `I`, key limit `K`, and value limit
-    /// `V`, the rule requires `7K + 3V <= L - 72` and
-    /// `16 + max(K - 4, 0) <= (I - 16) / 2`, a mini-page ladder (see
-    /// `SizeClasses::derive`), and a valid circular-buffer budget.
+    /// `V`, the rule requires a mini-page ladder, whose largest class
+    /// `M = floor64(L - 5K - V - 24)` must be at least 64 and hold a maximum
+    /// record (`32 + 8 + K + V <= M`); every leaf split comes from merging a
+    /// mini-page, and this `M` makes one two-way split always absorb that
+    /// merge. Inner nodes need `16 + max(K - 4, 0) <= (I - 16) / 2`, and the
+    /// circular-buffer budget must be valid.
     pub fn validate(&self) -> Result<(), TreeError> {
         Page::check_capacity(self.leaf_capacity)
             .map_err(|_| TreeError::InvalidConfig("leaf capacity is not a valid page capacity"))?;
@@ -117,17 +120,9 @@ impl TreeConfig {
             ));
         }
 
-        // The larger split output holds a header, one finite fence pair, half
-        // of the old payload plus the pending record, and one more record.
-        let leaf_demand = self
-            .max_key_len
-            .saturating_mul(7)
-            .saturating_add(self.max_value_len.saturating_mul(3));
-        if leaf_demand.saturating_add(72) > self.leaf_capacity {
-            return Err(TreeError::InvalidConfig(
-                "leaf capacity must satisfy 7 * max_key_len + 3 * max_value_len <= leaf_capacity - 72",
-            ));
-        }
+        // The ladder bounds K and V by the leaf capacity, with checked
+        // arithmetic, so it runs before the inner-node rule's sums.
+        let classes = self.size_classes()?;
 
         if entry_size(self.max_key_len) > (self.inner_capacity - HEADER_BYTES) / 2 {
             return Err(TreeError::InvalidConfig(
@@ -135,7 +130,6 @@ impl TreeConfig {
             ));
         }
 
-        let classes = self.size_classes()?;
         CircularBuffer::new(
             self.circular_buffer_bytes,
             &self.buffer_classes(&classes),
@@ -233,6 +227,19 @@ pub enum TreeError {
     /// An inner-node operation failed unexpectedly. This indicates a tree bug.
     #[error("internal inner-node error: {0}")]
     Inner(#[from] InnerError),
+    /// The circular buffer has no room for the mini-page this write needs.
+    /// Nothing changed. Interim: plan 0014 evicts instead.
+    #[error("circular buffer is full")]
+    CircularBufferFull,
+}
+
+impl From<BufferError> for TreeError {
+    fn from(error: BufferError) -> Self {
+        match error {
+            BufferError::Full(_) => TreeError::CircularBufferFull,
+            BufferError::Page(error) => TreeError::Page(error),
+        }
+    }
 }
 
 /// An ordered map from nonempty byte keys to byte values, shared between

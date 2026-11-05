@@ -80,10 +80,10 @@ impl Tree {
 
     /// Lock the leaf that owns `key` exclusively and run `f` on it: route,
     /// lock, validate the route, and retry if a split intervened.
-    pub(super) fn with_leaf_write<R>(
-        &self,
+    pub(super) fn with_leaf_write<'t, R>(
+        &'t self,
         key: &[u8],
-        f: impl FnOnce(&mut LeafWrite<'_>) -> Result<R, TreeError>,
+        f: impl FnOnce(&mut LeafWrite<'t>) -> Result<R, TreeError>,
     ) -> Result<R, TreeError> {
         loop {
             let route = self.route(key);

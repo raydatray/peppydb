@@ -304,22 +304,30 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
 }
 
 #[test]
-fn a_dropped_trees_store_holds_every_write() {
+fn a_closed_trees_store_holds_every_flushed_write_and_no_buffered_one() {
     let config = config(256, 128, 8, 16);
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 100);
     tree.flush().unwrap();
-    // A second batch, including splits, with no flush before the drop.
+    // A second batch, including splits, then a flush.
     let leaves_before = tree.leaf_count();
     fill(&mut tree, &mut model, 300);
+    tree.flush().unwrap();
     let leaves_after = tree.leaf_count();
     assert!(leaves_after > leaves_before);
+    // One more put after the flush. It is buffered in a fresh mini-page, so
+    // it cannot cause a merge, and `into_store` loses it.
+    let lost = 999_999u32.to_be_bytes();
+    tree.put(&lost, b"lost").unwrap();
+    assert_eq!(tree.buffered_leaves(), 1);
+    assert_eq!(tree.leaf_count(), leaves_after);
 
     let mut reopened = Tree::open(tree.into_store()).unwrap();
-    // Writes go through to the store at once, so it holds both batches.
+    // The store holds both flushed batches and not the buffered put.
     assert_matches_model(&reopened, &model);
+    assert_eq!(reopened.get(&lost), Ok(None));
     // Every allocated slot was written, so none reopens as free.
     assert_eq!(reopened.leaf_count(), leaves_after);
     assert!((0..leaves_after).all(|index| reopened.leaves.is_live(leaf(index as u64))));

@@ -147,13 +147,47 @@ fn scans_skip_empty_leaves() {
     for i in 0..400u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
+    tree.flush().unwrap();
     // Empty a run of whole leaves in the middle, then the first and last.
     let removed = |i: u32| (100..250).contains(&i) || !(30..370).contains(&i);
     for i in (0..400u32).filter(|&i| removed(i)) {
         tree.remove(&i.to_be_bytes()).unwrap();
     }
     assert_eq!(tree.check_invariants(), Ok(()));
-    let empty = (0..tree.leaf_count())
+    let all: Vec<_> = (0..400u32)
+        .filter(|&i| !removed(i))
+        .map(|i| (i.to_be_bytes().to_vec(), b"v".to_vec()))
+        .collect();
+
+    // Scan with tombstones still buffered over the base records, then again
+    // after the merges have emptied the base pages.
+    for flushed in [false, true] {
+        if flushed {
+            tree.flush().unwrap();
+            assert_eq!(tree.check_invariants(), Ok(()));
+            assert!(
+                empty_leaves(&tree) >= 3,
+                "{} empty leaves",
+                empty_leaves(&tree)
+            );
+        }
+        assert_eq!(scanned(&tree, None, None), all, "flushed: {flushed}");
+        let start = 90u32.to_be_bytes();
+        let end = 260u32.to_be_bytes();
+        assert_eq!(
+            scanned(&tree, Some(&start), Some(&end)),
+            expected(&all, Some(&start), Some(&end))
+        );
+        // A range entirely inside the emptied run is empty.
+        let start = 120u32.to_be_bytes();
+        let end = 240u32.to_be_bytes();
+        assert_eq!(tree.range(Some(&start), Some(&end)).unwrap().count(), 0);
+    }
+}
+
+/// Number of leaves whose base page holds no record.
+fn empty_leaves(tree: &Tree) -> usize {
+    (0..tree.leaf_count())
         .filter(|&index| {
             let bytes = tree
                 .leaves
@@ -161,24 +195,7 @@ fn scans_skip_empty_leaves() {
                 .unwrap();
             Page::validate(&bytes).unwrap().is_empty()
         })
-        .count();
-    assert!(empty >= 3, "{empty} empty leaves");
-
-    let all: Vec<_> = (0..400u32)
-        .filter(|&i| !removed(i))
-        .map(|i| (i.to_be_bytes().to_vec(), b"v".to_vec()))
-        .collect();
-    assert_eq!(scanned(&tree, None, None), all);
-    let start = 90u32.to_be_bytes();
-    let end = 260u32.to_be_bytes();
-    assert_eq!(
-        scanned(&tree, Some(&start), Some(&end)),
-        expected(&all, Some(&start), Some(&end))
-    );
-    // A range entirely inside the emptied run is empty.
-    let start = 120u32.to_be_bytes();
-    let end = 240u32.to_be_bytes();
-    assert_eq!(tree.range(Some(&start), Some(&end)).unwrap().count(), 0);
+        .count()
 }
 
 #[test]
@@ -295,6 +312,9 @@ fn scan_with_stops_at_the_first_break() {
 #[test]
 fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
     let (tree, all) = grown(600);
+    // Merge every buffered insert first, so that the removes below only
+    // buffer tombstones and no later merge splits a leaf.
+    tree.flush().unwrap();
     let fences = boundaries(&tree);
     assert!(fences.len() > 10);
     // Empty whole leaves: the first, two adjacent ones, one in the middle,
@@ -316,39 +336,41 @@ fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
         assert_eq!(tree.remove(key), Ok(()));
     }
     assert_eq!(tree.check_invariants(), Ok(()));
-    let empty = (0..tree.leaf_count())
-        .filter(|&index| {
-            let bytes = tree
-                .leaves
-                .page_copy(LeafId::new(index as u64).unwrap())
-                .unwrap();
-            Page::validate(&bytes).unwrap().is_empty()
-        })
-        .count();
-    assert_eq!(empty, 5);
+    let leaves = tree.leaf_count();
 
-    assert_eq!(scanned(&tree, None, None), live);
-    assert_eq!(visited(&tree, None, None), live);
-    assert_eq!(collect(tree.iter()), live);
-    // Bounds inside, at, and around every emptied leaf.
-    let bounds: Vec<Option<&[u8]>> = fences.iter().map(|fence| Some(fence.as_slice())).collect();
-    for start in bounds.iter().copied().chain([None]) {
-        for end in bounds.iter().copied().chain([None]) {
-            if start.zip(end).is_some_and(|(start, end)| start > end) {
-                continue;
-            }
-            let records = expected(&live, start, end);
-            assert_eq!(scanned(&tree, start, end), records);
-            assert_eq!(visited(&tree, start, end), records);
+    // Tombstones hide the records while buffered, and the merges drop them.
+    for flushed in [false, true] {
+        if flushed {
+            tree.flush().unwrap();
+            assert_eq!(tree.check_invariants(), Ok(()));
+            assert_eq!(tree.leaf_count(), leaves, "removes never split");
+            assert_eq!(boundaries(&tree), fences);
+            assert_eq!(empty_leaves(&tree), 5);
         }
-    }
-    // Ranges entirely inside emptied leaves are empty.
-    for (start, end) in [
-        (None, Some(fences[0].as_slice())),
-        (Some(fences[3].as_slice()), Some(fences[5].as_slice())),
-    ] {
-        assert_eq!(scanned(&tree, start, end), []);
-        assert_eq!(visited(&tree, start, end), []);
+        assert_eq!(scanned(&tree, None, None), live, "flushed: {flushed}");
+        assert_eq!(visited(&tree, None, None), live);
+        assert_eq!(collect(tree.iter()), live);
+        // Bounds inside, at, and around every emptied leaf.
+        let bounds: Vec<Option<&[u8]>> =
+            fences.iter().map(|fence| Some(fence.as_slice())).collect();
+        for start in bounds.iter().copied().chain([None]) {
+            for end in bounds.iter().copied().chain([None]) {
+                if start.zip(end).is_some_and(|(start, end)| start > end) {
+                    continue;
+                }
+                let records = expected(&live, start, end);
+                assert_eq!(scanned(&tree, start, end), records);
+                assert_eq!(visited(&tree, start, end), records);
+            }
+        }
+        // Ranges entirely inside emptied leaves are empty.
+        for (start, end) in [
+            (None, Some(fences[0].as_slice())),
+            (Some(fences[3].as_slice()), Some(fences[5].as_slice())),
+        ] {
+            assert_eq!(scanned(&tree, start, end), []);
+            assert_eq!(visited(&tree, start, end), []);
+        }
     }
 }
 
