@@ -18,7 +18,7 @@
 //!     max_key_len: 8,
 //!     max_value_len: 16,
 //! };
-//! let mut store = MemStore::new(superblock).unwrap();
+//! let store = MemStore::new(superblock).unwrap();
 //! let id = store.alloc().unwrap();
 //! assert_eq!(id, LeafId::new(0).unwrap());
 //!
@@ -77,7 +77,11 @@ pub enum StoreError {
 /// Reads and writes transfer exactly one page; the buffer length must equal
 /// [`PageStore::page_size`]. Writes are durable only after [`PageStore::sync`]
 /// returns.
-pub trait PageStore {
+///
+/// A store is shared between threads. It does not order concurrent accesses
+/// to one slot; the caller must serialize them (the tree does so with the
+/// leaf lock).
+pub trait PageStore: Send + Sync + std::fmt::Debug {
     /// Length of every slot in bytes; equal to the superblock's `page_size`.
     fn page_size(&self) -> usize;
 
@@ -86,20 +90,20 @@ pub trait PageStore {
     fn slots(&self) -> u64;
 
     /// Hand out a zeroed slot: a freed slot if any, else a new one at the end.
-    fn alloc(&mut self) -> Result<LeafId, StoreError>;
+    fn alloc(&self) -> Result<LeafId, StoreError>;
 
     /// Zero a slot and return it for reuse. Unused by this stack's tree; it
     /// exists so the boundary is stable when leaf merging arrives.
-    fn free(&mut self, id: LeafId) -> Result<(), StoreError>;
+    fn free(&self, id: LeafId) -> Result<(), StoreError>;
 
     /// Copy a slot into `buf`. A freed slot reads as zeros.
     fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError>;
 
     /// Replace a live slot's bytes with `buf`.
-    fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError>;
+    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError>;
 
     /// Make every completed write durable.
-    fn sync(&mut self) -> Result<(), StoreError>;
+    fn sync(&self) -> Result<(), StoreError>;
 
     fn superblock(&self) -> &Superblock;
 }

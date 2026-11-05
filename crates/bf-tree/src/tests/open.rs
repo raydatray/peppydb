@@ -353,7 +353,7 @@ fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>) {
 #[test]
 fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
     // A zeroed (freed) middle leaf leaves a gap.
-    let (mut store, images) = flushed_store();
+    let (store, images) = flushed_store();
     store.free(leaf(1)).unwrap();
     assert_eq!(
         Tree::open(store).err(),
@@ -363,7 +363,7 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
     );
 
     // A duplicated leaf: the same page written twice.
-    let (mut store, _) = flushed_store();
+    let (store, _) = flushed_store();
     store.write(leaf(2), &images[1]).unwrap();
     assert!(matches!(
         Tree::open(store).err(),
@@ -371,7 +371,7 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
     ));
 
     // A torn page: the tail of a leaf zeroed.
-    let (mut store, _) = flushed_store();
+    let (store, _) = flushed_store();
     let mut torn = images[1].clone();
     torn[128..].fill(0);
     store.write(leaf(1), &torn).unwrap();
@@ -381,7 +381,7 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
     ));
 
     // A flipped header byte.
-    let (mut store, _) = flushed_store();
+    let (store, _) = flushed_store();
     let mut flipped = images[0].clone();
     flipped[3] ^= 0x40;
     store.write(leaf(0), &flipped).unwrap();
@@ -394,7 +394,7 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
     );
 
     // A valid but unfenced page.
-    let (mut store, _) = flushed_store();
+    let (store, _) = flushed_store();
     let mut unfenced = vec![0; 256];
     Page::init(&mut unfenced).unwrap();
     store.write(leaf(0), &unfenced).unwrap();
@@ -429,7 +429,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
 
     // Pages written under a wider key limit than the superblock claims.
     let narrow = config(256, 128, 4, 16);
-    let mut store = MemStore::new(Superblock::from(&narrow)).unwrap();
+    let store = MemStore::new(Superblock::from(&narrow)).unwrap();
     let id = store.alloc().unwrap();
     let mut bytes = vec![0; 256];
     let page = Page::init_with_fences(
@@ -449,7 +449,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
         ))
     );
 
-    let mut store = MemStore::new(Superblock::from(&narrow)).unwrap();
+    let store = MemStore::new(Superblock::from(&narrow)).unwrap();
     for (lower, upper) in [
         (None, Some([7u8; 8].as_slice())),
         (Some([7u8; 8].as_slice()), None),

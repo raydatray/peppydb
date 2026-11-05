@@ -1,7 +1,7 @@
 //! The leaf mapping table: residency and dirty tracking.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use zerocopy::IntoBytes;
 
@@ -38,7 +38,7 @@ fn reads_do_not_dirty_and_writes_do() {
     let images: Vec<_> = (0..leaves)
         .map(|index| tree.leaf(leaf(index as u64)).unwrap().as_bytes().to_vec())
         .collect();
-    let mut store = tree.leaves.into_store();
+    let store = tree.leaves.into_store();
     for (index, image) in images.iter().enumerate() {
         store.write(leaf(index as u64), image).unwrap();
     }
@@ -96,7 +96,7 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
 #[test]
 fn corrupt_stored_leaves_are_reported_on_load() {
     let config = config(256, 128, 8, 16);
-    let mut store = MemStore::new(Superblock::from(&config)).unwrap();
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
     let id = store.alloc().unwrap();
     let mut bytes = vec![0; 256];
     Page::init_with_fences(
@@ -134,7 +134,7 @@ fn split_pairs_load_the_left_leaf_on_demand() {
     // Round-trip the full leaf through the store, then force a split.
     let mut page = vec![0; 256];
     page.copy_from_slice(tree.leaf(leaf(0)).unwrap().as_bytes());
-    let mut store = tree.leaves.into_store();
+    let store = tree.leaves.into_store();
     store.write(leaf(0), &page).unwrap();
     let mut tree = Tree {
         config: tree.config,
@@ -154,10 +154,11 @@ fn split_pairs_load_the_left_leaf_on_demand() {
 }
 
 /// A store that counts writes and syncs, over any backend.
+#[derive(Debug)]
 struct Counting {
     inner: Box<dyn PageStore>,
-    writes: Rc<Cell<usize>>,
-    syncs: Rc<Cell<usize>>,
+    writes: Arc<AtomicUsize>,
+    syncs: Arc<AtomicUsize>,
 }
 
 impl PageStore for Counting {
@@ -167,21 +168,21 @@ impl PageStore for Counting {
     fn slots(&self) -> u64 {
         self.inner.slots()
     }
-    fn alloc(&mut self) -> Result<LeafId, StoreError> {
+    fn alloc(&self) -> Result<LeafId, StoreError> {
         self.inner.alloc()
     }
-    fn free(&mut self, id: LeafId) -> Result<(), StoreError> {
+    fn free(&self, id: LeafId) -> Result<(), StoreError> {
         self.inner.free(id)
     }
     fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
         self.inner.read(id, buf)
     }
-    fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        self.writes.set(self.writes.get() + 1);
+    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+        self.writes.fetch_add(1, Ordering::Relaxed);
         self.inner.write(id, buf)
     }
-    fn sync(&mut self) -> Result<(), StoreError> {
-        self.syncs.set(self.syncs.get() + 1);
+    fn sync(&self) -> Result<(), StoreError> {
+        self.syncs.fetch_add(1, Ordering::Relaxed);
         self.inner.sync()
     }
     fn superblock(&self) -> &Superblock {
@@ -189,11 +190,11 @@ impl PageStore for Counting {
     }
 }
 
-type Counter = Rc<Cell<usize>>;
+type Counter = Arc<AtomicUsize>;
 
 fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Counter, Counter) {
-    let writes = Rc::new(Cell::new(0));
-    let syncs = Rc::new(Cell::new(0));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let syncs = Arc::new(AtomicUsize::new(0));
     let store = Counting {
         inner: Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
         writes: writes.clone(),
@@ -232,7 +233,7 @@ fn create_checks_the_store_against_the_configuration() {
         ))
     );
 
-    let mut used = MemStore::new(Superblock::from(&config)).unwrap();
+    let used = MemStore::new(Superblock::from(&config)).unwrap();
     used.alloc().unwrap();
     assert_eq!(
         Tree::create(config, Box::new(used)).err(),
@@ -257,7 +258,7 @@ fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
     let config = config(256, 128, 8, 16);
     let (store, writes, syncs) = counting(config);
     let mut tree = Tree::create(config, store).unwrap();
-    assert_eq!(writes.get(), 0);
+    assert_eq!(writes.load(Ordering::Relaxed), 0);
 
     for i in 0..200u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
@@ -266,20 +267,32 @@ fn flush_writes_exactly_the_dirty_leaves_then_syncs() {
     assert_eq!(tree.dirty_leaves(), leaves);
 
     tree.flush().unwrap();
-    assert_eq!((writes.get(), syncs.get()), (leaves, 1));
+    assert_eq!(
+        (
+            writes.load(Ordering::Relaxed),
+            syncs.load(Ordering::Relaxed)
+        ),
+        (leaves, 1)
+    );
     assert_eq!(tree.dirty_leaves(), 0);
     assert_eq!(stored_pages(&tree), resident_pages(&tree));
 
     // A clean tree writes nothing; reads keep it clean.
     assert_eq!(tree.get(&3u32.to_be_bytes()), Ok(Some(b"v".as_slice())));
     tree.flush().unwrap();
-    assert_eq!((writes.get(), syncs.get()), (leaves, 2));
+    assert_eq!(
+        (
+            writes.load(Ordering::Relaxed),
+            syncs.load(Ordering::Relaxed)
+        ),
+        (leaves, 2)
+    );
 
     // One leaf written after one update; a split dirties two.
     tree.put(&3u32.to_be_bytes(), b"w").unwrap();
     assert_eq!(tree.dirty_leaves(), 1);
     tree.flush().unwrap();
-    assert_eq!(writes.get(), leaves + 1);
+    assert_eq!(writes.load(Ordering::Relaxed), leaves + 1);
     assert_eq!(stored_pages(&tree), resident_pages(&tree));
 
     assert_eq!(tree.remove(&3u32.to_be_bytes()), Ok(true));

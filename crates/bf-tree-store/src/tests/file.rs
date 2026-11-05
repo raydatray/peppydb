@@ -31,7 +31,7 @@ fn create_writes_a_superblock_page_and_refuses_to_clobber() {
 fn reopening_sees_written_pages_and_treats_zero_slots_as_live() {
     let (_dir, path) = temp_path();
     {
-        let mut store = FileStore::create(&path, superblock(PAGE)).unwrap();
+        let store = FileStore::create(&path, superblock(PAGE)).unwrap();
         let ids: Vec<_> = (0..4).map(|_| store.alloc().unwrap()).collect();
         for (fill, &id) in (1u8..).zip(&ids) {
             store.write(id, &page_image(PAGE, fill)).unwrap();
@@ -41,7 +41,7 @@ fn reopening_sees_written_pages_and_treats_zero_slots_as_live() {
     }
     assert_eq!(fs::metadata(&path).unwrap().len(), 5 * PAGE as u64);
 
-    let mut store = FileStore::open(&path).unwrap();
+    let store = FileStore::open(&path).unwrap();
     assert_eq!(*store.superblock(), superblock(PAGE));
     assert_eq!(store.slots(), 4);
 
@@ -65,7 +65,7 @@ fn reopening_sees_written_pages_and_treats_zero_slots_as_live() {
 #[test]
 fn alloc_extends_the_file_with_a_zeroed_page() {
     let (_dir, path) = temp_path();
-    let mut store = FileStore::create(&path, superblock(PAGE)).unwrap();
+    let store = FileStore::create(&path, superblock(PAGE)).unwrap();
     store.alloc().unwrap();
     store.alloc().unwrap();
     drop(store);

@@ -2,9 +2,11 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{ENCODED_BYTES, PageStore, StoreError, Superblock, check_buffer};
 use bf_tree_node_id::LeafId;
+use bf_tree_sync::{Mutex, Table};
 
 /// A [`PageStore`] over one file: the superblock page followed by the slots.
 ///
@@ -17,15 +19,18 @@ use bf_tree_node_id::LeafId;
 /// read per slot. A reopened store treats every slot as live until a caller
 /// that reads every slot, such as `Tree::open`, returns the all-zero ones
 /// with [`PageStore::free`].
+///
+/// Reads and writes use positioned I/O and take no store-wide lock.
 #[derive(Debug)]
 pub struct FileStore {
     file: File,
     superblock: Superblock,
-    slots: u64,
-    /// Parallel to the slots: whether each is on the free list.
-    freed: Vec<bool>,
-    /// Freed slot indices, reused last-in first-out.
-    free: Vec<u64>,
+    /// One flag per slot: whether it is on the free list. Its length is the
+    /// slot count.
+    freed: Table<AtomicBool>,
+    /// Freed slot indices, reused last-in first-out. `alloc` holds it while
+    /// it extends the file, which serializes growth.
+    free: Mutex<Vec<u64>>,
 }
 
 impl FileStore {
@@ -48,9 +53,8 @@ impl FileStore {
         Ok(Self {
             file,
             superblock,
-            slots: 0,
-            freed: Vec::new(),
-            free: Vec::new(),
+            freed: Table::new(),
+            free: Mutex::new(Vec::new()),
         })
     }
 
@@ -77,13 +81,14 @@ impl FileStore {
             return Err(StoreError::TruncatedFile);
         }
         let slots = len / page_size - 1;
+        let freed = Table::new();
+        freed.grow_to(usize::try_from(slots).map_err(|_| StoreError::TruncatedFile)?);
 
         Ok(Self {
             file,
             superblock,
-            slots,
-            freed: vec![false; usize::try_from(slots).map_err(|_| StoreError::TruncatedFile)?],
-            free: Vec::new(),
+            freed,
+            free: Mutex::new(Vec::new()),
         })
     }
 
@@ -91,9 +96,12 @@ impl FileStore {
         (index + 1) * self.superblock.page_size as u64
     }
 
-    fn index(&self, id: LeafId) -> Result<u64, StoreError> {
-        Some(id.raw())
-            .filter(|&index| index < self.slots)
+    /// The slot index and its freed flag.
+    fn slot(&self, id: LeafId) -> Result<(u64, &AtomicBool), StoreError> {
+        usize::try_from(id.raw())
+            .ok()
+            .and_then(|index| self.freed.get(index))
+            .map(|freed| (id.raw(), freed))
             .ok_or(StoreError::UnknownSlot(id))
     }
 }
@@ -104,61 +112,63 @@ impl PageStore for FileStore {
     }
 
     fn slots(&self) -> u64 {
-        self.slots
+        self.freed.len() as u64
     }
 
-    fn alloc(&mut self) -> Result<LeafId, StoreError> {
-        if let Some(index) = self.free.pop() {
-            self.freed[index as usize] = false;
+    fn alloc(&self) -> Result<LeafId, StoreError> {
+        let mut free = self.free.lock();
+        if let Some(index) = free.pop() {
+            let (_, freed) = self.slot(LeafId::new(index).expect("stored slot"))?;
+            freed.store(false, Ordering::Release);
 
             return Ok(LeafId::new(index).expect("slot counts stay below the reserved ID"));
         }
 
         // Extend the file first, so that the length stays authoritative even
         // if the process stops before the first write to the new slot.
-        let index = self.slots;
+        let index = self.freed.len() as u64;
         let zeroed = vec![0; self.superblock.page_size];
         write_at(&self.file, self.offset(index), &zeroed)
             .map_err(|error| io_error("extend", error))?;
-        self.slots += 1;
-        self.freed.push(false);
+        self.freed.grow_to(index as usize + 1);
 
         Ok(LeafId::new(index).expect("slot counts stay below the reserved ID"))
     }
 
-    fn free(&mut self, id: LeafId) -> Result<(), StoreError> {
-        let index = self.index(id)?;
-        if self.freed[index as usize] {
+    fn free(&self, id: LeafId) -> Result<(), StoreError> {
+        let (index, freed) = self.slot(id)?;
+        let mut free = self.free.lock();
+        if freed.load(Ordering::Acquire) {
             return Err(StoreError::FreedSlot(id));
         }
 
         let zeroed = vec![0; self.superblock.page_size];
         write_at(&self.file, self.offset(index), &zeroed)
             .map_err(|error| io_error("free", error))?;
-        self.freed[index as usize] = true;
-        self.free.push(index);
+        freed.store(true, Ordering::Release);
+        free.push(index);
 
         Ok(())
     }
 
     fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
-        let index = self.index(id)?;
+        let (index, _) = self.slot(id)?;
         check_buffer(self.superblock.page_size, buf)?;
 
         read_at(&self.file, self.offset(index), buf).map_err(|error| io_error("read", error))
     }
 
-    fn write(&mut self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        let index = self.index(id)?;
+    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+        let (index, freed) = self.slot(id)?;
         check_buffer(self.superblock.page_size, buf)?;
-        if self.freed[index as usize] {
+        if freed.load(Ordering::Acquire) {
             return Err(StoreError::FreedSlot(id));
         }
 
         write_at(&self.file, self.offset(index), buf).map_err(|error| io_error("write", error))
     }
 
-    fn sync(&mut self) -> Result<(), StoreError> {
+    fn sync(&self) -> Result<(), StoreError> {
         self.file
             .sync_data()
             .map_err(|error| io_error("sync", error))

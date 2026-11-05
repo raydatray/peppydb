@@ -28,7 +28,7 @@ impl Tree {
     /// value limits. The leaves must tile the key space, so a store with a
     /// missing, duplicated, or torn leaf is rejected rather than opened.
     /// Open is `O(leaves)` in I/O and memory; no leaf stays resident.
-    pub fn open(mut store: Box<dyn PageStore>) -> Result<Self, TreeError> {
+    pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         let config = TreeConfig::from(store.superblock());
         config.validate()?;
 
