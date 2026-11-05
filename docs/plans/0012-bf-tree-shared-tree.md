@@ -1,6 +1,6 @@
 # 0012: Shared tree foundation
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Tree structure](../design/bf-tree-structure.md),
 [leaf storage](../design/bf-tree-leaf-store.md),
@@ -759,10 +759,11 @@ behavioural diffs that follow are small and each is verified alone.
 
 ## Open questions
 
-1. **Interim crash window.** Confirm that a stop between the two page
-   writes of a split may make `open` refuse the store until 0018. The
-   alternative (keeping the store unchanged between flushes) needs resident
-   copies, which this stack removes.
+None.
+
+Resolved: the interim crash window is accepted. Until plan 0018, a stop
+between the two page writes of a split may make `open` refuse the store
+with `InconsistentLeaves`. This is revisited with shadow paging.
 
 ## Verification strategy
 
@@ -779,7 +780,7 @@ behavioural diffs that follow are small and each is verified alone.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: `bf-tree-sync` lock wrappers; circular-buffer mutex moved.
 - [ ] Diff 3: table.
 - [ ] Diff 4: shareable store.
