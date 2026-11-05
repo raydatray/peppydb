@@ -23,9 +23,10 @@ pub(super) const KIND_SHIFT: u32 = 14;
 const KEY_LEN_MASK: u16 = (1 << KIND_SHIFT) - 1;
 pub(super) const MAX_KEY_LEN: usize = KEY_LEN_MASK as usize;
 
-const REFERENCED_SHIFT: u32 = 15;
-const REFERENCED_BIT: u16 = 1 << REFERENCED_SHIFT;
-const VALUE_LEN_MASK: u16 = (1 << REFERENCED_SHIFT) - 1;
+/// Bit 15 of `ref_and_value_len` once held a reference bit. It is reserved and
+/// always zero; reference bits live beside mini-pages in `RefBits`.
+pub(super) const RESERVED_BIT: u16 = 1 << 15;
+const VALUE_LEN_MASK: u16 = RESERVED_BIT - 1;
 pub(super) const MAX_VALUE_LEN: usize = VALUE_LEN_MASK as usize;
 
 /// Page header at bytes `0..HEADER_BYTES`.
@@ -59,7 +60,7 @@ pub(super) struct Slot {
     pub(super) offset: U16,
     /// Record kind in the high 2 bits; logical key length in the low 14 bits.
     pub(super) kind_and_key_len: U16,
-    /// Reference bit in the high bit; value length in the low 15 bits.
+    /// Reserved high bit, always zero; value length in the low 15 bits.
     pub(super) ref_and_value_len: U16,
     /// First `PREVIEW_BYTES` stored key bytes, zero-padded for shorter stored keys.
     pub(super) preview: [u8; PREVIEW_BYTES],
@@ -68,7 +69,7 @@ pub(super) struct Slot {
 const _: () = assert!(size_of::<Slot>() == SLOT_BYTES);
 
 impl Slot {
-    /// Encode an unreferenced entry that omits the first `omitted` key bytes.
+    /// Encode an entry that omits the first `omitted` key bytes.
     /// Preflight must bound both lengths.
     pub(super) fn new(
         offset: u16,
@@ -117,24 +118,17 @@ impl Slot {
         }
     }
 
-    pub(super) fn referenced(&self) -> bool {
-        self.ref_and_value_len.get() & REFERENCED_BIT != 0
-    }
-
-    pub(super) fn set_referenced(&mut self, referenced: bool) {
-        let length = self.ref_and_value_len.get() & VALUE_LEN_MASK;
-
-        self.ref_and_value_len
-            .set(length | (u16::from(referenced) << REFERENCED_SHIFT));
-    }
-
     pub(super) fn set_kind(&mut self, kind: RecordKind) {
         self.kind_and_key_len
             .set(kind.key_word(self.kind_and_key_len.get() & KEY_LEN_MASK));
     }
 
     pub(super) fn set_value_len(&mut self, length: u16) {
-        self.ref_and_value_len
-            .set((self.ref_and_value_len.get() & REFERENCED_BIT) | length);
+        self.ref_and_value_len.set(length);
+    }
+
+    /// Whether the reserved bit is set, which no page operation does.
+    pub(super) fn reserved_bit(&self) -> bool {
+        self.ref_and_value_len.get() & RESERVED_BIT != 0
     }
 }

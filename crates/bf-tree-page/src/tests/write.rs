@@ -98,7 +98,7 @@ fn insertion_preserves_flags_and_inactive_metadata() {
 }
 
 #[test]
-fn typed_insertions_and_reference_updates_preserve_other_bytes() {
+fn typed_insertions_preserve_other_bytes() {
     let states = [
         RecordState::Insert(b""),
         RecordState::Delete,
@@ -132,17 +132,8 @@ fn typed_insertions_and_reference_updates_preserve_other_bytes() {
                 );
                 assert_eq!(page.as_bytes(), before);
             }
-            for referenced in [true, true, false] {
-                let mut expected = page.as_bytes().to_vec();
-                expected[slot + 5] = (expected[slot + 5] & 0x7f) | (u8::from(referenced) << 7);
-                assert_eq!(page.set_referenced(&key, referenced), Ok(true));
-                assert_eq!(page.as_bytes(), expected);
-                assert_eq!(page.get(&key).unwrap().unwrap().referenced, referenced);
-            }
         }
         let before = page.as_bytes().to_vec();
-        assert_eq!(page.set_referenced(b"missing", true), Ok(false));
-        assert_eq!(page.set_referenced(b"", true), Err(PageError::EmptyKey));
         assert_eq!(
             page.try_insert_record(b"", RecordState::Delete),
             Err(PageError::EmptyKey)
@@ -182,7 +173,7 @@ fn every_state_can_exactly_fill_a_page() {
 }
 
 #[test]
-fn upsert_all_state_transitions_and_sizes_preserve_references() {
+fn upsert_all_state_transitions_and_sizes() {
     for old in [
         RecordState::Insert(b"old"),
         RecordState::Delete,
@@ -196,47 +187,43 @@ fn upsert_all_state_transitions_and_sizes_preserve_references() {
                 RecordState::Cache(value),
                 RecordState::Phantom,
             ] {
-                for referenced in [false, true] {
-                    let mut storage = [0; 128];
-                    let page = Page::init(&mut storage).unwrap();
-                    page.try_insert(b"a", b"other").unwrap();
-                    assert_eq!(page.try_upsert(b"k", old), Ok(UpsertOutcome::Inserted));
-                    page.set_referenced(b"k", referenced).unwrap();
-                    let free = page.free_bytes();
-                    let old_len = old.value().map_or(0, <[u8]>::len);
-                    let new_len = if new == RecordState::Delete {
-                        old_len
+                let mut storage = [0; 128];
+                let page = Page::init(&mut storage).unwrap();
+                page.try_insert(b"a", b"other").unwrap();
+                assert_eq!(page.try_upsert(b"k", old), Ok(UpsertOutcome::Inserted));
+                let free = page.free_bytes();
+                let old_len = old.value().map_or(0, <[u8]>::len);
+                let new_len = if new == RecordState::Delete {
+                    old_len
+                } else {
+                    new.value().map_or(0, <[u8]>::len)
+                };
+                assert_eq!(page.try_upsert(b"k", new), Ok(UpsertOutcome::Replaced));
+                assert_eq!(page.len(), 2);
+                assert_eq!(
+                    page.get(b"k"),
+                    Ok(Some(RecordRef {
+                        key: KeyRef::from(b"k".as_slice()),
+                        state: new,
+                    }))
+                );
+                assert_eq!(page.get(b"a"), Ok(Some(live(b"a", b"other"))));
+                assert_eq!(usize::from(read_u16(page.as_bytes(), 44)), new_len);
+                assert_eq!(
+                    page.free_bytes(),
+                    free - if new_len > old_len { 1 + new_len } else { 0 }
+                );
+                assert_eq!(
+                    page.reclaimable_bytes(),
+                    if new_len > old_len {
+                        1 + old_len
                     } else {
-                        new.value().map_or(0, <[u8]>::len)
-                    };
-                    assert_eq!(page.try_upsert(b"k", new), Ok(UpsertOutcome::Replaced));
-                    assert_eq!(page.len(), 2);
-                    assert_eq!(
-                        page.get(b"k"),
-                        Ok(Some(RecordRef {
-                            key: KeyRef::from(b"k".as_slice()),
-                            state: new,
-                            referenced
-                        }))
-                    );
-                    assert_eq!(page.get(b"a"), Ok(Some(live(b"a", b"other"))));
-                    assert_eq!(usize::from(read_u16(page.as_bytes(), 44) & 0x7fff), new_len);
-                    assert_eq!(
-                        page.free_bytes(),
-                        free - if new_len > old_len { 1 + new_len } else { 0 }
-                    );
-                    assert_eq!(
-                        page.reclaimable_bytes(),
-                        if new_len > old_len {
-                            1 + old_len
-                        } else {
-                            old_len - new_len
-                        }
-                    );
-                    let holes = page.reclaimable_bytes();
-                    assert_eq!(page.compact(), holes);
-                    assert_eq!(page.get(b"k").unwrap().unwrap().state, new);
-                }
+                        old_len - new_len
+                    }
+                );
+                let holes = page.reclaimable_bytes();
+                assert_eq!(page.compact(), holes);
+                assert_eq!(page.get(b"k").unwrap().unwrap().state, new);
             }
         }
     }
@@ -247,7 +234,6 @@ fn deletion_on_full_page_is_metadata_only_and_resurrects_in_place() {
     let mut storage = [0; 64];
     let page = Page::init(&mut storage).unwrap();
     page.try_insert(b"k", &[7; 23]).unwrap();
-    page.set_referenced(b"k", true).unwrap();
     let mut expected = page.as_bytes().to_vec();
     expected[35] |= 0x40;
     assert_eq!(
@@ -258,15 +244,14 @@ fn deletion_on_full_page_is_metadata_only_and_resurrects_in_place() {
     assert_eq!(page.free_bytes(), 0);
     assert_eq!(page.reclaimable_bytes(), 0);
     assert_eq!(page.compact(), 0);
-    assert_eq!(read_u16(page.as_bytes(), 36), 0x8017);
+    assert_eq!(read_u16(page.as_bytes(), 36), 0x0017);
     page.try_upsert(b"k", RecordState::Cache(&[9; 23])).unwrap();
     assert_eq!(
         page.get(b"k").unwrap().unwrap().state,
         RecordState::Cache(&[9; 23])
     );
-    assert!(page.get(b"k").unwrap().unwrap().referenced);
     page.try_upsert(b"k", RecordState::Phantom).unwrap();
-    assert_eq!(read_u16(page.as_bytes(), 36), 0x8000);
+    assert_eq!(read_u16(page.as_bytes(), 36), 0);
     assert_eq!(page.reclaimable_bytes(), 23);
 }
 

@@ -154,7 +154,6 @@ fn deterministic_sequences_match_ordered_map() {
 struct ModelRecord {
     kind: u16,
     stored: Vec<u8>,
-    referenced: bool,
 }
 
 impl ModelRecord {
@@ -168,7 +167,6 @@ impl ModelRecord {
         Self {
             kind,
             stored: value.to_vec(),
-            referenced: false,
         }
     }
 
@@ -182,7 +180,6 @@ impl ModelRecord {
                 3 => RecordState::Phantom,
                 _ => unreachable!(),
             },
-            referenced: self.referenced,
         }
     }
 }
@@ -309,11 +306,10 @@ impl MutationModel {
             self.gap
         );
         if actual.is_ok() {
-            if let Some(old) = old {
-                incoming.referenced = old.referenced;
-                if incoming.kind == 1 {
-                    incoming.stored.clone_from(&old.stored);
-                }
+            if let Some(old) = old
+                && incoming.kind == 1
+            {
+                incoming.stored.clone_from(&old.stored);
             }
             self.records.insert(key.to_vec(), incoming);
             self.gap -= allocation;
@@ -322,23 +318,16 @@ impl MutationModel {
         }
     }
 
-    fn remove_or_reference(&mut self, page: &mut Page, key: &[u8], reference: Option<bool>) {
+    fn remove(&mut self, page: &mut Page, key: &[u8]) {
         let expected = self
             .key_error(key)
             .map_or_else(|| Ok(self.records.contains_key(key)), Err);
         let before = page.as_bytes().to_vec();
-        let actual = match reference {
-            Some(value) => page.set_referenced(key, value),
-            None => page.remove(key),
-        };
+        let actual = page.remove(key);
         assert_eq!(actual, expected);
         if actual == Ok(true) {
-            if let Some(value) = reference {
-                self.records.get_mut(key).unwrap().referenced = value;
-            } else {
-                self.records.remove(key);
-                self.gap += 8;
-            }
+            self.records.remove(key);
+            self.gap += 8;
         } else {
             assert_eq!(page.as_bytes(), before);
         }
@@ -443,7 +432,7 @@ impl MutationModel {
             let value_word = read_u16(&bytes, slot + 4);
             assert_eq!(key_word >> 14, record.kind);
             assert_eq!(usize::from(key_word & 0x3fff), key.len());
-            assert_eq!(value_word >> 15, u16::from(record.referenced));
+            assert_eq!(value_word >> 15, 0, "reserved slot bit");
             assert_eq!(usize::from(value_word & 0x7fff), record.stored.len());
             if record.kind == 3 {
                 assert!(record.stored.is_empty());
@@ -603,8 +592,7 @@ fn mixed_mutations_match_physical_and_logical_models() {
                     match next() % 10 {
                         0..=2 => model.write(page, key, state, true),
                         3..=5 => model.write(page, key, state, false),
-                        6 => model.remove_or_reference(page, key, Some(next().is_multiple_of(2))),
-                        7 => model.remove_or_reference(page, key, None),
+                        6..=7 => model.remove(page, key),
                         8 => model.compact(page),
                         _ => {} // check() includes point and bounded reads.
                     }
@@ -614,7 +602,7 @@ fn mixed_mutations_match_physical_and_logical_models() {
                 model.check(page);
                 let remaining: Vec<_> = model.records.keys().cloned().collect();
                 for key in remaining {
-                    model.remove_or_reference(page, &key, None);
+                    model.remove(page, &key);
                     model.check(page);
                 }
                 model.compact(page);
@@ -662,13 +650,12 @@ fn fenced_compaction_preserves_counts_above_255_and_mixed_states() {
                 RecordState::Phantom,
             ][usize::from(index) % 4];
             model.write(page, &key(index), state, true);
-            model.remove_or_reference(page, &key(index), Some(true));
             model.check(page);
         }
         assert_eq!(page.len(), 280);
         for index in 0_u16..280 {
             if index.is_multiple_of(20) {
-                model.remove_or_reference(page, &key(index), None);
+                model.remove(page, &key(index));
             } else if index.is_multiple_of(4) {
                 model.write(page, &key(index), RecordState::Delete, false);
             }

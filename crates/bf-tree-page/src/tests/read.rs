@@ -65,58 +65,55 @@ fn lookup_prefixes_preview_collisions_and_empty_values() {
 }
 
 #[test]
-fn slot_lengths_exclude_all_kind_and_reference_bits() {
+fn slot_lengths_exclude_all_kind_bits() {
     for kind in [
         RecordKind::Insert,
         RecordKind::Delete,
         RecordKind::Cache,
         RecordKind::Phantom,
     ] {
-        for referenced in [false, true] {
-            let mut storage = [0; 128];
-            let page = Page::init(&mut storage).unwrap();
-            page.as_mut_bytes()[0..2].copy_from_slice(&[1, 0]);
-            // Free space: 126 - 32 header bytes - 1 slot * 8 bytes.
-            page.as_mut_bytes()[4..6].copy_from_slice(&86u16.to_le_bytes());
-            let key_word = ((kind as u16) << 14) | 1;
-            let value_word = (u16::from(referenced) << 15) | 1;
-            page.as_mut_bytes()[32..40].copy_from_slice(&[
-                126,
-                0,
-                key_word as u8,
-                (key_word >> 8) as u8,
-                value_word as u8,
-                (value_word >> 8) as u8,
-                b'k',
-                0,
-            ]);
-            page.as_mut_bytes()[126..128].copy_from_slice(b"kV");
-            let before = page.as_bytes().to_vec();
-            // Check physical lengths independently of logical absence.
-            assert_eq!(page.slots()[0].key_len(), 1);
-            assert_eq!(page.slots()[0].stored_key_range(0), 126..127);
-            assert_eq!(page.slots()[0].value_len(), 1);
-            let state = match kind {
-                RecordKind::Insert => RecordState::Insert(b"V"),
-                RecordKind::Delete => RecordState::Delete,
-                RecordKind::Cache => RecordState::Cache(b"V"),
-                RecordKind::Phantom => RecordState::Phantom,
-            };
-            let expected = RecordRef {
-                key: KeyRef::from(b"k".as_slice()),
-                state,
-                referenced,
-            };
-            assert_eq!(state.kind(), kind);
-            assert_eq!(page.get(b"k"), Ok(Some(expected)));
-            let mut iter = page.iter();
-            assert_eq!(iter.len(), 1);
-            assert_eq!(iter.next(), Some(expected));
-            assert_eq!(iter.len(), 0);
-            assert_eq!(iter.next(), None);
-            assert_eq!(iter.next(), None);
-            assert_eq!(page.as_bytes(), before);
-        }
+        let mut storage = [0; 128];
+        let page = Page::init(&mut storage).unwrap();
+        page.as_mut_bytes()[0..2].copy_from_slice(&[1, 0]);
+        // Free space: 126 - 32 header bytes - 1 slot * 8 bytes.
+        page.as_mut_bytes()[4..6].copy_from_slice(&86u16.to_le_bytes());
+        let key_word = ((kind as u16) << 14) | 1;
+        let value_word: u16 = 1;
+        page.as_mut_bytes()[32..40].copy_from_slice(&[
+            126,
+            0,
+            key_word as u8,
+            (key_word >> 8) as u8,
+            value_word as u8,
+            (value_word >> 8) as u8,
+            b'k',
+            0,
+        ]);
+        page.as_mut_bytes()[126..128].copy_from_slice(b"kV");
+        let before = page.as_bytes().to_vec();
+        // Check physical lengths independently of logical absence.
+        assert_eq!(page.slots()[0].key_len(), 1);
+        assert_eq!(page.slots()[0].stored_key_range(0), 126..127);
+        assert_eq!(page.slots()[0].value_len(), 1);
+        let state = match kind {
+            RecordKind::Insert => RecordState::Insert(b"V"),
+            RecordKind::Delete => RecordState::Delete,
+            RecordKind::Cache => RecordState::Cache(b"V"),
+            RecordKind::Phantom => RecordState::Phantom,
+        };
+        let expected = RecordRef {
+            key: KeyRef::from(b"k".as_slice()),
+            state,
+        };
+        assert_eq!(state.kind(), kind);
+        assert_eq!(page.get(b"k"), Ok(Some(expected)));
+        let mut iter = page.iter();
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(expected));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert_eq!(page.as_bytes(), before);
     }
 }
 
@@ -245,13 +242,11 @@ fn bounded_iteration_matches_ordered_filtering_with_and_without_fences() {
                 RecordState::Phantom,
             ][index % 4];
             page.try_insert_record(key, state).unwrap();
-            page.set_referenced(key, index % 2 == 0).unwrap();
             model.insert(
                 key,
                 RecordRef {
                     key: KeyRef::from(key),
                     state,
-                    referenced: index % 2 == 0,
                 },
             );
         }

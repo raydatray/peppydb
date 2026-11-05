@@ -11,7 +11,7 @@ impl Page {
     /// Borrow a stored record for a nonempty key, or `None` on a page miss.
     ///
     /// Tombstones and phantoms return `Some` with their explicit absence state.
-    /// Reads leave all bytes, including reference bits, unchanged.
+    /// Reads leave all bytes unchanged.
     pub fn get(&self, key: &[u8]) -> Result<Option<RecordRef<'_>>, PageError> {
         self.check_key(key)?;
 
@@ -65,7 +65,6 @@ impl Page {
         RecordRef {
             key: KeyRef::new(self.prefix(), &bytes[suffix]),
             state,
-            referenced: slot.referenced(),
         }
     }
 

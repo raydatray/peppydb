@@ -16,6 +16,12 @@ pub enum RecordKind {
 }
 
 impl RecordKind {
+    /// Whether the record is newer than the base page: `Insert` or `Delete`.
+    /// Clean records (`Cache`, `Phantom`) only repeat what the base page holds.
+    pub fn is_dirty(self) -> bool {
+        matches!(self, Self::Insert | Self::Delete)
+    }
+
     pub(super) fn key_word(self, key_len: u16) -> u16 {
         ((self as u16) << KIND_SHIFT) | key_len
     }
@@ -56,12 +62,11 @@ impl<'a> RecordState<'a> {
     }
 }
 
-/// A record borrowed from a page, including its exact state and reference hint.
+/// A record borrowed from a page, with its exact state.
 ///
 /// The key is a logical view: it may borrow a page prefix and a stored suffix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordRef<'p> {
     pub key: KeyRef<'p>,
     pub state: RecordState<'p>,
-    pub referenced: bool,
 }

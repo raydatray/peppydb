@@ -26,7 +26,7 @@ impl Page {
     /// right output's first record, each output keeps at least one record, and
     /// the split point balances used bytes.
     ///
-    /// Record kinds and reference bits are preserved; tombstones lose their
+    /// Record kinds are preserved; tombstones lose their
     /// retained value bytes, as in any rebuild. Both outputs inherit this page's
     /// backing-leaf, LSN, and snapshot-version fields. Errors, including
     /// [`PageError::CannotSplit`], leave both buffers unchanged.
@@ -45,7 +45,6 @@ impl Page {
         let pending = [RecordRef {
             key: KeyRef::from(key),
             state,
-            referenced: false,
         }];
 
         self.split_with_batch(right_storage, &pending)
@@ -126,11 +125,6 @@ impl Page {
             key.extend(record.key.bytes());
             page.try_insert_record(&key, record.state)
                 .expect("selection budgeted every record");
-
-            if record.referenced {
-                page.set_referenced(&key, true)
-                    .expect("the record was just inserted");
-            }
         }
 
         page.header.backing_leaf.set(self.header.backing_leaf.get());

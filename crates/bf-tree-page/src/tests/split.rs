@@ -2,7 +2,7 @@ use super::prefix::compressed_fixture;
 use super::*;
 use crate::split::{Merge, choose_split};
 
-type Owned = (Vec<u8>, RecordKind, Option<Vec<u8>>, bool);
+type Owned = (Vec<u8>, RecordKind, Option<Vec<u8>>);
 
 fn owned(page: &Page) -> Vec<Owned> {
     page.iter()
@@ -11,7 +11,6 @@ fn owned(page: &Page) -> Vec<Owned> {
                 record.key.to_vec(),
                 record.state.kind(),
                 record.state.value().map(<[u8]>::to_vec),
-                record.referenced,
             )
         })
         .collect()
@@ -40,7 +39,7 @@ fn packed_size(lower: Option<&[u8]>, upper: Option<&[u8]>, records: &[Owned]) ->
     let fences = 16 + lower.map_or(0, <[u8]>::len) + upper.map_or(0, |upper| upper.len() - prefix);
     let records: usize = records
         .iter()
-        .map(|(key, _, value, _)| 8 + key.len() - prefix + value.as_ref().map_or(0, Vec::len))
+        .map(|(key, _, value)| 8 + key.len() - prefix + value.as_ref().map_or(0, Vec::len))
         .sum();
     32 + fences + records
 }
@@ -82,7 +81,6 @@ fn split_and_check(page: &mut Page, key: &[u8], state: RecordState<'_>) -> (Vec<
         key.to_vec(),
         state.kind(),
         state.value().map(<[u8]>::to_vec),
-        false,
     );
     expected.insert(position, pending);
     let (index, left_used, right_used) =
@@ -163,9 +161,9 @@ fn prefixes_are_recomputed_for_each_output() {
 
     // A source that under-uses its fence prefix still yields full output prefixes.
     let records = [
-        (&b"acct/120"[..], RecordState::Insert(b"x"), false),
-        (b"acct/130", RecordState::Insert(b"x"), false),
-        (b"acct/170", RecordState::Insert(b"x"), true),
+        (&b"acct/120"[..], RecordState::Insert(b"x")),
+        (b"acct/130", RecordState::Insert(b"x")),
+        (b"acct/170", RecordState::Insert(b"x")),
     ];
     for stored_prefix in [0, 3, 5] {
         let mut storage = [0; 128];
@@ -184,12 +182,11 @@ fn prefixes_are_recomputed_for_each_output() {
         // `[acct/100, acct/170)` shares `acct/1`; `[acct/170, acct/200)` shares `acct/`.
         assert_eq!(read_u16(page.as_bytes(), 6), 6);
         assert_eq!(read_u16(split.right.as_bytes(), 6), 5);
-        assert!(split.right.iter().next().unwrap().referenced);
     }
 }
 
 #[test]
-fn record_kinds_reference_bits_and_header_metadata_are_preserved() {
+fn record_kinds_and_header_metadata_are_preserved() {
     let mut storage = [0; 256];
     let page = Page::init_with_fences(&mut storage, fences(Some(b"a"), None)).unwrap();
     let states = [
@@ -202,9 +199,6 @@ fn record_kinds_reference_bits_and_header_metadata_are_preserved() {
     for (key, state) in states {
         page.try_insert_record(key, state).unwrap();
     }
-    for key in [b"c", b"d"] {
-        page.set_referenced(key, true).unwrap();
-    }
     // A retained tombstone value is dropped by the rebuild.
     page.try_upsert(b"f", RecordState::Insert(b"retained"))
         .unwrap();
@@ -214,11 +208,6 @@ fn record_kinds_reference_bits_and_header_metadata_are_preserved() {
     let (_, right) = split_and_check(page, b"g", RecordState::Phantom);
     assert_eq!(&page.as_bytes()[8..32], [0x5a; 24]);
     assert_eq!(&right[8..32], [0x5a; 24]);
-    let right = Page::ref_from_bytes(&right).unwrap();
-    assert!(right.iter().chain(page.iter()).all(|record| {
-        record.referenced
-            == (record.key.cmp_bytes(b"c").is_eq() || record.key.cmp_bytes(b"d").is_eq())
-    }));
 }
 
 #[test]
@@ -345,12 +334,7 @@ fn random_pages_split_exactly_as_the_calculator_predicts() {
                     let key = [start, suffix.as_slice()].concat();
                     let value = vec![next(256) as u8; next(max_value)];
                     match page.try_insert(&key, &value) {
-                        Ok(()) => {
-                            if next(4) == 0 {
-                                page.set_referenced(&key, true).unwrap();
-                            }
-                        }
-                        Err(PageError::DuplicateKey) => {}
+                        Ok(()) | Err(PageError::DuplicateKey) => {}
                         Err(PageError::PageFull) => break (key, value),
                         Err(error) => panic!("{error}"),
                     }
