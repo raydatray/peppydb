@@ -34,7 +34,7 @@ use std::sync::atomic::AtomicU64;
 
 use bf_tree_circular_buffer::CircularBuffer;
 use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
-use bf_tree_mini_page::{BufferError, SizeClasses};
+use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
 use bf_tree_sync::RwLock;
@@ -46,6 +46,7 @@ pub use bf_tree_node_id::LeafId;
 pub use bf_tree_page::PageError;
 pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
 
+mod evict;
 #[cfg(test)]
 mod invariants;
 mod leaf_map;
@@ -227,19 +228,6 @@ pub enum TreeError {
     /// An inner-node operation failed unexpectedly. This indicates a tree bug.
     #[error("internal inner-node error: {0}")]
     Inner(#[from] InnerError),
-    /// The circular buffer has no room for the mini-page this write needs.
-    /// Nothing changed. Interim: plan 0014 evicts instead.
-    #[error("circular buffer is full")]
-    CircularBufferFull,
-}
-
-impl From<BufferError> for TreeError {
-    fn from(error: BufferError) -> Self {
-        match error {
-            BufferError::Full(_) => TreeError::CircularBufferFull,
-            BufferError::Page(error) => TreeError::Page(error),
-        }
-    }
 }
 
 /// An ordered map from nonempty byte keys to byte values, shared between

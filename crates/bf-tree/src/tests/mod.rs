@@ -6,6 +6,7 @@ mod buffered;
 mod concurrent;
 mod config;
 mod disk;
+mod evict;
 mod model;
 mod open;
 mod overlay;

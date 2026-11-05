@@ -1,77 +1,9 @@
-//! Blind writes against the circular buffer: a full buffer, and a concurrent
-//! flush.
+//! Blind writes against the circular buffer: a concurrent flush, and the
+//! blocks a dropped tree returns.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
-
-/// A circular buffer of 1 KiB holds only a few 64-byte mini-pages.
-fn tight() -> TreeConfig {
-    TreeConfig {
-        circular_buffer_bytes: 1024,
-        ..config(256, 128, 8, 16)
-    }
-}
-
-/// Keys spread far apart, so each lands in its own leaf after splits.
-fn wide_key(i: u16) -> [u8; 2] {
-    i.to_be_bytes()
-}
-
-#[test]
-fn a_full_circular_buffer_changes_nothing_and_a_write_succeeds_after_flush() {
-    let tree = Tree::in_memory(tight()).unwrap();
-    // Build several leaves, then flush so none holds a mini-page.
-    for i in 0..400u16 {
-        tree.put(&wide_key(i * 97), &[1; 8]).unwrap();
-        if i % 20 == 19 {
-            tree.flush().unwrap();
-        }
-    }
-    tree.flush().unwrap();
-    assert!(tree.leaf_count() > 8);
-    assert_eq!(tree.circular_buffer_used(), 0);
-
-    // Buffer one record in leaf after leaf until the buffer is full.
-    let leaves: Vec<_> = (0..tree.leaf_count())
-        .filter_map(|index| {
-            let id = LeafId::from_index(index);
-            let page = tree.leaves.page_copy(id).ok()?;
-            let page = bf_tree_page::Page::validate(&page).unwrap();
-            match page.fences()?.lower {
-                bf_tree_page::Fence::Key(lower) => Some(lower.to_vec()),
-                bf_tree_page::Fence::Unbounded => Some(vec![0x00]),
-            }
-        })
-        .collect();
-    let mut full = None;
-    for lower in &leaves {
-        let mut key = lower.clone();
-        key.push(0xaa);
-        match tree.put(&key, b"buffered") {
-            Ok(()) => {}
-            Err(TreeError::CircularBufferFull) => {
-                full = Some(key);
-                break;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    let key = full.expect("the buffer filled up");
-
-    // Nothing changed: the key is absent, usage is the same.
-    let used = tree.circular_buffer_used();
-    assert_eq!(tree.get(&key), Ok(None));
-    assert_eq!(tree.put(&key, b"again"), Err(TreeError::CircularBufferFull));
-    assert_eq!(tree.circular_buffer_used(), used);
-    assert_eq!(tree.check_invariants(), Ok(()));
-
-    // Flushing frees every block; the write then succeeds.
-    tree.flush().unwrap();
-    assert_eq!(tree.circular_buffer_used(), 0);
-    tree.put(&key, b"after flush").unwrap();
-    assert_eq!(tree.get(&key), Ok(Some(b"after flush".to_vec())));
-}
 
 #[test]
 fn writes_and_a_concurrent_flush_keep_every_pre_flush_write() {
