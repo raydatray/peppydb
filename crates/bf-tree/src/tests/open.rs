@@ -260,7 +260,11 @@ fn reopened_memory_trees_match_the_oracle_at_every_height() {
         let leaves = tree.leaf_count();
 
         let reopened = Tree::open(tree.into_store()).unwrap();
-        assert_eq!(reopened.config(), &config);
+        // The layout comes from the superblock; runtime settings default.
+        assert_eq!(
+            Superblock::from(reopened.config()),
+            Superblock::from(&config)
+        );
         // Bulk-built levels are packed, so the rebuilt tree is never taller.
         assert!(reopened.height() <= height, "{count} records");
         assert!(reopened.height() >= height.min(3), "{count} records");

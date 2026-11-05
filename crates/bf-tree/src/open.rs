@@ -15,7 +15,7 @@ use super::{Tree, TreeConfig, TreeError};
 use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, LeafId};
 use bf_tree_page::{Fence, KeyRef, Page, PageError};
-use bf_tree_store::{PageStore, StoreError};
+use bf_tree_store::{PageStore, StoreError, Superblock};
 
 impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and
@@ -30,6 +30,18 @@ impl Tree {
     /// Open is `O(leaves)` in I/O and memory.
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         let config = TreeConfig::from(store.superblock());
+        Self::open_with(config, store)
+    }
+
+    /// [`Tree::open`] with chosen runtime settings, such as the
+    /// circular-buffer budget. The layout settings in `config` must match the
+    /// store's superblock.
+    pub fn open_with(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
+        if Superblock::from(&config) != *store.superblock() {
+            return Err(TreeError::InvalidStore(
+                "store superblock differs from the configuration",
+            ));
+        }
         config.validate()?;
 
         let mut freed = Vec::new();

@@ -5,7 +5,9 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "bf-tree",
     deps = [
+        "//crates/bf-tree-circular-buffer:bf-tree-circular-buffer",
         "//crates/bf-tree-inner:bf-tree-inner",
+        "//crates/bf-tree-mini-page:bf-tree-mini-page",
         "//crates/bf-tree-node-id:bf-tree-node-id",
         "//crates/bf-tree-page:bf-tree-page",
         "//crates/bf-tree-store:bf-tree-store",
