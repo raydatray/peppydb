@@ -28,6 +28,21 @@ mod table;
 
 pub use table::Table;
 
+/// The atomics that the tree's synchronization uses, re-exported so that a
+/// later model-checking switch changes one crate.
+pub use std::sync::atomic;
+
+/// Back off once in a retry or spin loop. `attempt` counts calls by one
+/// caller: the first ones spin on the CPU, later ones yield the thread.
+pub fn spin(attempt: &mut u32) {
+    if *attempt < 64 {
+        std::hint::spin_loop();
+    } else {
+        std::thread::yield_now();
+    }
+    *attempt = attempt.saturating_add(1);
+}
+
 /// A mutex whose `lock` never fails.
 #[derive(Debug, Default)]
 pub struct Mutex<T>(std::sync::Mutex<T>);

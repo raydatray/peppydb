@@ -665,7 +665,7 @@ Single-thread component numbers may come from either platform, labelled.
 - [x] Diff 2: interim baselines.
 - [ ] Diff 3: Linux container recipe (committed; container run pending a working Docker engine).
 - [x] Diff 4: `arc-swap`.
-- [ ] Diff 5: frame primitive.
+- [x] Diff 5: frame primitive.
 - [ ] Diff 6: lock-free descent.
 - [ ] Diff 7: concurrent propagation and root growth.
 - [ ] Diff 8: concurrent model extensions and soak.

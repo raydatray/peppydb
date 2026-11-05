@@ -47,6 +47,7 @@ pub use bf_tree_page::PageError;
 pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
 
 mod evict;
+mod frames;
 #[cfg(test)]
 mod invariants;
 mod leaf_map;

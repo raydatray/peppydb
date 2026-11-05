@@ -8,6 +8,7 @@ mod concurrent;
 mod config;
 mod disk;
 mod evict;
+mod frames;
 mod full;
 mod model;
 mod open;

@@ -61,7 +61,10 @@ fn well_formed(key: &[u8], value: &[u8]) -> bool {
 
 /// Run `f` on a thread with a deadline; panic if it does not finish, which
 /// surfaces a deadlock as a failure instead of a hang.
-fn with_watchdog<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(super) fn with_watchdog<T: Send + 'static>(
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
     let (done, finished) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         let result = f();
