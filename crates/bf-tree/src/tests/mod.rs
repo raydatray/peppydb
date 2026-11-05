@@ -6,6 +6,7 @@ mod bench;
 mod buffered;
 mod concurrent;
 mod config;
+mod contention;
 mod disk;
 mod evict;
 mod frames;

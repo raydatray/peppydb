@@ -187,7 +187,7 @@ fn check_quiescent(tree: &Tree, oracle: BTreeMap<Vec<u8>, Vec<u8>>) {
 /// Sets the flag when dropped, so a background loop stops even when the
 /// test panics; otherwise its scope would never join and the test would
 /// hang until the watchdog fires.
-struct StopOnDrop<'a>(&'a AtomicBool);
+pub(super) struct StopOnDrop<'a>(pub(super) &'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {
     fn drop(&mut self) {

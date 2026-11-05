@@ -668,7 +668,7 @@ Single-thread component numbers may come from either platform, labelled.
 - [x] Diff 5: frame primitive.
 - [x] Diff 6: lock-free descent.
 - [x] Diff 7: concurrent propagation and root growth.
-- [ ] Diff 8: concurrent model extensions and soak.
+- [x] Diff 8: concurrent model extensions and soak.
 - [ ] Diff 9: design documents, measurements, roadmap.
 - [ ] Stack-wide verification.
 
