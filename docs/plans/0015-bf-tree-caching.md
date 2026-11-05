@@ -170,8 +170,8 @@ flowchart TD
     G[get key under S] --> R{residency}
     R -->|Full| F[answer from the page]
     R -->|Mini| M{lookup_marking}
-    M -->|Found / Absent| H[answer; reference bit marked]
-    M -->|Miss| B[load base into scratch; answer]
+    M -->|Found / Absent| H[answer, reference bit marked]
+    M -->|Miss| B[load base into scratch, answer]
     R -->|Base| B
     B --> P{roll read_promotion_percent}
     P -->|no| A[hint: Relocate if aging, else none]
@@ -182,11 +182,11 @@ flowchart TD
     A --> U[release S]
     C --> U
     X --> U
-    U --> T{try X once; version unchanged?}
+    U --> T{try X once, version unchanged?}
     T -->|no| D[done]
-    T -->|yes| Y[relocate if aging; apply hint]
+    T -->|yes| Y[relocate if aging, apply hint]
     Y --> Z{promotion lacked room?}
-    Z -->|yes| Q[release X; finish deferred promotion]
+    Z -->|yes| Q[release X, finish deferred promotion]
     Z -->|no| D
     Q --> D
 ```

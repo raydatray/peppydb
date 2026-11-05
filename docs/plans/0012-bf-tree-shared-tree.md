@@ -390,11 +390,11 @@ sequenceDiagram
     R->>L: S lock (waits for W)
     Note over W: load base, merge one record: does not fit
     W->>N: store.alloc, grow table, X lock (unreachable)
-    Note over W: merge_batch_split into N; write_through [L, N]
+    Note over W: merge_batch_split into N, write_through [L, N]
     W->>I: write lock, descend by separator, insert, v+1, unlock
     W->>N: unlock
     W->>L: unlock
-    Note over R: S granted; version v+1 differs from v
+    Note over R: S granted, version v+1 differs from v
     R->>R: drop S, route again (k may be in N)
 ```
 

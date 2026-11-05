@@ -198,10 +198,10 @@ flowchart TD
     A["route, X-lock leaf, validate (0012)"] --> B["buffer(record) into the circular buffer"]
     B -->|Buffered| Z[done]
     B -->|"Full"| P["TreeError::CircularBufferFull, nothing changed"]
-    B -->|NeedsMerge| C["load base into scratch; LeafMut over base + mini"]
+    B -->|NeedsMerge| C["load base into scratch, LeafMut over base + mini"]
     C --> D{merge_fits?}
-    D -->|yes| E["merge_in_place; write_through [leaf]"]
-    D -->|no| F["split_leaf: fresh X-locked right leaf; merge_split; write_through [leaf, right]; install"]
+    D -->|yes| E["merge_in_place, write_through [leaf]"]
+    D -->|no| F["split_leaf: fresh X-locked right leaf, merge_split, write_through [leaf, right], install"]
     E --> G[free the block]
     F --> G
     G --> H["buffer(record) into the half that owns the key"]
