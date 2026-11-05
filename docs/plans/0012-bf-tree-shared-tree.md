@@ -1,6 +1,6 @@
 # 0012: Shared tree foundation
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Tree structure](../design/bf-tree-structure.md),
 [leaf storage](../design/bf-tree-leaf-store.md),
@@ -781,16 +781,53 @@ with `InconsistentLeaves`. This is revisited with shadow paging.
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: `bf-tree-sync` lock wrappers; circular-buffer mutex moved.
-- [ ] Diff 3: table.
-- [ ] Diff 4: shareable store.
-- [ ] Diff 5: owned read and scan API.
-- [ ] Diff 6: one-record merge writes.
-- [ ] Diff 7: page changes.
-- [ ] Diff 8: locked leaf entries and scratch.
-- [ ] Diff 9: shared routing layer and `&self`.
-- [ ] Diff 10: concurrent model and baselines.
-- [ ] Diff 11: design documents and roadmap.
+- [x] Diff 2: `bf-tree-sync` lock wrappers; circular-buffer mutex moved.
+- [x] Diff 3: table.
+- [x] Diff 4: shareable store.
+- [x] Diff 5: owned read and scan API.
+- [x] Diff 6: one-record merge writes.
+- [x] Diff 7: page changes.
+- [x] Diff 8: locked leaf entries and scratch.
+- [x] Diff 9: shared routing layer and `&self`.
+- [x] Diff 10: concurrent model and baselines.
+- [x] Diff 11: design documents and roadmap.
+
+### Verification outcomes (2026-11-05)
+
+| Check | Outcome |
+| --- | --- |
+| Workspace checks | All pass: `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 Buck2 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (261 tests), and the Go checks. |
+| Concurrent model (`tests/concurrent.rs`) | 2, 4, and 8 writers, each with as many other threads (half readers, half scanners), on tiny nodes; 4 writers on a `FileStore` with flush and reopen; 8 threads on one leaf's keys. Each run equals the union of the per-thread oracles, counters never decrease, scans are ordered, and `check_invariants` passes at quiescence, under a watchdog. 20 of 20 repeated runs pass in debug builds and 20 of 20 in release builds. |
+| Version-bump mutation | With the `inner_version` bump removed from `install`, the concurrent model fails in 10 of 10 runs with the `KeyOutOfRange` guard (`TreeError::Page`). The route validation is therefore necessary, and the guard catches its absence. |
+| Stale routes (`tests/route.rs`) | A route taken before a split reports `route_changed`; writes without a split do not change it; a write through a stale route retries and lands in the right half, and the stale leaf does not hold the key. |
+| Store threaded cases | `concurrent_allocs_return_distinct_ids` and `threads_write_distinct_slots_and_read_them_back` pass on both backends, with the rest of the contract suite. |
+| Entry size | `entry_lock_is_at_most_64_bytes` passes: `size_of::<RwLock<LeafEntry>>() <= 64`. |
+| Write-through | `puts_write_through_and_flush_only_syncs` and `a_dropped_tree_loses_no_write` pass. |
+
+**Baselines.** Single-threaded release builds on an Apple M4 Pro, one
+million random 8-byte keys with 16-byte values, default configuration.
+"Before" is the resident `OnceCell` design immediately before this stack;
+"after" is the stack's final state.
+
+| Benchmark | Step | Before | After |
+| --- | --- | --- | --- |
+| `baseline_throughput` (`MemStore`) | put | 1.92 M ops/s | 0.11 M ops/s |
+| | get | 1.73 M ops/s | 1.96 M ops/s |
+| | scan | 140 M records/s | 27 M records/s |
+| `baseline_file_store` | put | 1.63 M ops/s | 0.07 M ops/s |
+| | flush | 47 ms | 859 ms |
+| | get, warm | 1.92 M ops/s | 1.04 M ops/s |
+| | scan, warm | 138 M records/s | 22 M records/s |
+
+The regression is the one this plan predicted. Nothing stays resident:
+every `put` loads, rebuilds, and writes a full 4 KiB page, and every read
+loads a page. The flush rows measure different work. Before, `flush` wrote
+every dirty leaf and then synced. After, the page writes happen during the
+put phase and `flush` only calls `sync_data`, so the `FileStore` put rate
+includes all page writes. In-memory `get` did not regress; this stack did
+not investigate the small gain. Plan 0013 recovers writes (blind buffering
+in mini-pages), and plan 0015 recovers reads (caching). Contended numbers
+are deferred to plan 0016 on Linux.
 
 ## Discoveries and plan changes
 
@@ -798,6 +835,39 @@ with `InconsistentLeaves`. This is revisited with shadow paging.
   create the crate for the circular buffer's one mutex. The crate now
   starts here, where `Table<T>`, the leaf locks, and several crates first
   need shared lock types. Diff 2 is new; later diffs moved up by one.
+- **2026-11-05: `load_base` validates fully only in debug builds.** It
+  always runs the O(1) `Page::check_header`. Debug builds also run the
+  full `Page::validate` on every load, so that tests exercise it. Release
+  builds rely on the full validation at `open`.
+- **2026-11-05: the version bump is load-bearing.** Removing it from
+  `install` makes the concurrent model fail in 10 of 10 runs with the
+  `KeyOutOfRange` guard. The guard turns a protocol bug into an error, not
+  wrong data.
+- **2026-11-05: large single-threaded regression, as predicted.** See the
+  baselines above. Put throughput fell by more than an order of magnitude
+  and scans by about five times. Plans 0013 and 0015 recover it.
+- **2026-11-05: two error-path defects found in review and fixed.**
+  `split_leaf` freed the fresh slot only if the merge or a page write
+  failed; a failed `install` leaked it, leaving a written right page that
+  routing never names. It now frees the slot on any error after the
+  allocation. `LeafMap::discard` marked the entry freed before
+  `store.free`; it now frees the slot first, so a failed free leaves the
+  entry live. A failed `install` still leaves the left page rewritten;
+  the admission rule makes that unreachable, and shadow paging (plan 0018)
+  removes the window.
+- **2026-11-05: the innermost locks have an internal order.** The plan said
+  that holders of store, slot, and table locks call nothing that locks. In
+  the code, both backends' `alloc` hold the free-list mutex while they grow
+  their `Table` (and `FileStore` extends the file), and `MemStore::alloc`
+  and `MemStore::free` lock a slot mutex under it. The order is acyclic
+  (free list, then table growth or slot mutex), and no holder takes a leaf
+  or inner lock. The concurrency design records it as two ranks.
+- **2026-11-05: minor interface differences.** `PageStore` also requires
+  `Debug`. `Split` holds only the right leaf's guard, not the separator.
+  The thread-local holds `Option<Scratch>` (the two buffers are already
+  boxed) instead of `Option<Box<Scratch>>`. `RwLock::new` is `const`.
+  `Table` also has `is_empty`, `iter`, and `Default`. `Tree::create` and
+  `Tree::in_memory` write the first leaf through at once.
 
 ## Agent notes
 

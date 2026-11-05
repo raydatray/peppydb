@@ -73,9 +73,11 @@ impl Tree {
     /// write both pages through in one call, and install the separator.
     /// Returns the right leaf still locked.
     ///
-    /// On an error after the allocation, the fresh slot is freed: a written
-    /// but unreachable right page would overlap its neighbour at the next
-    /// open.
+    /// On any error after the allocation, including a failed install, the
+    /// fresh slot is freed: a written but unreachable right page would
+    /// overlap its neighbour at the next open. (A failed install also leaves
+    /// the left page already rewritten; the admission rule makes that
+    /// unreachable, and shadow paging in plan 0018 removes the window.)
     pub(super) fn split_leaf(
         &self,
         left: LeafId,
@@ -93,18 +95,15 @@ impl Tree {
                 (right.id(), &mut scratch.right[..n]),
             ];
             self.leaves.write_through(&mut pages)?;
-            Ok(separator)
+            self.install(left, separator, right.id())
         })();
-        let separator = match result {
-            Ok(separator) => separator,
+        match result {
+            Ok(()) => Ok(Split { _right: right }),
             Err(error) => {
                 self.leaves.discard(right)?;
-                return Err(error);
+                Err(error)
             }
-        };
-
-        self.install(left, separator, right.id())?;
-        Ok(Split { _right: right })
+        }
     }
 
     /// Insert `separator -> right` above `left`. The caller holds the
