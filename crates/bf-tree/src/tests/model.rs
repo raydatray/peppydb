@@ -105,10 +105,11 @@ fn run_on(
             tree.flush().unwrap();
             tree = match backend {
                 Backend::Memory => tree,
-                Backend::MemoryReopen => Tree::open(tree.into_store()).unwrap(),
+                // Reopen with the same runtime settings, such as the budget.
+                Backend::MemoryReopen => Tree::open_with(config, tree.into_store()).unwrap(),
                 Backend::FileReopen => {
                     drop(tree);
-                    Tree::open(Box::new(FileStore::open(&path).unwrap())).unwrap()
+                    Tree::open_with(config, Box::new(FileStore::open(&path).unwrap())).unwrap()
                 }
             };
             assert_eq!(tree.check_invariants(), Ok(()), "{context}");
@@ -229,6 +230,25 @@ fn flush_and_reopen_on_file_matches_the_oracle() {
         1200,
         2,
     );
+}
+
+/// Circular buffers of about four and eight leaf pages force constant
+/// eviction; second-chance shares of 0, 10, and 100 percent cover no
+/// relocation, the default, and relocation on every access.
+#[test]
+fn tiny_circular_buffers_match_the_oracle_through_eviction() {
+    for bytes in [1024, 2048] {
+        for percent in [0, 10, 100] {
+            let config = TreeConfig {
+                circular_buffer_bytes: bytes,
+                second_chance_percent: percent,
+                ..config(256, 128, 8, 16)
+            };
+            run(config, Keys::Uniform, 0xe71c + u64::from(percent), 900, 3);
+            run_on(Backend::MemoryReopen, config, Keys::Narrow, 0x5eed, 600, 2);
+            run_on(Backend::FileReopen, config, Keys::Maximum, 0xf11e, 400, 2);
+        }
+    }
 }
 
 #[test]
