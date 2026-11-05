@@ -57,7 +57,7 @@ mod write;
 
 #[cfg(test)]
 pub use invariants::InvariantError;
-use leaf_map::{LeafMap, Locked};
+use leaf_map::{LeafMap, Locked, Residency, with_scratch};
 pub use scan::Scan;
 use store::InnerStore;
 
@@ -289,15 +289,38 @@ impl Tree {
         Self::with_store(config, store)
     }
 
-    /// Make every completed write durable.
+    /// Merge every buffered mini-page into its base page and make every
+    /// completed write durable.
     ///
-    /// Every write goes to the store as it happens, so dropping the tree
-    /// loses nothing that the store kept; `flush` syncs it. A process stop
-    /// between the two page writes of a split can leave overlapping fences,
-    /// which [`Tree::open`] rejects as an inconsistent leaf set (until shadow
-    /// paging, plan 0018).
+    /// Every write that returned before `flush` began is in the store when
+    /// it returns. `flush` locks one leaf at a time, so writers may run
+    /// meanwhile; a record buffered into a leaf that `flush` already visited
+    /// may stay buffered. Dropping a tree, or [`Tree::into_store`], loses
+    /// buffered records, so call `flush` first. A process stop between the
+    /// two page writes of a split can leave overlapping fences, which
+    /// [`Tree::open`] rejects (until shadow paging, plan 0018).
     pub fn flush(&self) -> Result<(), TreeError> {
+        for id in self.leaves.ids() {
+            let Some(mut leaf) = self.leaves.write_if_live(id) else {
+                continue;
+            };
+            if let Residency::Mini { .. } = leaf.residency() {
+                // A split's right guard drops before the left guard.
+                with_scratch(|scratch| self.merge_leaf(&mut leaf, scratch).map(drop))?;
+            }
+        }
         self.leaves.sync()
+    }
+
+    /// Number of leaves holding a mini-page: an O(leaves) diagnostic.
+    pub fn buffered_leaves(&self) -> usize {
+        self.leaves.buffered()
+    }
+
+    /// Bytes in use in the circular buffer, dead blocks the head has not
+    /// passed included.
+    pub fn circular_buffer_used(&self) -> usize {
+        self.leaves.circular_buffer.used()
     }
 
     /// Number of inner nodes.
@@ -316,15 +339,15 @@ impl Tree {
     }
 
     /// Close the tree and return its store, for example to reopen it with
-    /// [`Tree::open`]. Call [`Tree::flush`] first to make the writes
-    /// durable.
+    /// [`Tree::open`]. Buffered records are lost; call [`Tree::flush`] first
+    /// to keep them and make them durable.
     pub fn into_store(self) -> Box<dyn PageStore> {
         self.leaves.into_store()
     }
 
     /// Build an empty tree on an empty store that already describes `config`.
     fn with_store(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
-        let leaves = LeafMap::new(store, []);
+        let leaves = LeafMap::for_config(store, [], &config)?;
         let unbounded = Fences {
             lower: Fence::Unbounded,
             upper: Fence::Unbounded,

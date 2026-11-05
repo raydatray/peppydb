@@ -103,7 +103,11 @@ impl Tree {
         let mut inner = InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaves[0].id));
         inner.root = build_inner(&mut inner, &leaves)?;
 
-        Ok(Self::assemble(config, inner, LeafMap::new(store, freed)))
+        Ok(Self::assemble(
+            config,
+            inner,
+            LeafMap::for_config(store, freed, &config)?,
+        ))
     }
 }
 

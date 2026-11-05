@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 
 use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
 use super::{Tree, TreeError};
+use bf_tree_mini_page::LeafMut;
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{KeyRef, Page, RecordRef, RecordState};
 
@@ -65,6 +66,59 @@ impl Tree {
                 Ok(())
             })
         })
+    }
+
+    /// Under the exclusive lock of the reachable leaf `leaf`: fold its
+    /// mini-page into the base page, in place or by a split, write the
+    /// result through, and free the block. Returns the right half of a
+    /// split, still locked, and its separator. Callers: writes, `flush`, and
+    /// eviction (plan 0014).
+    ///
+    /// The block is freed only after the pages are written and the separator
+    /// installed, so an error leaves every buffered record in place.
+    pub(super) fn merge_leaf<'t>(
+        &'t self,
+        leaf: &mut LeafWrite<'t>,
+        scratch: &mut Scratch,
+    ) -> Result<Option<(Vec<u8>, Split<'t>)>, TreeError> {
+        let n = self.config.leaf_capacity;
+        let Some(mini) = leaf.take_mini() else {
+            return Ok(None);
+        };
+        let result = (|| {
+            let base = self.leaves.load_base(leaf, &mut scratch.page[..n])?;
+            let mut merge = LeafMut {
+                base,
+                mini: Some(&mini),
+            };
+            if merge.merge_fits()? {
+                merge.merge_in_place()?;
+                self.leaves
+                    .write_through(&mut [(leaf.id(), &mut scratch.page[..n])])?;
+                return Ok(None);
+            }
+            let mut separator = Vec::new();
+            let split = self.split_leaf(leaf.id(), scratch, |base, right| {
+                separator = LeafMut {
+                    base,
+                    mini: Some(&mini),
+                }
+                .merge_split(right)?
+                .separator;
+                Ok(separator.clone())
+            })?;
+            Ok(Some((separator, split)))
+        })();
+        match result {
+            Ok(split) => {
+                self.leaves.circular_buffer.free(mini.block);
+                Ok(split)
+            }
+            Err(error) => {
+                leaf.put_mini(Some(mini));
+                Err(error)
+            }
+        }
     }
 
     /// Split the reachable leaf `left`, whose caller holds its exclusive

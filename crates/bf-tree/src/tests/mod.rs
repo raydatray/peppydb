@@ -7,6 +7,7 @@ mod config;
 mod disk;
 mod model;
 mod open;
+mod overlay;
 mod read;
 mod route;
 mod scan;
@@ -46,7 +47,7 @@ fn empty_tree() -> Tree {
             config.inner_capacity,
             ChildRef::Leaf(LeafId::new(0).unwrap()),
         ),
-        LeafMap::new(Box::new(store), []),
+        LeafMap::for_config(Box::new(store), [], &config).unwrap(),
     )
 }
 

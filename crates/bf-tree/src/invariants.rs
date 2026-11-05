@@ -24,6 +24,10 @@ pub enum InvariantError {
     Duplicate(ChildRef),
     #[error("{0:?} is allocated but unreachable")]
     Unreachable(ChildRef),
+    #[error(
+        "mini-page of leaf {0:?} is invalid, names another leaf, or holds a key outside the leaf"
+    )]
+    BadMiniPage(LeafId),
 }
 
 impl Tree {
@@ -152,6 +156,21 @@ impl<'t> Checker<'t> {
         });
         if !consistent {
             return Err(InvariantError::RecordOutOfRange(id));
+        }
+
+        // A mini-page must be a valid unfenced page that names this leaf,
+        // with a class capacity and every key inside the leaf's fences.
+        if let Some(mini) = self.tree.leaves.mini_copy(id) {
+            let classes = &self.tree.leaves.classes;
+            let valid = Page::validate(&mini).is_ok_and(|mini| {
+                mini.fences().is_none()
+                    && mini.backing_leaf() == Some(id)
+                    && classes.as_slice().contains(&mini.capacity())
+                    && mini.iter().all(|record| in_range(record.key))
+            });
+            if !valid {
+                return Err(InvariantError::BadMiniPage(id));
+            }
         }
 
         Ok(())

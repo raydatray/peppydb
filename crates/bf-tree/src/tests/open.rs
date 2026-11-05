@@ -112,10 +112,12 @@ fn built(n: u32, inner_capacity: usize) -> Tree {
     let mut tree = Tree::assemble(
         config,
         InnerStore::new(config.inner_capacity, ChildRef::Leaf(leaf(0))),
-        LeafMap::new(
+        LeafMap::for_config(
             Box::new(MemStore::new(Superblock::from(&config)).unwrap()),
             [],
-        ),
+            &config,
+        )
+        .unwrap(),
     );
     let leaves = tile(tiling(n)).unwrap();
     for _ in 0..n {

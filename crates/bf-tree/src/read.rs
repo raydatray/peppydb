@@ -1,7 +1,8 @@
 use std::sync::atomic::Ordering;
 
-use super::leaf_map::{LeafWrite, with_scratch};
+use super::leaf_map::{LeafWrite, Locked, Residency, with_scratch};
 use super::{Tree, TreeError};
+use bf_tree_mini_page::Lookup;
 use bf_tree_node_id::LeafId;
 use bf_tree_page::RecordState;
 
@@ -33,6 +34,14 @@ impl Tree {
 
         let n = self.config.leaf_capacity;
         let leaf = self.read_leaf(key)?;
+        // The mini-page answers first; the base page only on a miss.
+        if let Residency::Mini { page, refs } = leaf.residency() {
+            match page.lookup_marking(refs, key) {
+                Lookup::Found(value) => return Ok(f(Some(value))),
+                Lookup::Absent => return Ok(f(None)),
+                Lookup::Miss => {}
+            }
+        }
         with_scratch(|scratch| {
             let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
             page.check_key(key)?;
