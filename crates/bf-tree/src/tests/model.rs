@@ -153,6 +153,10 @@ fn run_on(
             }
         }
         assert_eq!(tree.check_invariants(), Ok(()), "{context}");
+        assert!(
+            tree.circular_buffer_used() <= config.circular_buffer_bytes,
+            "{context}: circular buffer over budget"
+        );
         max_height = max_height.max(tree.height());
     }
     // Every run must exercise splits; small nodes also split inner nodes.
@@ -237,13 +241,22 @@ fn reversed_ranges_are_rejected() {
     assert_eq!(tree.range(Some(b"a"), Some(b"a")).unwrap().count(), 0);
 }
 
+/// Defaults with a circular buffer large enough to buffer a million keys
+/// without eviction (plan 0014).
+fn baseline_config() -> TreeConfig {
+    TreeConfig {
+        circular_buffer_bytes: 1 << 30,
+        ..TreeConfig::default()
+    }
+}
+
 /// An informational single-threaded baseline, not a gate. Run with
 /// `tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`.
 #[test]
 #[ignore = "informational benchmark"]
 fn baseline_throughput() {
     const COUNT: u64 = 1_000_000;
-    let tree = Tree::in_memory(TreeConfig::default()).unwrap();
+    let tree = Tree::in_memory(baseline_config()).unwrap();
     let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes();
     let value = [7; 16];
 
@@ -286,7 +299,7 @@ fn baseline_file_store() {
     const COUNT: u64 = 1_000_000;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("baseline.bf");
-    let config = TreeConfig::default();
+    let config = baseline_config();
     let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes();
     let value = [7; 16];
     let rate = |elapsed: std::time::Duration| COUNT as f64 / elapsed.as_secs_f64() / 1e6;
