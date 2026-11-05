@@ -1,0 +1,43 @@
+#!/bin/sh
+# Run a command in the pinned Linux container (tools/linux/Dockerfile) with
+# this checkout mounted, for example:
+#
+#   tools/linux-run tools/buck2 test //crates/bf-tree/...
+#   tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
+#
+# The image is rebuilt when its inputs change. Linux build outputs live in
+# named volumes mounted over buck-out/ and target/, so they never mix with
+# the host's. The PEPPYDB_BENCH_* and PEPPYDB_SOAK_SECS settings pass
+# through. Contended benchmarks see the CPUs of Docker's VM.
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ $# -eq 0 ]; then
+    echo "usage: tools/linux-run <command> [args...]" >&2
+    exit 2
+fi
+
+CONTEXT=$(mktemp -d)
+trap 'rm -rf "$CONTEXT"' EXIT
+cp "$ROOT/tools/linux/Dockerfile" "$ROOT/rust-toolchain.toml" \
+    "$ROOT/tools/ci/install-dotslash" "$CONTEXT/"
+TAG=$(cat "$CONTEXT/Dockerfile" "$CONTEXT/rust-toolchain.toml" \
+    "$CONTEXT/install-dotslash" | shasum -a 256 | cut -c1-16)
+IMAGE="peppydb-linux:$TAG"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    docker build -t "$IMAGE" "$CONTEXT"
+fi
+
+TTY=
+if [ -t 0 ] && [ -t 1 ]; then
+    TTY=-t
+fi
+exec docker run --rm -i $TTY \
+    -v "$ROOT:/work/peppydb" \
+    -v peppydb-linux-buck-out:/work/peppydb/buck-out \
+    -v peppydb-linux-target:/work/peppydb/target \
+    -v peppydb-linux-cargo:/root/.cargo/registry \
+    -v peppydb-linux-dotslash:/root/.cache/dotslash \
+    -e PEPPYDB_BENCH_KEY -e PEPPYDB_BENCH_VALUE \
+    -e PEPPYDB_BENCH_CIRCULAR_BUFFER_MIB -e PEPPYDB_BENCH_KEYS \
+    -e PEPPYDB_BENCH_MILLIS -e PEPPYDB_SOAK_SECS \
+    "$IMAGE" "$@"

@@ -133,6 +133,8 @@ Run commands from the repository root. During iteration, use focused checks
 such as `tools/buck2 test //crates/bf-tree/...`, or run one unit-test
 binary with a filter:
 `tools/buck2 run //crates/bf-tree:bf-tree-unittest -- open::`.
+For Linux runs and contended benchmarks, prefix a command with
+`tools/linux-run` (a pinned Docker container; see `tools/linux/Dockerfile`).
 
 Before completing work that changes code or `BUCK` files, run:
 
