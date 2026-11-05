@@ -3,6 +3,7 @@ use super::*;
 mod class;
 mod leaf;
 mod mini;
+mod model;
 mod refs;
 mod write;
 

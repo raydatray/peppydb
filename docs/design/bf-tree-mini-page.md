@@ -1,0 +1,152 @@
+# Mini-pages
+
+A BF-Tree leaf is a durable **base page** plus at most one in-memory
+**mini-page** (BF-Tree paper, §§3.1, 5). The mini-page buffers writes and
+caches records for that leaf. The crate `bf-tree-mini-page` implements one
+leaf's overlay without the tree: size classes, the `MiniPage` view,
+reference bits, the write loop, and the leaf views that read and merge base
+plus mini-page. [Plan 0011](../plans/0011-bf-tree-mini-page.md) built it;
+[plan 0013](../plans/0013-bf-tree-mini-tree.md) puts it into the tree.
+
+```text
+inner nodes  -->  LeafId  -->  logical leaf = base page + (0 or 1) mini-page
+```
+
+## Roles and records
+
+Both roles use the [shared page format](bf-tree-pages.md).
+
+| Role | Fences | `backing_leaf` | Record kinds | Capacity |
+| --- | --- | --- | --- | --- |
+| Base page | Required | Unset | `Insert` only | `L` |
+| Mini-page | None | The leaf it overlays | Any | One size class, `64..=M` |
+
+| Kind | Dirty | Key exists |
+| --- | --- | --- |
+| `Insert` | Yes | Yes |
+| `Delete` | Yes | No |
+| `Cache` | No | Yes |
+| `Phantom` | No | No |
+
+- **Clean records repeat the base page.** A mini-page is discarded at every
+  merge, so a `Cache` or `Phantom` record always agrees with the base page.
+  A merge therefore applies only dirty records.
+- **A base page never stores a tombstone.** A merge applies a `Delete` by
+  removing the base key; a `Delete` for a key the base lacks is a no-op.
+- **Reads go mini-page first.** `lookup_marking` answers `Found` (`Insert`
+  or `Cache`), `Absent` (`Delete` or `Phantom`), or `Miss`; on `Miss` the
+  base page decides, because a mini-page may hold only part of the leaf.
+  Scans always read the base page too.
+
+## Writes
+
+`MiniPage::apply` inserts or replaces one record:
+
+| Incoming | Nothing buffered | Dirty buffered | Clean buffered |
+| --- | --- | --- | --- |
+| `Insert(v)` | Insert | Replace | Replace |
+| `Delete` | Key-only tombstone | Replace | Replace |
+| `Cache(v)`, `Phantom` | Insert | Skip (`SkippedDirty`) | Replace |
+
+A `Delete` of an unbuffered key leaves a tombstone, because the base page may
+hold the key. A clean record never replaces a dirty one, which is newer than
+the base page. `apply` never compacts or grows; errors leave the page
+unchanged.
+
+`buffer` is the write loop around it:
+
+```mermaid
+flowchart TD
+    W[buffer] --> E{slot holds a mini-page?}
+    E -->|no| A["alloc smallest_for(record) from the circular buffer"]
+    E -->|yes| T[apply]
+    A --> T
+    T -->|Applied / SkippedDirty| D[Buffered / SkippedDirty]
+    T -->|PageFull and holes| K[compact, retry]
+    T -->|PageFull, no holes, or RecordTooLarge| N{next class?}
+    N -->|yes| G["alloc next class, copy dropping cold clean records, free old block, retry"]
+    N -->|no| NM[NeedsMerge]
+```
+
+- **Growth is where the cache forgets.** Copying into the next class drops
+  `Cache` and `Phantom` records whose reference bit is clear (upstream
+  `copy_initialize_to`). Dirty records are always kept.
+- **Nothing changes on failure.** A full circular buffer returns
+  `BufferError::Full`: the first allocation leaves the slot empty, and a
+  failed growth keeps the old mini-page. `NeedsMerge` is returned only at
+  the largest class and changes nothing. Invalid records fail before any
+  allocation.
+- **Blocks come from the circular buffer.** A mini-page lives in a
+  [circular buffer](bf-tree-circular-buffer.md) block, owned by its leaf. The
+  crate depends on `bf-tree-circular-buffer` directly; the buffer treats
+  blocks as bytes, and `MiniPage` views them in place through `zerocopy`, so
+  this crate has no `unsafe` code.
+
+## Size classes and the admission rule
+
+The ladder is powers of two from 64 below the largest class `M`, then `M`:
+
+```text
+M = floor64(L - 5K - V - 24),  requiring M >= 64 and 32 + 8 + K + V <= M
+```
+
+At the defaults (`L = 4096`, `K = 64`, `V = 1024`) the ladder is 64, 128,
+256, 512, 1024, 2048, 2688.
+
+**Why this `M`.** Let `R = 8 + K + V` be the largest record and
+`F = 16 + 2K` the largest finite fence pair. A base page holds at most
+`L - 48` record bytes and a mini-page at most `M - 32`, so a merge has
+`T <= (L - 48) + (M - 32)` bytes of records. Around the midpoint, the two
+candidate split points differ by one record, so the better one has a larger
+side of at most `T/2 + R/2`. That side fits when
+`32 + F + T/2 + R/2 <= L`, which gives `M <= L - 5K - V - 24`. One two-way
+split therefore always absorbs a merge, and a merge never returns
+`CannotSplit`. The check `32 + R <= M` means a fresh mini-page at the
+smallest fitting class takes any record, so a write after a merge always
+succeeds.
+
+## Reference bits
+
+Readers will hold a leaf's shared lock (plan 0012). Safe Rust cannot set a
+bit inside bytes that other readers are reading, so reference bits live
+beside the mini-page in `RefBits`: one `AtomicU64` bit per slot index, 512 in
+all (a page holds at most 508 slots). `mark` loads first and writes only if
+the bit is clear. `Relaxed` ordering suffices: the leaf lock orders a
+reader's marks before a later writer's reads, and concurrent marks commute.
+`apply` shifts the bits when it inserts a slot, so bit `i` stays with slot
+`i`; compaction moves payloads only; a copy starts with clear bits.
+
+## Leaf views
+
+- `LeafRef { base, mini }::range` merges both in key order; the mini-page
+  wins an equal key, and `Delete` or `Phantom` hide their keys.
+- `LeafMut { base, mini }` merges the mini-page's dirty records into the
+  base page with `Page::merge_batch_*`: in place when they fit, otherwise
+  with one split into a right page. Merging is two-phase (`merge_fits`,
+  then in place or split), so the caller allocates a right leaf only when a
+  split is certain. The merge borrows the mini-page and never frees it.
+
+## Tests
+
+The leaf-set model drives a set of leaves (fenced base pages plus
+mini-pages in one shared circular buffer) with random writes, deletes, cache
+fills, marking lookups, range scans, and forced merges against a `BTreeMap`,
+in three configurations including empty and maximum values. It checks that
+base pages are valid, fenced, without a backing leaf, hold only `Insert`
+records, and tile the key space; that mini-pages are valid, unfenced, name
+their leaf, and have a class capacity; that buffered keys lie inside their
+leaf; that a buffered write never changes base bytes; and that clean records
+repeat the oracle. A boundary test fills a base page and a largest-class
+mini-page with maximum records in every configuration and confirms the
+merge splits without `CannotSplit`.
+
+## Sources
+
+- [BF-Tree paper](../references.md#bf-tree-paper): §3.1 (mini-pages), §3.2
+  (shared layout), §5 (operations), §5.6 Table 1 (record states).
+- Upstream at `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`:
+  `src/mini_page_op.rs` (insert, merge), `src/storage.rs`
+  (`copy_initialize_to`), `src/tree.rs` (`create_mem_page_size_classes`).
+  peppydb derives `M` from the admission proof instead of a configured
+  record size, keeps reference bits outside the page, and never stores
+  tombstones in base pages.
