@@ -32,7 +32,9 @@
 
 use std::sync::atomic::AtomicU64;
 
+use bf_tree_circular_buffer::CircularBuffer;
 use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
+use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
 use bf_tree_sync::RwLock;
@@ -71,16 +73,25 @@ pub struct TreeConfig {
     pub max_key_len: usize,
     /// Largest accepted value length; may be 0.
     pub max_value_len: usize,
+    /// Circular-buffer budget for mini-pages, in bytes. A power of two, at
+    /// least `2 * (leaf_capacity + 16)`. A runtime setting: the superblock
+    /// does not record it.
+    pub circular_buffer_bytes: usize,
 }
 
+/// The default circular-buffer budget, 32 MiB.
+pub const DEFAULT_CIRCULAR_BUFFER_BYTES: usize = 32 << 20;
+
 impl Default for TreeConfig {
-    /// 4096-byte nodes, 64-byte keys, and 1024-byte values.
+    /// 4096-byte nodes, 64-byte keys, 1024-byte values, and a 32 MiB
+    /// circular buffer.
     fn default() -> Self {
         Self {
             leaf_capacity: 4096,
             inner_capacity: 4096,
             max_key_len: 64,
             max_value_len: 1024,
+            circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
         }
     }
 }
@@ -90,7 +101,8 @@ impl TreeConfig {
     ///
     /// With leaf capacity `L`, inner capacity `I`, key limit `K`, and value limit
     /// `V`, the rule requires `7K + 3V <= L - 72` and
-    /// `16 + max(K - 4, 0) <= (I - 16) / 2`.
+    /// `16 + max(K - 4, 0) <= (I - 16) / 2`, a mini-page ladder (see
+    /// `SizeClasses::derive`), and a valid circular-buffer budget.
     pub fn validate(&self) -> Result<(), TreeError> {
         Page::check_capacity(self.leaf_capacity)
             .map_err(|_| TreeError::InvalidConfig("leaf capacity is not a valid page capacity"))?;
@@ -123,7 +135,35 @@ impl TreeConfig {
             ));
         }
 
+        let classes = self.size_classes()?;
+        CircularBuffer::new(
+            self.circular_buffer_bytes,
+            &self.buffer_classes(&classes),
+            0,
+        )
+        .map_err(|_| {
+            TreeError::InvalidConfig(
+                "circular_buffer_bytes must be a power of two of at least 2 * (leaf_capacity + 16)",
+            )
+        })?;
+
         Ok(())
+    }
+
+    /// The mini-page size-class ladder these limits allow.
+    pub(crate) fn size_classes(&self) -> Result<SizeClasses, TreeError> {
+        SizeClasses::derive(self.leaf_capacity, self.max_key_len, self.max_value_len)
+            .map_err(|error| TreeError::InvalidConfig(error.0))
+    }
+
+    /// The circular buffer's classes: the mini-page ladder, then the leaf
+    /// page size for full-page blocks (plan 0015).
+    pub(crate) fn buffer_classes(&self, classes: &SizeClasses) -> Vec<usize> {
+        let mut all = classes.as_slice().to_vec();
+        if all.last() != Some(&self.leaf_capacity) {
+            all.push(self.leaf_capacity);
+        }
+        all
     }
 }
 
@@ -143,6 +183,7 @@ impl From<&TreeConfig> for Superblock {
 }
 
 /// The configuration recorded in a superblock.
+/// Runtime settings, such as the circular-buffer budget, take their defaults.
 impl From<&Superblock> for TreeConfig {
     fn from(superblock: &Superblock) -> Self {
         Self {
@@ -150,6 +191,7 @@ impl From<&Superblock> for TreeConfig {
             inner_capacity: superblock.inner_capacity,
             max_key_len: superblock.max_key_len,
             max_value_len: superblock.max_value_len,
+            circular_buffer_bytes: DEFAULT_CIRCULAR_BUFFER_BYTES,
         }
     }
 }

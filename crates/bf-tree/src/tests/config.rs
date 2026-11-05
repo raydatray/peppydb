@@ -4,8 +4,79 @@ use crate::store::InnerStore;
 #[test]
 fn defaults_validate() {
     let defaults = TreeConfig::default();
-    assert_eq!(defaults, config(4096, 4096, 64, 1024));
+    assert_eq!(
+        defaults,
+        TreeConfig {
+            circular_buffer_bytes: 32 << 20,
+            ..config(4096, 4096, 64, 1024)
+        }
+    );
     assert_eq!(defaults.validate(), Ok(()));
+    assert_eq!(
+        defaults.size_classes().unwrap().as_slice(),
+        [64, 128, 256, 512, 1024, 2048, 2688]
+    );
+    assert_eq!(
+        defaults.buffer_classes(&defaults.size_classes().unwrap()),
+        [64, 128, 256, 512, 1024, 2048, 2688, 4096]
+    );
+}
+
+#[test]
+fn the_circular_buffer_budget_is_checked() {
+    let base = config(256, 128, 8, 16);
+    // At least 2 * (256 + 16) = 544, so 1024 is the smallest power of two.
+    for bytes in [1024, 4096, 1 << 30] {
+        let ok = TreeConfig {
+            circular_buffer_bytes: bytes,
+            ..base
+        };
+        assert_eq!(ok.validate(), Ok(()), "{bytes}");
+    }
+    for bytes in [0, 512, 1000, 3 << 20] {
+        let bad = TreeConfig {
+            circular_buffer_bytes: bytes,
+            ..base
+        };
+        assert!(
+            matches!(bad.validate(), Err(TreeError::InvalidConfig(_))),
+            "{bytes}"
+        );
+    }
+}
+
+#[test]
+fn limits_without_a_mini_page_ladder_are_rejected() {
+    // M = floor64(192 - 5 - 37 - 24) = 64, but a record needs 32 + 8 + 1 + 37.
+    let bad = config(192, 128, 1, 37);
+    assert!(matches!(bad.validate(), Err(TreeError::InvalidConfig(_))));
+}
+
+#[test]
+fn open_with_takes_runtime_settings_and_checks_the_layout() {
+    let config = config(256, 128, 8, 16);
+    let tree = Tree::in_memory(config).unwrap();
+    tree.put(b"k", b"v").unwrap();
+    let store = tree.into_store();
+
+    // A different budget is a runtime setting.
+    let bigger = TreeConfig {
+        circular_buffer_bytes: 1 << 22,
+        ..config
+    };
+    let tree = Tree::open_with(bigger, store).unwrap();
+    assert_eq!(tree.config().circular_buffer_bytes, 1 << 22);
+    assert_eq!(tree.get(b"k"), Ok(Some(b"v".to_vec())));
+
+    // A different layout is rejected.
+    let other = TreeConfig {
+        max_value_len: 8,
+        ..config
+    };
+    assert!(matches!(
+        Tree::open_with(other, tree.into_store()),
+        Err(TreeError::InvalidStore(_))
+    ));
 }
 
 #[test]

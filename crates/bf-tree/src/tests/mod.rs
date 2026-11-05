@@ -13,6 +13,9 @@ mod scan;
 mod store;
 mod write;
 
+/// Test trees get a 1 MiB circular buffer: valid for every test page size.
+const TEST_BUFFER_BYTES: usize = 1 << 20;
+
 fn config(
     leaf_capacity: usize,
     inner_capacity: usize,
@@ -24,6 +27,7 @@ fn config(
         inner_capacity,
         max_key_len,
         max_value_len,
+        circular_buffer_bytes: TEST_BUFFER_BYTES,
     }
 }
 
