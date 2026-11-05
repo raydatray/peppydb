@@ -53,7 +53,7 @@ use layout::{
 };
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
-pub use split::LeafSplit;
+pub use split::{LeafSplit, Merge};
 pub use write::UpsertOutcome;
 
 /// An operation rejected before changing any page bytes.

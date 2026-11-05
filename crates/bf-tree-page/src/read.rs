@@ -49,7 +49,16 @@ impl Page {
         })
     }
 
-    pub(super) fn record_at(&self, index: usize) -> RecordRef<'_> {
+    /// Record index of a stored key (fences excluded), or `None` on a miss.
+    /// Rejects empty and out-of-range keys like [`Page::get`].
+    pub fn find_index(&self, key: &[u8]) -> Result<Option<usize>, PageError> {
+        self.check_key(key)?;
+
+        Ok(self.search(key).ok())
+    }
+
+    /// The record at `index` in key order. Panics if `index >= self.len()`.
+    pub fn record_at(&self, index: usize) -> RecordRef<'_> {
         let slot = self.record_slots()[index];
         let suffix = self.suffix_range(&slot);
         let value = suffix.end..suffix.end + slot.value_len();

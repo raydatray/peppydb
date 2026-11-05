@@ -291,3 +291,36 @@ fn upsert_capacity_checks_do_not_credit_the_old_allocation() {
     assert_eq!(page.free_bytes(), 0);
     assert_eq!(page.reclaimable_bytes(), 4);
 }
+
+#[test]
+fn upsert_indexed_reports_the_index_that_find_index_sees() {
+    let mut bytes = vec![0; 512];
+    let page = Page::init(&mut bytes).unwrap();
+    let mut seed = 7u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..200 {
+        let key = [b'a' + (next() % 20) as u8];
+        let value = vec![b'v'; (next() % 4) as usize];
+        let state = match next() % 3 {
+            0 => RecordState::Delete,
+            _ => RecordState::Insert(&value),
+        };
+        let before = page.len();
+        let Ok((outcome, index)) = page.upsert_indexed(&key, state) else {
+            page.compact();
+            continue;
+        };
+        assert_eq!(page.find_index(&key), Ok(Some(index)));
+        assert_eq!(page.record_at(index).key.to_vec(), key);
+        let grew = page.len() - before;
+        assert_eq!(outcome == UpsertOutcome::Inserted, grew == 1);
+    }
+
+    assert_eq!(page.find_index(b"zz"), Ok(None));
+    assert_eq!(page.find_index(b""), Err(PageError::EmptyKey));
+}

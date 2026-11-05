@@ -70,3 +70,15 @@ pub struct RecordRef<'p> {
     pub key: KeyRef<'p>,
     pub state: RecordState<'p>,
 }
+
+impl<'p> RecordRef<'p> {
+    /// The same record with a shorter lifetime. `RecordRef` is covariant, but
+    /// iterator item types must match exactly, so merging records from two
+    /// sources needs this conversion.
+    pub fn shorten<'s>(self) -> RecordRef<'s>
+    where
+        'p: 's,
+    {
+        self
+    }
+}
