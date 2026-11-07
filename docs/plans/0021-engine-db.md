@@ -1,6 +1,6 @@
 # 0021: Engine `Db`
 
-**Status:** Draft
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md) (from plan 0020),
@@ -605,18 +605,96 @@ by plans 0019 and 0013.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
-- [ ] Diff 2: crate, open, recovery, reads.
-- [ ] Diff 3: durable writes.
-- [ ] Diff 4: write batches.
-- [ ] Diff 5: checkpoint policy.
-- [ ] Diff 6: crash tests.
-- [ ] Diff 7: documentation.
-- [ ] Stack-wide verification.
+- [x] Agree on the design and commit stack with the user.
+- [x] Diff 2: crate, open, recovery, reads.
+- [x] Diff 3: durable writes.
+- [x] Diff 4: write batches.
+- [x] Diff 5: checkpoint policy.
+- [x] Diff 6: crash tests.
+- [x] Diff 7: documentation.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-07)
+
+Test paths are relative to `crates/engine/src/`. The
+[engine design](../design/engine.md#db-guarantees) maps each guarantee to
+its tests.
+
+| Check | Outcome |
+| --- | --- |
+| Open and recovery | `tests/open.rs`: create, close, and reopen (`create_close_and_reopen`); records written straight into `wal/`, including a batch, are replayed through `Tree::apply` (`a_wal_written_beside_the_tree_is_replayed`); other limits and an invalid `segment_bytes` are `Error::Options` (`a_reopen_with_other_limits_is_refused`); a second open is `Locked` (`a_second_open_is_locked`); a WAL that starts above `N + 1` is `Error::Wal(Gap)` (`a_stale_wal_with_a_gap_is_refused`). |
+| Durable writes | `tests/write.rs`: writes round-trip, survive a drop and reopen, and sequences continue (`writes_round_trip_and_survive_a_reopen`); writes over the limits take no sequence (`writes_past_the_limits_are_rejected_before_logging`); six writer threads match the oracle live and after reopen (`concurrent_writers_match_the_oracle_live_and_after_reopen`); a closed WAL surfaces as `Error::Wal(Closed)` and leaves the leaf unchanged (`a_closed_wal_surfaces_as_a_wal_error`). |
+| Batches | `tests/batch.rs`: one sequence per batch (`a_batch_round_trips_with_one_sequence`); an empty batch appends nothing (`an_empty_batch_appends_nothing`); an invalid operation rejects the batch with no WAL record (`an_invalid_operation_rejects_the_batch_before_logging`); the last operation per key wins (`the_last_operation_per_key_wins`); batches and single writes on four keys keep the WAL order, live and after reopen (`batches_and_single_writes_keep_the_wal_order`). Gate mutation: without the exclusive gate, the last test failed in 8 of 10 release runs; with it, in 0 of 10. |
+| Checkpoints | `tests/checkpoint.rs`: a manual checkpoint commits and truncates the WAL to the active segment (`a_manual_checkpoint_commits_and_truncates_the_wal`); the byte trigger checkpoints in the background and old segments disappear (`the_byte_trigger_checkpoints_in_the_background`); the interval trigger fires only when new writes arrived (`the_interval_trigger_fires_only_when_something_new_arrived`); manual and background checkpoints race safely (`manual_and_background_checkpoints_race_safely`); writers are not stalled: the slowest of about 480 puts took about 8 ms against a checkpoint of about 2 s in a debug build, and the test asserts a factor of 20 (`writers_are_not_stalled_by_a_checkpoint`); a snapshot opens as a database at its checkpoint (`a_snapshot_opens_as_a_database_at_its_checkpoint`). |
+| Crashes | `tests/crash.rs`: acknowledged writes survive and unsynced ones are lost, and a reader saw an unsynced value first (`acknowledged_writes_survive_and_unsynced_ones_are_lost`); a torn unsynced record at every cut is repaired away and the acknowledged record survives (`a_torn_record_at_every_byte_is_repaired_away`); a checkpoint then a crash passes the durable-WAL check and recovers the log's state (`a_checkpoint_makes_its_unsynced_effects_durable_first`); a garbage tree page after a crash is released (`a_garbage_tree_page_after_a_crash_is_released`); four writers with racing checkpoints recover a prefix of each thread's history (`concurrent_writers_with_racing_checkpoints_recover_a_prefix`); the crash model runs 120 generations in about 20 s, bound by fsyncs (`many_crash_generations_keep_acknowledged_writes_and_whole_batches`). |
+| Negative control | A local patch that replaced the hook with a no-op made `a_checkpoint_makes_its_unsynced_effects_durable_first` fail deterministically. The random model's state check alone does not catch it (see discoveries). The patch was not kept. |
+| Visibility | Both local experiments failed with "is not visible": `engine` depending on `bf-tree-page`, and a dependency on `engine-wal` from outside `//crates/engine`. |
+| Release runs | The `engine` tests passed 10 of 10 release runs after diff 5 and 5 of 5 after diff 6. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (21 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (445 tests), and `go vet` and `go test` pass. Miri was not needed: the crate has no `unsafe` code. |
 
 ## Discoveries and plan changes
 
-None yet.
+- **The random crash model alone does not catch a missing hook.** With the
+  hook replaced by a no-op, the committed tree holds unsynced records, but
+  the test's oracle log also holds every appended record, durable or not.
+  The reopen recovers at the tree's `N`, and its state still equals the
+  oracle at `N`. The tests therefore check the durable WAL directly after
+  each crash and before the reopen (`assert_wal_covers_the_commit`): every
+  logged record up to the committed sequence must be durable. Both the
+  checkpoint-then-crash test and the crash model run that check.
+- **The crash model runs 120 generations, not 200.** Each generation costs
+  real fsyncs; 120 generations (three seeds of 40) take about 20 s. The
+  plan's target of at least 200 generations within a few seconds does not
+  hold for a fsync-bound model; the test runs 120.
+- **A limit mismatch arrives as `TreeError::InvalidStore`.**
+  `Tree::open_with` reports it with the message "store superblock differs
+  from the configuration". `From<TreeError> for Error` maps that message
+  to `Error::Options("tree limits differ from the store")`. The match
+  depends on the message text.
+- **The gate also protects `Tree::apply`'s preconditions.** Besides
+  per-key order, `apply` rejects a sequence at or below the applied
+  sequence and requires one caller at a time. Without the exclusive gate,
+  a single write with a later sequence can raise the applied sequence
+  before the batch applies.
+- **The interval trigger compares the tree's applied sequence** with the
+  last checkpoint's, not `wal.last_seq()`. The policy has no `begin` and
+  `finish` helpers; `Shared::checkpoint` stores the two atomics directly.
+- **`Wal::abandon` takes `&self`.** The `Db` holds its `Wal` inside
+  `Arc<Shared>`, so `Db::crash` cannot move it out. The WAL sections of
+  the engine design now show `&self`.
+- **`Checkpoint` is the engine's own type** (`applied_seq`,
+  `checkpoint_id`), converted from `bf_tree::State`. `Db::path` was added.
+  `Drop` does not call `wal.close()` itself: the last `Arc<Shared>` drops
+  with the `Db`, and `Wal::drop` closes and drains the WAL.
+- **Test coverage differs from the scenario table in places.** The reader
+  that sees an unsynced write is part of
+  `acknowledged_writes_survive_and_unsynced_ones_are_lost`. Two crashes
+  without a full replay in between are covered by the crash model's
+  generations. The concurrent crash test crashes after its writer threads
+  finish, with unsynced records pending, not at a random moment while they
+  run. The WAL-error test uses a closed WAL (`WalError::Closed`), not an
+  injected `Failed` (the WAL's sync-failure hook is `cfg(test)` inside
+  `engine-wal` and does not cross crates). The torn-record test cuts at
+  bytes 0 to 26 of the 27-byte record, and a whole record written but not
+  synced survives the process crash.
+- **The gate is tested by a mutation.** With batches taking the gate
+  shared, the mixed batch and single-write test failed 8 of 10 release
+  runs; with it exclusive, 10 of 10 passed. The gate is a standard
+  `RwLock`: `bf-tree-sync` is internal to the tree component.
+- **Visibility checked by local experiments.** Adding
+  `//crates/bf-tree-page:bf-tree-page` to `engine`'s deps, and
+  `//crates/engine-wal:engine-wal` to `bin/peppydb`, both fail with "is not
+  visible"; the second closes plan 0020's visibility row.
+- **A Buck2 build right after an edit used stale sources.** One negative
+  control first appeared to pass because the build started before the
+  file watcher saw the patch; after a pause it failed as expected.
+- **Under the one-hour flush interval, acknowledged writes in the crash
+  tests use an explicit `sync_to`.** `Db::put` would wait the full
+  interval (the plan's gotcha); an early version of the tests hung on it.
+- **Writers are far from stalled.** With 40,000 buffered 64-byte writes
+  in default-size leaves, a checkpoint took about 2 s in a debug build and
+  the slowest of about 480 concurrent puts about 8 ms; the test asserts a
+  factor of 20.
 
 ## Agent notes
 

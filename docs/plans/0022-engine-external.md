@@ -1,6 +1,6 @@
 # 0022: External-log mode
 
-**Status:** Draft
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md), [persistence](../design/bf-tree-persistence.md).
@@ -318,12 +318,20 @@ Five diffs.
 
 ## Open questions
 
-- **Interval checkpoints in external mode.** Proposed: none. Alternative: an
-  optional `Options::external_checkpoint_interval` as a safety net against
-  file growth when the owner forgets. Decide before diff 2.
-- **Snapshot reader shape.** `&mut dyn Read` is proposed. Phase 2 may prefer
-  chunks with offsets for resumable transfer; that would add a second
-  method, not change this one.
+None.
+
+Resolved (review, 2026-11-07):
+
+- **Interval checkpoints in external mode: none.** The owner is fully
+  responsible for checkpointing: the checkpoint's `applied_seq` is where
+  its log may be truncated and a follower resumes, and an engine-driven
+  checkpoint would have no owner hook. The design document states that the
+  store file grows between checkpoints, so the owner must checkpoint
+  periodically.
+- **Snapshot reader shape: `&mut dyn Read`; chunked transfer deferred.**
+  A resumable, offset-based transfer can be added later as a second
+  method; the snapshot is a store file with fixed offsets, so this is
+  additive.
 
 ## Verification strategy
 
@@ -338,16 +346,59 @@ Five diffs.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
-- [ ] Diff 2: external mode and `apply`.
-- [ ] Diff 3: snapshot install.
-- [ ] Diff 4: leader/follower tests.
-- [ ] Diff 5: documentation.
-- [ ] Stack-wide verification.
+- [x] Agree on the design and commit stack with the user.
+- [x] Diff 2: external mode and `apply`.
+- [x] Diff 3: snapshot install.
+- [x] Diff 4: leader/follower tests.
+- [x] Diff 5: documentation.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-07)
+
+Test paths are relative to `crates/engine/src/`. The
+[engine design](../design/engine.md#external-mode-guarantees) maps each
+guarantee to its tests.
+
+| Check | Outcome |
+| --- | --- |
+| Modes | `tests/external.rs`: each mode refuses the other mode's writes with `Error::WrongMode`: `put`, `delete`, and `write` in external mode, and `apply` and `checkpoint_with` in standalone mode (`each_mode_refuses_the_other_modes_writes`). Reads, `checkpoint`, `write_snapshot`, and `close` work in external mode in the same test, and in standalone mode in the plan 0021 tests. |
+| Apply | `tests/external.rs`: entries apply in order with gaps (sequences 1, 5, and 9), an empty entry applies and advances the applied sequence, the last operation per key wins, and redeliveries of 1, 5, and 9 return `Applied::AlreadyApplied` and change nothing (`entries_apply_in_order_with_gaps_and_redeliveries_are_skipped`); an entry with an oversized key is rejected with `KeyTooLarge` before any write, and the same sequence then applies (`an_entry_past_the_limits_is_rejected_before_any_write`). |
+| Hook | `tests/external.rs`: a hook receives a sequence at least the applied one; a failing hook returns the owner's own error as `Error::Hook`, commits nothing, and a reopen is at the earlier commit (`a_failing_hook_aborts_the_checkpoint_and_returns_the_owners_error`). |
+| Reopen | `tests/external.rs`: after a drop, a reopen resumes at the committed sequence, the owner redelivers, and `close` checkpoints (`a_reopen_resumes_at_the_committed_sequence`). |
+| Standalone WAL | `tests/external.rs`: an external open over a standalone WAL is `Error::Options("a standalone WAL exists")`; deleting `wal/` after `close` converts the database, and its data is kept (`an_external_open_over_a_standalone_wal_is_refused`). |
+| Snapshot install | `tests/external.rs`: an install replaces the state, keeps the lock (a second open is `Locked`), leaves no partial file, and the follower continues and reopens (`installing_a_snapshot_replaces_the_state`); a truncated snapshot, a snapshot with both superblock copies flipped, and a snapshot with other limits are rejected, the partial file is removed, and the old state reopens (`a_bad_snapshot_is_rejected_and_the_old_state_reopens`); `open` removes a leftover `tree.bf.partial` (`a_leftover_partial_snapshot_is_removed_by_open`); a standalone install is `WrongMode` (`standalone_install_is_wrong_mode`). |
+| Replica | `tests/replica.rs`: a follower installs a snapshot, applies every later entry, and equals the leader (`a_follower_installs_a_snapshot_and_catches_up`); a follower that crashes by drop resumes at its committed sequence, redeliveries at or below it are skipped, and it converges (`a_follower_that_crashes_resumes_and_converges`); a randomized follower over 4 seeds of 60 steps, with redeliveries, checkpoints, crashes, and reinstalls, equals the leader's state at its applied sequence after every step (`a_randomized_follower_tracks_the_leader`); the stream helper reads the whole log (`the_stream_helper_reads_the_whole_log`). |
+| Release runs | The `engine` tests passed 5 of 5 release runs. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (21 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (459 tests), and `go vet` and `go test` pass. Miri was not needed: the crate has no `unsafe` code. |
 
 ## Discoveries and plan changes
 
-None yet.
+- **A hook error returns the owner's own error.** The plan converted it to
+  `LogError::Other("external hook")`, which loses the owner's error. The
+  engine keeps the boxed error from the hook and returns it as the new
+  `Error::Hook`; the tree still sees `LogError::Other("external hook")`
+  and commits nothing.
+- **`Db::apply` takes `engine::Op`, a re-export of `bf_tree::Op`.** The
+  plan's `Op` was unqualified; the engine re-exports the tree's type, so
+  an owner needs no other crate.
+- **`apply` normalizes by key after the redelivery check.** A redelivered
+  entry is skipped before its operations are examined.
+- **`Db` implements `Debug`.** `install_snapshot` returns `Result<Db, _>`,
+  and the tests (and callers) need `unwrap_err` on it; the output shows
+  the path, the mode, and the applied sequence.
+- **The stream is read while the leader stays open.** Reopening the
+  leader would seal its segment and truncate it below the committed
+  sequence, so the tests keep the leader open with one 1 GiB segment and
+  read its WAL between phases, when every write is acknowledged and the
+  WAL has no torn tail for replay to repair.
+- **The install truncates a stale partial instead of removing it.** The
+  flowchart's "remove stale `tree.bf.partial`" step is the partial file's
+  `create` with `truncate`; `open` also removes a stale partial before it
+  opens the tree. The design document's flowchart shows the code's steps.
+- **The ignored options are still validated.** `Options::validate` checks
+  `segment_bytes`, `checkpoint_wal_bytes`, and `checkpoint_interval` in
+  both modes, so external mode ignores their values but rejects invalid
+  ones. The defaults are valid.
 
 ## Agent notes
 
