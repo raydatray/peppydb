@@ -389,7 +389,13 @@ impl Tree {
                 Residency::Base => {}
             }
         }
-        self.leaves.sync()
+        // Every superseding write recorded so far finished before the sync,
+        // so after it their replaced pages are free (until plan 0018's
+        // commit, which frees only what a commit covers).
+        let superseded = self.leaves.take_superseded();
+        self.leaves.sync()?;
+        self.leaves
+            .free_pages(superseded.into_iter().map(|(page_number, _)| page_number))
     }
 
     /// Number of leaves holding a mini-page: an O(leaves) diagnostic.

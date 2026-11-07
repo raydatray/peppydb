@@ -354,9 +354,22 @@ fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>, Vec<PageNumber>) {
 
 #[test]
 fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
-    // A zeroed middle leaf leaves a gap.
-    let (store, _, pages) = flushed_store();
-    store.write(pages[1], &[0; 256]).unwrap();
+    // A middle leaf with every stored copy zeroed leaves a gap. Freed
+    // pages keep older copies, so all of them are zeroed.
+    let (store, _, _) = flushed_store();
+    // Claim every freed page, so that each can be written.
+    let count = store.page_count();
+    while store.alloc().unwrap().raw() < count {}
+    let mut bytes = vec![0; 256];
+    for raw in 0..count {
+        let page_number = PageNumber::new(raw).unwrap();
+        store.read(page_number, &mut bytes).unwrap();
+        let names_leaf_1 = bf_tree_page::raw_header_stamps(&bytes)
+            .is_some_and(|(seq, id)| seq != 0 && id == Some(leaf(1)));
+        if names_leaf_1 {
+            store.write(page_number, &[0; 256]).unwrap();
+        }
+    }
     assert_eq!(
         Tree::open(store).err(),
         Some(TreeError::InconsistentLeaves(

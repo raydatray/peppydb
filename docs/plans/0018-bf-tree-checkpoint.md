@@ -566,7 +566,7 @@ Resolved (2026-11-06, review):
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: `write_seq` header field.
-- [ ] Diff 3: fresh-page writes.
+- [x] Diff 3: fresh-page writes.
 - [ ] Diff 4: commit, erase, and create.
 - [ ] Diff 5: suspect classification.
 - [ ] Diff 6: checkpoint and watermarks.
@@ -582,6 +582,16 @@ Resolved (2026-11-06, review):
   always corrupt: a torn write whose header sector did not land leaves a
   zero header or an older superseded page's header, so the existing
   release rules still apply to it.
+- **Freed pages hold older copies, so fixtures must account for them.**
+  Plan 0017 stopped zeroing on `free`. After diff 3 a freed page still
+  holds an older copy of its leaf, and open selects that copy if the
+  leaf's newest page is gone. An old fixture that zeroed one leaf's page
+  to make a gap now reopened at the older copy; it zeroes every copy
+  instead. This is the behaviour the selection rule intends between
+  checkpoints, and diff 4's erase rule bounds it.
+- **A failed page write frees its fresh page.** If `store.write` fails in
+  `write_through`, the fresh page names no state, so it is returned to the
+  store before the error propagates.
 
 ## Agent notes
 

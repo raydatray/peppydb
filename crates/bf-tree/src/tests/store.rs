@@ -42,7 +42,8 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
     tree.flush().unwrap();
     let leaves = tree.leaf_count();
     assert!(leaves > 2);
-    assert_eq!(tree.leaves.store().page_count() as usize, leaves);
+    let stored = tree.leaves.page_table().into_iter().flatten().count();
+    assert_eq!(stored, leaves);
     assert_eq!(stored_pages(&tree), copied_pages(&tree));
 
     // Map the store afresh, keeping the inner nodes.

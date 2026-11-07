@@ -21,6 +21,7 @@ mod record;
 mod route;
 mod scan;
 mod second_chance;
+mod shadow;
 mod store;
 mod write;
 

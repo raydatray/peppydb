@@ -7,7 +7,7 @@ use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::{PageNumber, PageStore};
 use bf_tree_sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
+use bf_tree_sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 
 /// Raw value in the page table for "no stored page".
 const NO_PAGE: u64 = u64::MAX;
@@ -34,6 +34,15 @@ pub(super) struct LeafMap {
     /// The next leaf ID. Leaf IDs are append-only within a process: holes
     /// are never reused.
     next: AtomicUsize,
+    /// Last write sequence drawn. A stored page's `write_seq` is the value
+    /// its write-through drew (plan 0018).
+    write_seq: AtomicU64,
+    /// Held shared by every write-through for its whole duration; held
+    /// exclusively by a checkpoint to read `write_seq` with none in flight.
+    gate: RwLock<()>,
+    /// Pages that a later write of the same leaf replaced, each with the
+    /// replacing write's sequence. Freed once a commit covers the sequence.
+    superseded: Mutex<Vec<(PageNumber, u64)>>,
     /// Every mini-page block. Its mutex is innermost: it may be taken under
     /// a leaf lock, and it never waits for one.
     pub(super) circular_buffer: CircularBuffer,
@@ -232,6 +241,9 @@ impl LeafMap {
         Self {
             store,
             next: AtomicUsize::new(entries.len()),
+            write_seq: AtomicU64::new(0),
+            gate: RwLock::new(()),
+            superseded: Mutex::new(Vec::new()),
             entries,
             pages: table,
             circular_buffer,
@@ -493,14 +505,24 @@ impl LeafMap {
         Ok(page)
     }
 
-    /// Write base pages to the store: stamp each with its leaf, seal its
-    /// checksum, and write it to the leaf's page, allocating one on the
-    /// leaf's first write. This is the only page write in the tree. The
-    /// caller must hold the exclusive lock of every leaf in `pages` and pass
-    /// the reachable leaf first. The others are written before it, so an
-    /// error before the last write leaves the reachable leaf's stored page
-    /// unchanged. Takes no tree-level lock.
-    pub(super) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<(), TreeError> {
+    /// Write base pages to the store, each to a fresh page number: stamp
+    /// each with one new write sequence and its leaf, seal its checksum,
+    /// write it, and point the page table at it. A page that a write
+    /// replaces is kept until a commit covers the replacing sequence, so a
+    /// committed page is never overwritten. This is the only page write in
+    /// the tree. Returns the write sequence.
+    ///
+    /// The caller must hold the exclusive lock of every leaf in `pages` and
+    /// pass the reachable leaf first; the others are written before it. A
+    /// split passes both halves, so they share one sequence and a crash
+    /// commits both or neither. Holds the write-through gate shared
+    /// throughout, and takes no tree-level lock.
+    pub(super) fn write_through(
+        &self,
+        pages: &mut [(LeafId, &mut [u8])],
+    ) -> Result<u64, TreeError> {
+        let _in_flight = self.gate.read();
+        let seq = self.write_seq.fetch_add(1, Ordering::AcqRel) + 1;
         let (first, rest) = pages.split_first_mut().expect("at least one page");
         for (id, bytes) in rest.iter_mut().chain([first]) {
             debug_assert!(
@@ -509,22 +531,52 @@ impl LeafMap {
             );
             let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(bytes)
                 .map_err(|_| TreeError::Page(PageError::Corrupt("buffer is not a page")))?;
+            page.set_write_seq(seq);
             page.set_leaf(Some(*id))?;
-            page.seal(); // the last header change
-            let page_number = match self.page_of(*id) {
-                Some(page_number) => page_number, // in place; plan 0018 changes this
-                None => {
-                    let page_number = self.store.alloc()?;
-                    self.pages
-                        .get(id.index())
-                        .expect("a known leaf")
-                        .store(page_number.raw(), Ordering::Release);
-                    page_number
-                }
-            };
-            self.store.write(page_number, bytes)?;
+            page.seal(); // last: the checksum covers the stamps
+            let page_number = self.store.alloc()?;
+            if let Err(error) = self.store.write(page_number, bytes) {
+                // The page names no committed state; give it back.
+                let _ = self.store.free(page_number);
+                return Err(error.into());
+            }
+            let old = self
+                .pages
+                .get(id.index())
+                .expect("a known leaf")
+                .swap(page_number.raw(), Ordering::AcqRel);
+            if let Some(old) = PageNumber::new(old) {
+                self.superseded.lock().push((old, seq));
+            }
+        }
+        Ok(seq)
+    }
+
+    /// Take every superseded page recorded so far.
+    pub(super) fn take_superseded(&self) -> Vec<(PageNumber, u64)> {
+        std::mem::take(&mut *self.superseded.lock())
+    }
+
+    /// Free pages that a durable write replaced. Called with no lock held.
+    pub(super) fn free_pages(
+        &self,
+        pages: impl IntoIterator<Item = PageNumber>,
+    ) -> Result<(), TreeError> {
+        for page_number in pages {
+            self.store.free(page_number)?;
         }
         Ok(())
+    }
+
+    /// Continue write sequences above `seq`, after open.
+    pub(super) fn start_write_seq(&self, seq: u64) {
+        self.write_seq.store(seq, Ordering::Release);
+    }
+
+    /// The last write sequence drawn.
+    #[cfg(test)]
+    pub(super) fn write_seq(&self) -> u64 {
+        self.write_seq.load(Ordering::Acquire)
     }
 
     /// Make every completed write durable.
@@ -609,7 +661,7 @@ impl LeafMap {
     /// checking the bytes. Test fixtures build pages this way.
     pub(super) fn overwrite(&self, id: LeafId, bytes: &mut [u8]) -> Result<(), TreeError> {
         let leaf = self.write(id)?;
-        self.write_through(&mut [(leaf.id(), bytes)])
+        self.write_through(&mut [(leaf.id(), bytes)]).map(drop)
     }
 
     /// Each leaf's page number, or `None` for a hole: what `LeafMap::new`
