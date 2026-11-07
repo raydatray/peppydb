@@ -145,6 +145,13 @@ fn a_torn_record_at_every_byte_is_repaired_away() {
         );
         assert_eq!(db.get(b"b").unwrap(), None, "written {written}");
     }
+    // The whole record written (not synced) survives a process crash.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), slow()).unwrap();
+    unsynced_put(&db, b"b", b"2");
+    db.crash(record);
+    let db = Db::open(dir.path(), slow()).unwrap();
+    assert_eq!(db.get(b"b").unwrap(), Some(b"2".to_vec()));
 }
 
 /// A checkpoint's hook syncs the WAL through every effect it commits, so

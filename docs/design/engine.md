@@ -1,19 +1,28 @@
-# Engine: write-ahead log
+# Engine
 
-This document records the design of the embedded engine component. This
-first version covers only the write-ahead log (WAL): its place in the
-component, the on-disk format, sequences, the write path and group commit,
-replay, truncation, shutdown, errors, and what is guaranteed today, with the
-test that backs each guarantee. [Plan 0021](../plans/0021-engine-db.md)
-adds the `Db` and its sections.
+This document records the design of the embedded engine component. It
+covers two crates:
 
-[Plan 0020](../plans/0020-engine-wal.md) built the WAL. Related documents:
+- **`engine-wal`** (internal): the write-ahead log (WAL). The first part of
+  this document describes its place in the component, the on-disk format,
+  sequences, the write path and group commit, replay, truncation, shutdown,
+  errors, and its guarantees, with the test that backs each guarantee.
+- **`engine`** (the entry crate): `Db`, the application-facing embedded
+  database, which composes the BF-Tree and the WAL. The second part, from
+  [The `Db`](#the-db), describes its boundaries, on-disk layout, options,
+  errors, recovery, writes, batches, checkpoints, the checkpoint policy,
+  close, crash testing, and its guarantees.
+
+[Plan 0020](../plans/0020-engine-wal.md) built the WAL, and
+[plan 0021](../plans/0021-engine-db.md) built the `Db`. Related documents:
 [architecture](architecture.md) (components and phases),
 [persistence](bf-tree-persistence.md#logs-and-sequenced-writes) (the tree's
-`Log` contract, which the WAL serves through an adapter in plan 0021), and
+`Log` contract, which the WAL serves through the `Db`'s adapter, and the
+[pre-commit hook](bf-tree-persistence.md#the-pre-commit-hook)),
+[concurrency](bf-tree-concurrency.md) (leaf locks), and
 [build system](build-system.md) (Buck2 visibility).
 
-The code is in `crates/engine-wal/src/`: `lib.rs` (`Wal`, `Op`, `Record`,
+The WAL code is in `crates/engine-wal/src/`: `lib.rs` (`Wal`, `Op`, `Record`,
 `WalError`), `record.rs` (record and segment-header encoding), `segment.rs`
 (naming, listing, directory sync), `replay.rs` (`Wal::replay`, `Replayed`),
 and `flusher.rs` (`WalOptions`, `open`, appends, the flusher thread,
@@ -38,7 +47,7 @@ durability waits, truncation, `close`, `abandon`). The tests are in
 
 ## Place in the engine component
 
-The engine component will have one entry crate, `engine` (plan 0021), and
+The engine component has one entry crate, `engine` (plan 0021), and
 internal crates. `engine-wal` is the first internal crate:
 
 ```python
@@ -205,7 +214,7 @@ impl Wal {
     pub fn appended_bytes(&self) -> u64;
     pub fn truncate_below(&self, applied: u64) -> Result<usize, WalError>;
     pub fn close(&self) -> Result<(), WalError>;
-    pub fn abandon(self, written: usize);
+    pub fn abandon(&self, written: usize);
 }
 ```
 
@@ -453,13 +462,15 @@ truncation deletes.
   Later appends return `WalError::Closed`. `close` returns the flusher's
   original error once; a later `close` returns `Ok`.
 - **`Drop`** calls `close` and ignores its result.
-- **`abandon(self, written)`** simulates a crash. It sets the state to
+- **`abandon(&self, written)`** simulates a crash. It sets the state to
   `Abandoned` and joins the flusher, which exits after any group already in
   flight. It then writes the first `written` bytes of the pending buffer to
   the active segment, **without** a sync, and drops the rest. Waiters for
   records that were never reported durable receive `WalError::Closed`. If
   the flusher had failed, it returned no segment, and `abandon` writes
-  nothing.
+  nothing. After `abandon`, appends return `Closed`, and dropping the `Wal`
+  writes nothing more. `abandon` takes `&self` because the `Db` holds its
+  `Wal` in state shared with the policy thread.
 
 **Why `abandon` exists.** Dropping a `Wal` drains it. A test that only drops
 a database therefore never loses unsynced log bytes, and never exercises the
@@ -583,9 +594,10 @@ the sync), and that segment creation syncs the file and the directory.
 - **Plan 0021** wraps `Wal` in a local adapter that implements
   `bf_tree::Log`. `Db::open` calls `replay` and then `open`. Writes call
   `wait_durable`; the checkpoint hook calls `sync_to`; checkpoints call
-  `truncate_below`; the checkpoint policy reads `appended_bytes` and
-  `last_seq`; crash tests call `abandon`. None of these need a change to
-  the WAL.
+  `truncate_below`; the checkpoint policy reads `appended_bytes`; crash
+  tests call `abandon`, which takes `&self`. None of these changed the
+  record format, the naming scheme, or the replay rules. See
+  [The `Db`](#the-db).
 - **Plan 0022** (external-log mode) does not use the WAL.
 - **Plan 0023** measures append cost, group sizes, interval settings, and
   replay rate. Possible additions, each additive: segment preallocation
@@ -597,6 +609,773 @@ the sync), and that segment creation syncs the file and the directory.
   sealed segments would be a new function, not a format change.
 - Later plans must not need to change the record format, the naming
   scheme, or the replay rules.
+
+## The `Db`
+
+`Db` is the application-facing embedded database. It composes the BF-Tree
+(`bf_tree::Tree` on a `FileStore`) and the WAL. It opens with recovery,
+makes every acknowledged write durable, applies atomic batches, serves
+reads, checkpoints on a background policy that bounds the WAL, and closes
+in order.
+
+The code is in `crates/engine/src/lib.rs`. The tests are in
+`crates/engine/src/tests/`: `open.rs` (open, recovery, and reads),
+`write.rs` (single writes), `batch.rs` (batches), `checkpoint.rs`
+(checkpoints, policy, and snapshots), and `crash.rs` (simulated crashes).
+
+```mermaid
+flowchart TB
+    App[application] --> Db
+    subgraph engine["engine (entry crate)"]
+        Db --> Gate["writer gate (RwLock)"]
+        Db --> Adapter["WalLog adapter for bf_tree::Log"]
+        Db --> Policy["policy thread (park and unpark)"]
+    end
+    Adapter --> Wal["engine_wal::Wal"]
+    Db --> Tree["bf_tree::Tree on FileStore"]
+    Policy --> Tree
+    Policy --> Wal
+```
+
+```rust
+impl Db {
+    pub fn open(path: impl AsRef<Path>, options: Options) -> Result<Db, Error>;
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error>;
+    pub fn delete(&self, key: &[u8]) -> Result<(), Error>;
+    pub fn write(&self, batch: WriteBatch) -> Result<(), Error>;
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
+    pub fn get_with<R>(&self, key: &[u8], f: impl FnOnce(Option<&[u8]>) -> R)
+        -> Result<R, Error>;
+    pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>)
+        -> Result<Scan<'_>, Error>;
+    pub fn scan_with(&self, start: Option<&[u8]>, end: Option<&[u8]>,
+        visit: impl FnMut(&[u8], &[u8]) -> ControlFlow<()>) -> Result<(), Error>;
+    pub fn checkpoint(&self) -> Result<Checkpoint, Error>;
+    pub fn write_snapshot(&self, out: &mut dyn std::io::Write)
+        -> Result<Checkpoint, Error>;
+    pub fn applied_seq(&self) -> u64;
+    pub fn path(&self) -> &Path;
+    pub fn close(self) -> Result<(), Error>;
+}
+```
+
+Internally, a `Db` holds its path, an `Arc<Shared>`, the policy thread's
+`JoinHandle`, and the open `LOCK` file. `Shared` holds what the `Db` and
+the policy thread share: the `Tree`, the `Wal`, the writer gate, the
+`Policy` atomics, and the stored background error. `Db` is `Send + Sync`;
+a compile-time assertion in `lib.rs` checks it.
+
+### Crate and boundaries
+
+```python
+# crates/engine/BUCK
+# The engine component's entry crate. Other components depend on this
+# crate only; engine-* crates are internal.
+peppy_rust_library(
+    name = "engine",
+    deps = [
+        "//crates/bf-tree:bf-tree",
+        "//crates/engine-wal:engine-wal",
+        "//third-party/rust:thiserror",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["PUBLIC"],
+)
+```
+
+- **`engine` is the component's only public crate.** Other components and
+  `bin/` must depend on `engine`, never on `engine-wal`.
+- **`engine` depends on `bf-tree` only** from the BF-Tree component, never
+  on a `bf-tree-*` crate. The `bf-tree-*` crates' visibility lists do not
+  include `//crates/engine`, so Buck2 rejects such a dependency. `engine-wal`
+  is visible only to `//crates/engine:`. Plan 0021 checked both rules with
+  local experiments; each failed with "is not visible".
+- **Re-exports.** `engine` re-exports, under their own names, the types
+  that appear in its public signatures: `LogError`, `Scan`, `TreeConfig`,
+  and `TreeError` from `bf-tree`, and `WalError` from `engine-wal`.
+  `Checkpoint` is the engine's own type, converted from `bf_tree::State`:
+
+```rust
+pub struct Checkpoint {
+    /// Every write at or below this sequence is in the committed tree.
+    pub applied_seq: u64,
+    /// Increases by one per committed checkpoint.
+    pub checkpoint_id: u64,
+}
+```
+
+The engine relies on these parts of the tree's contract
+([persistence](bf-tree-persistence.md#logs-and-sequenced-writes)):
+
+1. `put_logged` and `remove_logged` check the operation, then call
+   `Log::append` with the leaf locked and the route validated, before they
+   modify the leaf. If `append` fails, the leaf is unchanged. If the tree
+   must retry the write (for example, after it made room in the circular
+   buffer), it calls `append` again for the same operation; the earlier
+   record is unused, and replaying both is harmless.
+2. `Tree::apply(entry)` checks every operation before it writes any, writes
+   each with `entry.seq`, and advances the applied sequence once, after the
+   last operation. It requires one caller at a time, in increasing
+   sequence order, and rejects a sequence at or below the applied sequence
+   (`TreeError::SequenceOrder`).
+3. `checkpoint_with(hook)` calls `hook` with a `CommitPoint` after the write
+   sequence `W` is fixed and before the superblock commit. A hook error
+   aborts the commit.
+4. Checkpoints are serialized inside the tree and must not run with a leaf
+   lock held.
+
+### On-disk layout
+
+```text
+<path>/
+  LOCK          held with File::try_lock for the Db's lifetime
+  tree.bf       the tree's store file (plans 0017 to 0019)
+  wal/          WAL segments (plan 0020)
+```
+
+`Db::open` creates `<path>` if it is absent. `LOCK` is opened (created if
+absent, never truncated) and locked with `std::fs::File::try_lock`. A lock
+conflict (`TryLockError::WouldBlock`) returns `Error::Locked`. The lock is
+held by the open file in the `Db` and is released when the `Db` drops,
+after `close` or without it. A second `open` of the same path in the same
+process is also `Locked` (`open.rs`: `a_second_open_is_locked`).
+
+### Options and validation
+
+```rust
+pub struct Options {
+    pub tree: TreeConfig,               // TreeConfig::default()
+    pub mode: Mode,                     // Mode::Standalone, the only mode
+    pub flush_interval: Duration,       // 0
+    pub segment_bytes: u64,             // 64 MiB
+    pub checkpoint_wal_bytes: u64,      // 256 MiB
+    pub checkpoint_interval: Duration,  // 60 s
+}
+```
+
+- `flush_interval` and `segment_bytes` become the `WalOptions`.
+- `checkpoint_wal_bytes` is the policy's byte threshold, and
+  `checkpoint_interval` its interval (see
+  [The checkpoint policy](#the-checkpoint-policy)).
+- `Mode::Standalone` means that the engine keeps a WAL and that writes
+  return once durable. Plan 0022 adds `Mode::External`.
+
+`Options::validate` runs first in `open`. It returns `Error::Options` if
+`segment_bytes < 4096`, if `checkpoint_wal_bytes == 0`, or if
+`checkpoint_interval` is zero. It then calls `TreeConfig::validate`, whose
+error is `Error::Tree` (for example, `TreeError::InvalidConfig`).
+
+The tree limits are fixed when the database is created: creation writes
+`Superblock::from(&options.tree)`. A reopen must pass the same limits.
+`Tree::open_with` compares them with the superblock and fails on a
+mismatch; the engine reports that failure as `Error::Options` (see
+[Errors](#db-errors)). The WAL and policy options may differ between
+opens.
+
+### Db errors
+
+```rust
+pub enum Error {
+    Tree(TreeError),
+    Wal(WalError),
+    Io { op: &'static str, source: std::io::Error },
+    Options(&'static str),
+    Locked,
+}
+```
+
+| Origin | Becomes |
+| --- | --- |
+| `TreeError::Log(LogError::Closed)` from a tree call | `Error::Wal(WalError::Closed)` |
+| `TreeError::Log(LogError::Io { op, kind, .. })` from a tree call | `Error::Wal(WalError::Failed { op, kind })` |
+| `TreeError::InvalidStore("store superblock differs from the configuration")` | `Error::Options("tree limits differ from the store")` |
+| Any other `TreeError` (including `StoreError` from `FileStore`) | `Error::Tree` |
+| A `WalError` from a direct WAL call (`replay`, `open`, `append_batch`, `wait_durable`, `truncate_below`, `close`) | `Error::Wal` |
+| An `io::Error` while creating the directory, opening or locking `LOCK`, or spawning the policy thread | `Error::Io { op, .. }` |
+| `TryLockError::WouldBlock` on `LOCK` | `Error::Locked` |
+
+The WAL's errors cross the tree as `LogError`, which is `Copy` like
+`TreeError`. The adapter maps them with `to_log_error`:
+`WalError::Closed` becomes `LogError::Closed`, `WalError::Failed { op,
+kind }` becomes `LogError::Io { op, kind, code: None }`, and every other
+variant becomes `LogError::Other("wal")`. `From<TreeError> for Error`
+reverses the first two, so a log failure inside a tree call is reported as
+the WAL's error, not the tree's. The round trip is lossless for `Closed`
+and `Failed`, the errors that an append or a sync of a valid record
+returns.
+
+**Why `InvalidStore` becomes `Options`.** `Tree::open_with` reports a
+limit mismatch as `TreeError::InvalidStore` with a fixed message. For the
+engine's caller, the cause is the options that it passed, so the engine
+maps that one message to `Error::Options`. Other `InvalidStore` errors stay
+`Error::Tree`. The match depends on the exact message text in `bf-tree`.
+
+### Open and recovery
+
+```rust
+pub fn open(path: impl AsRef<Path>, options: Options) -> Result<Db, Error> {
+    options.validate()?;
+    let path = path.as_ref().to_path_buf();
+    std::fs::create_dir_all(&path).map_err(io("create database directory"))?;
+    let lock = lock_file(&path)?;                      // Error::Locked
+    let tree = open_or_create_tree(&path, &options)?;  // Error::Options on limits
+    let applied = tree.applied_seq();
+    let wal_dir = path.join("wal");
+    let replayed = Wal::replay(&wal_dir, applied + 1, |record| {
+        let ops: Vec<_> = record.ops.iter().map(to_tree_op).collect();
+        tree.apply(Entry { seq: record.seq, ops: &ops }).map_err(Error::from)
+    })?;
+    let next = applied.max(replayed.last_seq.unwrap_or(0)) + 1;
+    let wal = Wal::open(&wal_dir, options.wal(), next)?;
+    wal.truncate_below(applied)?;
+    // Build Shared, spawn the policy thread "engine-checkpoint".
+}
+```
+
+```mermaid
+flowchart TD
+    V["Options::validate"] --> A["create the directory, try_lock LOCK"]
+    A -->|"held elsewhere"| L["Error::Locked"]
+    A --> B{"tree.bf exists?"}
+    B -->|no| C["FileStore::create, then Tree::create (commits checkpoint 0)"]
+    B -->|yes| D["FileStore::open, then Tree::open_with(options.tree)"]
+    D -->|"limits differ"| X["Error::Options"]
+    D --> F["N = tree.applied_seq()"]
+    C --> F
+    F --> G["Wal::replay(wal/, N + 1), Tree::apply for each record"]
+    G -->|"Gap or Corrupt"| E["Error::Wal"]
+    G --> H["Wal::open(wal/, max(N, last replayed) + 1)"]
+    H --> I["Wal::truncate_below(N)"]
+    I --> J["spawn the policy thread"]
+```
+
+- **Replay goes through `Tree::apply`.** Each WAL record above `N` becomes
+  one entry with the record's sequence, so a batch is applied as one entry
+  again. The tree opens at its last checkpoint, which committed `N`; the
+  checkpoint can also hold effects above `N` (it is fuzzy). Replay applies
+  those records again, in order, and the final state equals the log's.
+- **Sequences continue.** The WAL opens at `max(N, last replayed) + 1`, so
+  the next write takes the next sequence after both the tree and the log
+  (`write.rs`: `writes_round_trip_and_survive_a_reopen` checks "sequences
+  continue").
+- **Truncation after open.** `truncate_below(N)` deletes segments that the
+  checkpoint already covered, for example after a crash between a
+  checkpoint's commit and its truncation.
+- **A missing `wal/` replays nothing.** A `tree.bf` without its WAL
+  directory is a valid database at its checkpoint. A snapshot file opens
+  this way (see [Checkpoints](#checkpoints-and-wal-before-data)).
+- **Replay errors refuse the open.** A WAL whose first record is above
+  `N + 1` returns `Error::Wal(WalError::Gap { .. })` (`open.rs`:
+  `a_stale_wal_with_a_gap_is_refused`). `Corrupt` is reported the same way.
+- **Creation order.** `create` writes the tree and its initial checkpoint
+  before the WAL exists. A crash between `FileStore::create` and the
+  initial commit leaves a `tree.bf` that `open` rejects with an error; the
+  engine does not recreate over it.
+- **The policy starts from the recovered state.** `bytes_at_checkpoint`
+  starts at `wal.appended_bytes()` (0) and `applied_at_checkpoint` at `N`.
+  If replay applied records above `N`, the interval trigger therefore
+  checkpoints them after the first interval.
+
+### Writes
+
+```rust
+/// The WAL as the tree's log. A local newtype: neither the trait nor `Wal`
+/// belongs to this crate.
+struct WalLog<'a>(&'a Wal);
+
+impl bf_tree::Log for WalLog<'_> {
+    /// Runs under the tree's leaf lock: the WAL's append does no I/O.
+    fn append(&self, op: bf_tree::Op<'_>) -> Result<u64, LogError> {
+        self.0.append(to_wal_op(&op)).map_err(|error| to_log_error(&error))
+    }
+}
+
+pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    let seq = {
+        let _single = self.shared.gate.read().unwrap_or_else(PoisonError::into_inner);
+        self.shared.tree.put_logged(&WalLog(&self.shared.wal), key, value)?
+    };
+    // After the leaf lock is released: a slow sync holds no lock.
+    self.shared.policy.note_append(&self.shared.wal);
+    self.shared.wal.wait_durable(seq)?;
+    Ok(())
+}
+```
+
+`delete` is the same with `remove_logged`. `to_wal_op` and `to_tree_op`
+convert between `bf_tree::Op` and `engine_wal::Op` by copying two slice
+references.
+
+- **The WAL is appended under the leaf lock.** The tree calls
+  `WalLog::append` inside its leaf lock (contract 1), so for each key the
+  order of sequences equals the order of application. `Wal::append` does no
+  I/O and does not wait, so it is safe under the lock.
+- **The wait happens after every lock.** `put_logged` returns after it
+  releases the leaf lock, and the gate guard drops at the end of its block.
+  Only then does the writer call `note_append` and `wait_durable`. A slow
+  fsync holds no lock, and many writers share one fsync (group commit).
+- **Lock order:** writer gate, then leaf lock, then the WAL's `pending`
+  mutex (inside `Wal::append`).
+- **Limits are checked before logging.** `put_logged` calls
+  `Tree::check_op` before it appends, so a key or value over the limits
+  returns `Error::Tree` (`KeyTooLarge`, `ValueTooLarge`, `EmptyKey`) and
+  takes no sequence (`write.rs`:
+  `writes_past_the_limits_are_rejected_before_logging`).
+
+**Guarantee boundary: reads can see writes that are not yet durable.** A
+writer applies its write before it waits for the fsync. A concurrent `get`
+can return the new value. If the process crashes before the fsync, that
+value is lost, and a later reader sees the old one. The writer never
+received `Ok`, so no acknowledged write is lost. Callers that need
+read-after-durable must wait for their own write.
+`crash.rs`: `acknowledged_writes_survive_and_unsynced_ones_are_lost` reads
+an unsynced value and then shows that a crash loses it.
+
+**After a WAL failure** every write returns `Error::Wal` (`Failed` after a
+flusher error, `Closed` after the WAL closed). An append that fails leaves
+the leaf unchanged (`write.rs`: `a_closed_wal_surfaces_as_a_wal_error`).
+Writes that were applied but never synced before the failure stay visible
+until the database is reopened. The caller must reopen the database; the
+reopen replays exactly what is durable.
+
+### Write batches
+
+```rust
+pub struct WriteBatch { ops: Vec<(Vec<u8>, Option<Vec<u8>>)> }
+// new, put, delete, len (duplicates included), is_empty
+
+pub fn write(&self, batch: WriteBatch) -> Result<(), Error> {
+    let ops = batch.normalize();               // sorted by key, last op per key
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let tree_ops = tree_ops(&ops);
+    tree_ops.iter().try_for_each(|op| self.shared.tree.check_op(op))?;
+    let wal_ops: Vec<_> = tree_ops.iter().map(to_wal_op).collect();
+    let seq = {
+        let _exclusive = self.shared.gate.write().unwrap_or_else(PoisonError::into_inner);
+        let seq = self.shared.wal.append_batch(&wal_ops)?;
+        self.shared.tree.apply(Entry { seq, ops: &tree_ops })?;
+        seq
+    };
+    self.shared.policy.note_append(&self.shared.wal);
+    self.shared.wal.wait_durable(seq)?;
+    Ok(())
+}
+```
+
+- **Normalize.** `normalize` collects the operations into a `BTreeMap`, so
+  the result is sorted by key and keeps the last operation for each key
+  (`batch.rs`: `the_last_operation_per_key_wins`). The batch's effect then
+  does not depend on the order in which `apply` writes its operations. A
+  replay of a batch whose effects a checkpoint partly captured converges to
+  the same state.
+- **An empty batch** (after normalization) writes nothing and takes no
+  sequence (`batch.rs`: `an_empty_batch_appends_nothing`).
+- **Check before logging.** A logged batch that the tree rejects would fail
+  every later replay, and the database could not open without manual
+  repair. `write` calls `Tree::check_op` on every operation before
+  `append_batch`. An invalid operation rejects the whole batch with no WAL
+  record (`batch.rs`:
+  `an_invalid_operation_rejects_the_batch_before_logging`).
+- **One record, one sequence.** `append_batch` writes the batch as one WAL
+  record, and `apply` writes every operation with that sequence
+  (`batch.rs`: `a_batch_round_trips_with_one_sequence`).
+
+**The writer gate.** `Shared::gate` is an `RwLock<()>`. Single writes hold
+it shared; a batch holds it exclusively from `append_batch` until `apply`
+returns. Readers and checkpoints never take it. A batch takes one
+sequence but touches several leaves, so it cannot hold all their leaf
+locks across its append. Without the gate, two things break:
+
+- *Per-key order.* A single write to one of the batch's keys could take
+  sequence `S + 1` and apply before the batch writes that key with `S`.
+  The live tree would keep the batch's value, and replay would keep the
+  single write's.
+- *`apply`'s preconditions.* A single write raises the tree's applied
+  sequence when it finishes. A single write with sequence `S + 1` could
+  finish before the batch with `S` calls `apply`, and `apply` would reject
+  the batch with `SequenceOrder` after its record was logged. Also, `apply`
+  requires one caller at a time; the exclusive gate serializes batches.
+
+With the gate, no single write is in flight while a batch appends and
+applies, so the batch's sequence is above the applied sequence, and no
+later sequence for one of its keys can apply first.
+`batch.rs`: `batches_and_single_writes_keep_the_wal_order` runs three
+threads of batches over four keys and three threads of single writes to the
+same keys, then checks that the live state, a replay of the whole WAL into
+a map, and the reopened state are equal. As a mutation check during plan
+0021, with the exclusive gate removed, this test failed in 8 of 10 release
+runs; with the gate it failed in 0 of 10.
+
+**Cost.** A batch serializes against all writers while it appends and
+applies. The wait for durability happens after the gate is released.
+
+**Atomic for durability, not isolated.** After any crash a batch is wholly
+present or wholly absent. A concurrent reader can observe some of its
+operations before others.
+
+### Checkpoints and WAL-before-data
+
+```rust
+fn checkpoint(&self) -> Result<Checkpoint, Error> {
+    // Writes during this checkpoint do not re-kick it for bytes it covers.
+    self.policy.bytes_at_checkpoint.store(self.wal.appended_bytes(), Ordering::Relaxed);
+    let state = self.tree.checkpoint_with(|point| {
+        // WAL-before-data: sync the WAL through every committed effect.
+        self.wal.sync_to(point.captured_seq).map_err(|error| to_log_error(&error))
+    })?;
+    self.wal.truncate_below(state.applied_seq)?;
+    self.policy.applied_at_checkpoint.store(state.applied_seq, Ordering::Relaxed);
+    Ok(state.into())
+}
+```
+
+`Db::checkpoint`, the policy thread, and `close` all call this function.
+The tree serializes checkpoints, and `truncate_below` tolerates concurrent
+calls, so a manual and a background checkpoint can race
+(`checkpoint.rs`: `manual_and_background_checkpoints_race_safely`).
+
+```mermaid
+sequenceDiagram
+    participant C as checkpoint caller
+    participant T as Tree
+    participant W as Wal
+    C->>C: bytes_at_checkpoint = appended_bytes
+    C->>T: checkpoint_with(hook)
+    T->>T: read N, merge buffered leaves, fix W
+    T->>W: hook calls sync_to(captured_seq)
+    W-->>T: Ok once the records are durable
+    T->>T: commit the superblock with N and W
+    T-->>C: State with applied_seq N
+    C->>W: truncate_below(N)
+    C->>C: applied_at_checkpoint = N
+```
+
+**Why the hook is required.** A checkpoint commits pages that can hold
+effects with sequences above `N`, from writes that ran while it merged
+leaves. Those writes may not be durable in the WAL yet. Without the hook, a
+crash after the commit leaves the tree holding effects that the WAL lacks.
+Two guarantees then break:
+
+- *Batch atomicity.* A batch whose operations were partly merged survives
+  partly, and the WAL holds no record to complete it.
+- *State is a prefix of the log.* The recovered state would contain writes
+  that its WAL never recorded. Anything that treats the WAL as the history,
+  such as log shipping to a follower, would diverge.
+
+**Why `captured_seq` is enough.** The hook receives the tree's
+`CommitPoint`. Its `captured_seq` is at least the sequence of every effect
+in the pages that the commit includes
+([persistence](bf-tree-persistence.md#why-captured_seq-covers-the-image)).
+Each of those effects had its record appended before the effect was
+applied (contract 1, and `append_batch` before `apply`). So `sync_to`
+through `captured_seq` makes every committed effect durable in the WAL
+before the commit. `sync_to` ignores `flush_interval`.
+
+**The hook takes no engine lock.** It must not take the writer gate or a
+leaf lock: the tree can call it while it holds its write-through gate
+exclusively, and a writer that holds the engine gate can be waiting for
+that write-through gate. `sync_to` takes only the WAL's durability lock and
+briefly its `pending` mutex.
+
+**Truncation.** After the commit, `truncate_below(applied_seq)` deletes
+every sealed segment that the checkpoint covers
+(`checkpoint.rs`: `a_manual_checkpoint_commits_and_truncates_the_wal`).
+
+**Snapshots.** `write_snapshot(out)` streams the last committed checkpoint
+to `out` as a tree store file while writes continue, and returns that
+checkpoint. A directory that holds the snapshot as `tree.bf` and no `wal/`
+opens as a database at the snapshot's `applied_seq`
+(`checkpoint.rs`: `a_snapshot_opens_as_a_database_at_its_checkpoint`).
+
+### The checkpoint policy
+
+A writer must never wait for a checkpoint. If the policy thread held a
+mutex for a whole checkpoint, and every writer took the same mutex to
+report its bytes, every writer would stall for the checkpoint's duration.
+Instead, writers touch only atomics, and the policy thread sleeps with
+`park_timeout`.
+
+```rust
+struct Policy {
+    threshold: u64,                   // checkpoint_wal_bytes
+    interval: Duration,               // checkpoint_interval
+    bytes_at_checkpoint: AtomicU64,   // wal.appended_bytes() when the last one began
+    applied_at_checkpoint: AtomicU64, // committed applied_seq of the last one
+    kicked: AtomicBool,
+    stop: AtomicBool,
+    thread: OnceLock<Thread>,         // the policy thread, for unpark
+}
+
+/// After a write: one relaxed load and a subtraction in the common case;
+/// at most one writer per threshold crossing unparks the thread.
+fn note_append(&self, wal: &Wal) {
+    let grown = wal.appended_bytes()
+        .saturating_sub(self.bytes_at_checkpoint.load(Ordering::Relaxed));
+    if grown >= self.threshold
+        && !self.kicked.load(Ordering::Relaxed)
+        && !self.kicked.swap(true, Ordering::AcqRel)
+        && let Some(thread) = self.thread.get()
+    {
+        thread.unpark();
+    }
+}
+```
+
+The policy thread, named `engine-checkpoint`, runs this loop:
+
+```text
+deadline = now + interval
+loop:
+    park_timeout(deadline - now)           # spurious wakeups are harmless
+    if stop: return
+    grown = kicked.swap(false)
+            or appended_bytes - bytes_at_checkpoint >= threshold
+    due   = now >= deadline and tree.applied_seq() > applied_at_checkpoint
+    if grown or due: checkpoint(), and keep the first error for close()
+    if now >= deadline: deadline = now + interval
+```
+
+- **The byte trigger.** `checkpoint` stores `bytes_at_checkpoint` when it
+  begins, so writes during a long checkpoint do not kick it again for bytes
+  that it already covers. Writes that cross the threshold again during the
+  checkpoint set `kicked`, and the next iteration runs another checkpoint
+  (`checkpoint.rs`: `the_byte_trigger_checkpoints_in_the_background`).
+- **The interval trigger** fires only if something was applied since the
+  last checkpoint, so an idle database does not checkpoint
+  (`checkpoint.rs`:
+  `the_interval_trigger_fires_only_when_something_new_arrived`).
+- **The background error.** A failed background checkpoint stores its
+  error in `Mutex<Option<Error>>`, keeping the first one. Only the policy
+  thread and `close` take that mutex; writers never do. `close` reports
+  the error.
+- **Writers are not stalled.** `checkpoint.rs`:
+  `writers_are_not_stalled_by_a_checkpoint` buffers 40,000 records of
+  64 bytes, runs a manual checkpoint, and runs `put` in a loop until the
+  checkpoint ends. It asserts that the slowest `put` times 20 is below the
+  checkpoint's duration. In one debug-build run on macOS, the slowest of
+  about 480 puts took about 8 ms, and the checkpoint took about 2 s.
+
+### Reads
+
+`get`, `get_with`, `range`, and `scan_with` forward to the tree with the
+same signatures. They take no engine lock. `get_with` and `scan_with` run
+their closure under a leaf lock, so the closure must not call back into
+the database. Scans are consistent per leaf, not across leaves.
+`applied_seq` returns the tree's applied sequence: every write at or below
+it is applied.
+
+### Close and `Drop`
+
+- **`close(self)`** stops the policy thread (it sets `stop`, unparks the
+  thread, and joins it), runs one checkpoint, calls `wal.close()`, and takes
+  the stored background error. It returns the first error in this order:
+  the checkpoint, the WAL, the background error. The lock is released when
+  the `Db` drops at the end of `close`. Because the checkpoint commits
+  every applied write, a reopen after a successful `close` replays nothing.
+- **`Drop`** (without `close`) stops the policy thread. It does not
+  checkpoint. The `Db` then drops the last reference to `Shared`, so the
+  `Wal` drops, and `Wal::drop` closes it and drains every appended record.
+  A reopen replays the WAL (`write.rs`:
+  `writes_round_trip_and_survive_a_reopen`).
+- No writer can be in flight during `close` or `Drop`, because writers
+  borrow the `Db`.
+
+### Crash testing
+
+Dropping a `Db` drains the WAL, so a test that only drops a database never
+loses unsynced bytes. The tests use a crate-private, `cfg(test)` method:
+
+```rust
+#[cfg(test)]
+pub(crate) fn crash(mut self, written: usize) {
+    self.stop_policy();
+    self.shared.wal.abandon(written);
+    // The Db drops: no checkpoint, and the abandoned WAL writes nothing more.
+}
+```
+
+To create records that are applied but not durable, `crash.rs` opens with
+`flush_interval = 1 h` and calls `shared.tree.put_logged(&WalLog(..))`
+directly, without waiting (`unsynced_put`). An acknowledged write is
+simulated with `unsynced_put` followed by `sync_to` (`synced_put`),
+because `Db::put` would wait an hour. `sync_to` ignores the interval, so a
+checkpoint still syncs.
+
+**The durable-WAL check.** `assert_wal_covers_the_commit` runs after a
+crash and before the reopen. It reads the committed `applied_seq` from
+`tree.bf` (`FileStore::open` and `PageStore::state`), replays the WAL from
+its first remaining segment, and asserts that every record the test logged
+between that segment's first sequence and the committed sequence is in the
+durable WAL. A commit whose hook did not sync the WAL fails this check.
+
+The check is needed because the state comparison alone cannot see a
+missing sync. The test's oracle log records every appended record, durable
+or not. With a no-op hook, the committed tree holds unsynced records; the
+reopen recovers at that tree's `N`, and its state still equals the oracle
+log at `N`. Only the durable WAL shows that those records are missing.
+
+**Negative control.** In plan 0021, a local patch replaced the hook with a
+no-op. `a_checkpoint_makes_its_unsynced_effects_durable_first` then failed
+deterministically at the durable-WAL check. Without that check, the random
+crash model did not catch the patch.
+
+| Scenario | Test in `crash.rs` | Expected after reopen |
+| --- | --- | --- |
+| 20 acknowledged writes, then 20 unsynced overwrites, a read of an unsynced value, then `crash(0)` | `acknowledged_writes_survive_and_unsynced_ones_are_lost` | Every acknowledged value present, `applied_seq` 20 |
+| One acknowledged and one unsynced put, `crash(k)` for every `k` from 0 to 26, each a cut inside the 27-byte unsynced record | `a_torn_record_at_every_byte_is_repaired_away` | The acknowledged put present; the torn record is repaired away |
+| An unsynced put whose whole 27-byte record was written, then a process crash | `a_torn_record_at_every_byte_is_repaired_away` | The put present: written bytes survive a process crash |
+| 300 unsynced puts and an unsynced batch of 4, then a checkpoint, then `crash(0)`, with large segments | `a_checkpoint_makes_its_unsynced_effects_durable_first` | The durable-WAL check passes; `applied_seq` is the batch's sequence; the state equals the log at that sequence |
+| 100 puts, a checkpoint, one more put, `crash(0)`, then 256 bytes of `0x5a` appended to `tree.bf` | `a_garbage_tree_page_after_a_crash_is_released` | Open succeeds; the state equals the state before the crash |
+| Four writer threads (puts and batches of four keys) with 20 racing checkpoints, then 10 unsynced puts per thread, `crash(17)`; 6 seeds | `concurrent_writers_with_racing_checkpoints_recover_a_prefix` | Each thread's keys equal a prefix of its history at least as long as its acknowledged part |
+| 120 crash generations (below) | `many_crash_generations_keep_acknowledged_writes_and_whole_batches` | As below |
+
+**The crash model.** Three seeds run 40 generations each: 120 crashes in
+total. Each generation reopens the database left by the previous crash
+(`flush_interval` 0, `checkpoint_wal_bytes` 4 KiB, `segment_bytes` 4096) and
+runs 1 to 40 random steps: a checkpoint (1 in 10), a batch of 1 to 4
+operations (2 in 10), an unsynced put (1 in 10), a delete (1 in 10), or a
+put (5 in 10). It then crashes with a random `written` below 60 bytes.
+Before each reopen it runs the durable-WAL check. After each reopen it
+asserts that the recovered `applied_seq` is at least the highest
+acknowledged sequence, and that the state equals the oracle log at that
+sequence; it then drops the log's records above that sequence. Two
+crashes in a row without a full replay in between are therefore covered.
+The model takes about 20 s, bound by real fsyncs.
+
+### Db guarantees
+
+Test paths are relative to `crates/engine/src/tests/`.
+
+| Guarantee | Tests |
+| --- | --- |
+| 1. A write or batch that returned `Ok` survives any crash of the process. | `crash.rs`: `acknowledged_writes_survive_and_unsynced_ones_are_lost`, `concurrent_writers_with_racing_checkpoints_recover_a_prefix`, `many_crash_generations_keep_acknowledged_writes_and_whole_batches`; `write.rs`: `writes_round_trip_and_survive_a_reopen`, `concurrent_writers_match_the_oracle_live_and_after_reopen` |
+| 2. A batch is wholly present or wholly absent after any crash. | `crash.rs`: `a_checkpoint_makes_its_unsynced_effects_durable_first`, `concurrent_writers_with_racing_checkpoints_recover_a_prefix`, `many_crash_generations_keep_acknowledged_writes_and_whole_batches` |
+| 3. After recovery, the state equals the replay of the durable WAL history: it contains no write that the WAL lacks. | `crash.rs`: `a_checkpoint_makes_its_unsynced_effects_durable_first` and `many_crash_generations_keep_acknowledged_writes_and_whole_batches` (the durable-WAL check and the state check); `batch.rs`: `batches_and_single_writes_keep_the_wal_order` (without a crash) |
+| 4. For each key, the recovered value is the value of the highest sequence for that key in the durable WAL, which is also the order that live readers saw. | `batch.rs`: `batches_and_single_writes_keep_the_wal_order`; `write.rs`: `concurrent_writers_match_the_oracle_live_and_after_reopen` |
+| 5. A torn WAL tail loses only records that were never acknowledged. | `crash.rs`: `a_torn_record_at_every_byte_is_repaired_away`, `many_crash_generations_keep_acknowledged_writes_and_whole_batches` (random `written`) |
+| 6. A reopen with limits different from the store's is refused. | `open.rs`: `a_reopen_with_other_limits_is_refused` |
+
+Other behaviour with tests:
+
+| Behaviour | Tests |
+| --- | --- |
+| Create, close, and reopen; a WAL written beside the tree is replayed, including a batch | `open.rs`: `create_close_and_reopen`, `a_wal_written_beside_the_tree_is_replayed` |
+| A second open is `Locked`; a WAL with a gap is `Error::Wal(Gap)` | `open.rs`: `a_second_open_is_locked`, `a_stale_wal_with_a_gap_is_refused` |
+| Writes over the limits take no sequence; a closed WAL surfaces as `Error::Wal(Closed)` | `write.rs`: `writes_past_the_limits_are_rejected_before_logging`, `a_closed_wal_surfaces_as_a_wal_error` |
+| Batch semantics | `batch.rs`: `a_batch_round_trips_with_one_sequence`, `an_empty_batch_appends_nothing`, `an_invalid_operation_rejects_the_batch_before_logging`, `the_last_operation_per_key_wins` |
+| Checkpoints, truncation, policy, snapshots, writer latency | `checkpoint.rs`: all six tests |
+| A garbage page in `tree.bf` after a crash is released | `crash.rs`: `a_garbage_tree_page_after_a_crash_is_released` |
+
+### Read consistency
+
+What a concurrent reader can observe. The crate documentation
+(`crates/engine/src/lib.rs`, "Consistency") states the same contract for
+callers.
+
+**Guaranteed.**
+
+- **Single keys are linearizable.** A `get` returns the latest applied
+  write to its key. A write's sequence is assigned and applied under the
+  key's leaf lock, and the writer gate keeps a batch and a single write to
+  the same key in sequence order, so the per-key order of application is
+  the WAL order.
+- **Each leaf is read consistently.** A scan holds a leaf's read lock while
+  it reads the leaf's page and mini-page, so it never sees a torn or
+  half-merged leaf, and keys come out in order.
+- **Recovery is a prefix of the durable WAL**, so after a crash every batch
+  is whole ([Db guarantees](#db-guarantees)).
+
+**Not guaranteed.**
+
+- **Batch visibility.** `Db::write` applies a batch's operations one leaf
+  at a time under the exclusive writer gate, which excludes only other
+  writers. Readers take no gate. With `a` and `b` both 1, a reader of a
+  batch that sets both to 2 can see `a = 2` and `b = 1`, a state no history
+  contains. The window is the batch's apply time, so the anomaly is rare
+  and nondeterministic.
+- **Scans across leaves.** A scan reads one leaf, releases it, and then
+  reads the next, so writes run between leaves. If a writer sets `x = 1`
+  and then `y = 1` while a scan is between `x`'s leaf and `y`'s leaf, the
+  scan returns `x = 0` and `y = 1`: it sees the later write and misses the
+  earlier one. A scan can also see part of a batch. The window is the whole
+  scan, so over a large range skew is likely, not rare.
+
+**Why.** Readers take no global lock and never wait for writers, batches,
+or long scans; this is the tree's design (plans 0012 and 0016). The
+behaviour is per-key read committed.
+
+**Compared with RocksDB and LevelDB.** RocksDB publishes a write batch's
+sequence only after the whole batch is in the memtable, so plain reads see
+all of a batch or none of it, and each iterator reads from an implicit
+snapshot taken when it is created; LevelDB iterators do the same. peppydb is
+weaker on both, so code written against those expectations is silently
+wrong: an index entry visible before its record, a moved key seen twice or
+not at all, an aggregate that never existed. `Db::write_snapshot` is the
+consistent point-in-time copy today.
+
+**Options considered.**
+
+| Option | What it gives | Cost |
+| --- | --- | --- |
+| Readers take the writer gate shared | Batches look atomic to readers | Every read touches a shared lock line; a long scan blocks batches, or batches block scans. Undoes "readers never block". Not recommended |
+| A visibility watermark | Readers see only effects at or below a published "fully applied" sequence | Needs records tagged by sequence and newer versions hidden: in effect the next row |
+| Multi-version reads (MVCC) | Isolated batches and snapshot-consistent scans: a reader picks a sequence and sees exactly that state, as RocksDB does | Sequence-tagged versions in mini-pages and pages, a format change, garbage collection of old versions, and space |
+
+Snapshot reads are expected before phase 2 replication, which serves reads
+from replicas and follows ZippyDB's RocksDB-based model. They would be
+their own stack after plan 0023; the recommended design is MVCC.
+
+### Db: not guaranteed, and limits
+
+- **Batch isolation and snapshot-consistent scans.** See
+  [Read consistency](#read-consistency).
+- **Durability of what a reader saw.** A value that a reader saw before
+  its writer returned can be lost in a crash.
+- **Every device corruption of a committed page.** Plan 0017's page
+  CRC32C detects a damaged body, but a corrupted header that makes a
+  committed page look uncommitted or superseded is released on open
+  ([persistence](bf-tree-persistence.md#known-limit-the-header-of-a-failed-page-is-trusted)).
+- **A batch after a store error.** If `Tree::apply` fails with a store error
+  after it started writing, the batch can be partly applied in the live
+  tree. `write` returns the error without waiting. If its record becomes
+  durable, a reopen applies it whole. The caller should reopen.
+- **After a WAL failure** writes fail until a reopen, and applied but
+  unsynced writes stay visible until then.
+- **Batches serialize writers** while they append and apply.
+- **The limit-mismatch mapping matches a message.** `Error::Options` for
+  different limits depends on the exact `InvalidStore` text in `bf-tree`.
+  If that text changes, the error becomes `Error::Tree(InvalidStore)`, and
+  `a_reopen_with_other_limits_is_refused` fails.
+- **A failed background checkpoint is reported only by `close`.** Writers
+  do not see it. The failed checkpoint already moved
+  `bytes_at_checkpoint`, so the byte trigger waits for another threshold;
+  the interval trigger retries if something new was applied.
+- **Policy atomics are relaxed hints.** Concurrent checkpoints store
+  `bytes_at_checkpoint` and `applied_at_checkpoint` without ordering
+  between them, so a slower checkpoint can store an older value. The effect
+  is an extra or a later policy checkpoint, never a correctness problem. A
+  kick before the policy thread's handle is set does not unpark it; the
+  thread sees the grown bytes at its next wakeup, at the latest one interval
+  later.
+- **Measurements are from debug builds on macOS.** Plan 0023 measures the
+  engine on Linux.
+
+### Db extension points
+
+- **Plan 0022** adds `Mode::External`, an error for the wrong mode,
+  `Db::apply`, `Db::checkpoint_with`, and `Db::install_snapshot`. It makes
+  the WAL optional in `Shared` and skips the policy thread in external
+  mode. It must not change the standalone write path, the policy, or the
+  recovery order.
+- **Plan 0023** adds an I/O option for `FileStore::create` and `open`, and
+  engine benchmarks.
+- **Phase 2** uses external mode. A `put` that returns its sequence,
+  per-call durability options, or a read-after-durable option would be
+  additive.
+- `Options` gains fields, `Error` gains variants, and `Db` gains methods.
+  None of these reshape what plan 0021 introduced.
 
 ## Relationship to sources
 
@@ -612,6 +1391,12 @@ the sync), and that segment creation syncs the file and the directory.
   with their sequence, a separate condition variable for durability
   waiters, and no timer by default.
 - The [RocksDB overview](../references.md#rocksdb-overview) describes the
-  write-ahead log's role in an embedded engine.
+  write-ahead log's role in an embedded engine, and the database API, write
+  batches, and WAL recovery that the `Db` follows in shape. The writer
+  gate, the atomic checkpoint policy, and WAL-before-data through the
+  tree's pre-commit hook are peppydb-specific.
+- The Microsoft implementation's
+  [`src/snapshot.rs`](https://github.com/microsoft/bf-tree/blob/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/snapshot.rs)
+  recovers by logical replay, as `Db::open` does through `Tree::apply`.
 - RFC 3720 (iSCSI), §B.4, gives the CRC32C check value
   `crc32c(b"123456789") == 0xE306_9283`.
