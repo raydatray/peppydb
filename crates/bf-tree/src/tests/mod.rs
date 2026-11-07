@@ -7,6 +7,7 @@ mod buffered;
 mod concurrent;
 mod config;
 mod contention;
+mod damage;
 mod disk;
 mod evict;
 mod frames;

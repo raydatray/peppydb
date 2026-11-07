@@ -598,7 +598,7 @@ Resolved:
 - [x] Diff 4: superblock codec.
 - [x] Diff 5: committed state in both backends.
 - [x] Diff 6: page-number addressing, leaf stamps, and checksums in the tree.
-- [ ] Diff 7: open fixtures and damaged pages.
+- [x] Diff 7: open fixtures and damaged pages.
 - [ ] Diff 8: design documents and roadmap.
 - [ ] Stack-wide verification.
 
@@ -629,10 +629,14 @@ Resolved:
   atomic that `fetch_update` bounds at `u32::MAX`. The limit test checks
   only the rejection: allocating an ID near the limit grows the leaf table
   to billions of entries (an early version of the test exhausted memory).
-- **`open` bounds leaf IDs by the page count.** Confirmed for this stack:
-  every live leaf holds a distinct page, and a hole is an ID whose page a
-  later leaf reused, so every stamp is below `page_count()`. Plan 0018 must
-  recheck the bound with fresh-page writes.
+- **Leaf IDs can exceed the page count, so `open` uses a generous bound.**
+  The Agent notes' bound `leaf < page_count()` is wrong: a discarded split
+  half takes a leaf ID, its page is freed, and the next leaf reuses that
+  page, so IDs run ahead of pages (found by the diff 7 hole fixture). `open`
+  rejects IDs at or above `max(4 * page_count, 65536)` before it sizes any
+  table, which stops a damaged stamp from forcing a table of billions of
+  entries. The exact bound has no correctness role; plan 0018 rechecks it
+  with fresh-page writes.
 - **The counting test store records leaves from stamps.** It sees page
   numbers, so it reads the leaf stamp of each written page; the tests that
   assert which leaves were written are unchanged.

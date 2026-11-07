@@ -48,9 +48,11 @@ impl Tree {
         config.validate()?;
 
         let page_count = store.page_count();
-        // Leaf IDs from disk are bounded before any table grows: every live
-        // leaf holds a distinct page, and a hole was once a leaf whose page
-        // a later leaf reused, so every ID is below the page count.
+        // Leaf IDs from disk are bounded before any table grows, so a damaged
+        // stamp cannot make open allocate a huge table. IDs can exceed the
+        // page count (a discarded split half uses an ID, and its page is
+        // reused), but not by more than a generous margin.
+        let max_leaf = page_count.saturating_mul(4).max(1 << 16);
         let mut pages: Vec<Option<PageNumber>> = Vec::new();
         let mut leaves = Vec::new();
         let mut bytes = vec![0; store.page_size()];
@@ -80,9 +82,9 @@ impl Tree {
             let id = page
                 .leaf()
                 .ok_or(TreeError::InconsistentLeaves("a stored page names no leaf"))?;
-            if id.raw() >= page_count {
+            if id.raw() >= max_leaf {
                 return Err(TreeError::InconsistentLeaves(
-                    "a stored page names a leaf beyond the page count",
+                    "a stored page names an implausibly large leaf ID",
                 ));
             }
             if pages.len() <= id.index() {
