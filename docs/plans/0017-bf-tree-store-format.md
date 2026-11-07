@@ -597,7 +597,7 @@ Resolved:
 - [x] Diff 3: leaf stamp and page checksum in `bf-tree-page`.
 - [x] Diff 4: superblock codec.
 - [x] Diff 5: committed state in both backends.
-- [ ] Diff 6: page-number addressing, leaf stamps, and checksums in the tree.
+- [x] Diff 6: page-number addressing, leaf stamps, and checksums in the tree.
 - [ ] Diff 7: open fixtures and damaged pages.
 - [ ] Diff 8: design documents and roadmap.
 - [ ] Stack-wide verification.
@@ -607,6 +607,35 @@ Resolved:
 - 2026-11-06: renamed `Slot` to `PageNumber` (review feedback).
 - 2026-11-06: option B with split leaf/CRC field; page CRC32C in scope; CRC
   source is the `crc32c` crate (review feedback).
+- **Diff 4 kept `FileStore`'s one-page layout for one diff.** `encode`
+  takes any block that holds the 56 encoded bytes, so the existing first
+  page held a version 2 copy until diff 5 moved to the 8 KiB area. This
+  kept diffs 4 and 5 separately buildable.
+- **`verify_stored_checksum(&[u8])` in `bf-tree-page`.** `load_base` and
+  `open` check bytes that may not be a valid page, so the crate also
+  exports a free function over raw bytes that reads only the `crc` field.
+- **`open` reports `CorruptPage` from diff 6.** A checksum failure cannot
+  name a leaf, because the leaf stamp is not trusted yet, so
+  `TreeError::CorruptPage` arrived with the page-number diff rather than
+  in diff 7. A sealed page that fails validation is also `CorruptPage`.
+- **`LeafMap::discard` zeroes the page it frees.** Without zeroing on
+  `free`, a split that failed after writing its right half would leave a
+  stamped page that the next `open` reads as an extra leaf. `discard`
+  writes a zero page, then frees it: a second `store.write` call besides
+  `write_through`, on an error path only. Plan 0018's selection by write
+  sequence replaces it.
+- **Leaf IDs come from an atomic counter in `LeafMap`.** The store no longer
+  hands out leaf IDs, so `LeafMap::alloc` takes the next index from an
+  atomic that `fetch_update` bounds at `u32::MAX`. The limit test checks
+  only the rejection: allocating an ID near the limit grows the leaf table
+  to billions of entries (an early version of the test exhausted memory).
+- **`open` bounds leaf IDs by the page count.** Confirmed for this stack:
+  every live leaf holds a distinct page, and a hole is an ID whose page a
+  later leaf reused, so every stamp is below `page_count()`. Plan 0018 must
+  recheck the bound with fresh-page writes.
+- **The counting test store records leaves from stamps.** It sees page
+  numbers, so it reads the leaf stamp of each written page; the tests that
+  assert which leaves were written are unchanged.
 
 ## Agent notes
 

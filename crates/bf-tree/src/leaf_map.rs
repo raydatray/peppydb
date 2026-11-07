@@ -5,8 +5,12 @@ use bf_tree_circular_buffer::{Block, CircularBuffer, Victim};
 use bf_tree_mini_page::{BufferError, Mini, MiniPage, RefBits, SizeClasses, WriteOutcome};
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
-use bf_tree_store::PageStore;
+use bf_tree_store::{PageNumber, PageStore};
+use bf_tree_sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
+
+/// Raw value in the page table for "no stored page".
+const NO_PAGE: u64 = u64::MAX;
 
 /// The leaf mapping table: one reader-writer lock per stable [`LeafId`].
 ///
@@ -16,10 +20,20 @@ use bf_tree_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 /// consistent. Base pages are not resident: an access loads one into a
 /// thread-local scratch buffer. A leaf's mini-page, if any, lives in the
 /// circular buffer and is reached through its entry.
+///
+/// A leaf's base page lives at a page number that the page table records;
+/// the stored page names its leaf in its header (plan 0017).
 #[derive(Debug)]
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
     entries: Table<RwLock<LeafEntry>>,
+    /// Page number of each leaf's stored page, or `NO_PAGE`. Written under
+    /// the leaf's exclusive lock; read under either lock. Beside `entries`,
+    /// not in `LeafEntry`, to keep the entry within a cache line.
+    pages: Table<AtomicU64>,
+    /// The next leaf ID. Leaf IDs are append-only within a process: holes
+    /// are never reused.
+    next: AtomicUsize,
     /// Every mini-page block. Its mutex is innermost: it may be taken under
     /// a leaf lock, and it never waits for one.
     pub(super) circular_buffer: CircularBuffer,
@@ -28,7 +42,8 @@ pub(super) struct LeafMap {
 
 #[derive(Debug, Default)]
 pub(super) struct LeafEntry {
-    /// The slot holds no page.
+    /// The ID names no leaf: a hole left by a leaf that was never written,
+    /// or a discarded split half.
     freed: bool,
     /// A circular-buffer block holding this leaf's mini-page, or, without
     /// `refs`, its full page.
@@ -194,23 +209,31 @@ impl LeafWrite<'_> {
 }
 
 impl LeafMap {
-    /// Map the store's existing slots without loading any of them.
-    /// `freed` marks the slots that hold no page.
+    /// Map existing leaves without loading any of them: `pages[i]` is leaf
+    /// `i`'s page number, or `None` for a hole.
     pub(super) fn new(
         store: Box<dyn PageStore>,
-        freed: impl IntoIterator<Item = bool>,
+        pages: impl IntoIterator<Item = Option<PageNumber>>,
         circular_buffer: CircularBuffer,
         classes: SizeClasses,
     ) -> Self {
         let entries: Table<RwLock<LeafEntry>> = Table::new();
-        for (index, freed) in freed.into_iter().enumerate() {
+        let table: Table<AtomicU64> = Table::new();
+        for (index, page) in pages.into_iter().enumerate() {
             entries.grow_to(index + 1);
-            entries.get(index).expect("just grown").write().freed = freed;
+            table.grow_to(index + 1);
+            entries.get(index).expect("just grown").write().freed = page.is_none();
+            table
+                .get(index)
+                .expect("just grown")
+                .store(page.map_or(NO_PAGE, PageNumber::raw), Ordering::Relaxed);
         }
 
         Self {
             store,
+            next: AtomicUsize::new(entries.len()),
             entries,
+            pages: table,
             circular_buffer,
             classes,
         }
@@ -220,7 +243,7 @@ impl LeafMap {
     /// `config`.
     pub(super) fn for_config(
         store: Box<dyn PageStore>,
-        freed: impl IntoIterator<Item = bool>,
+        pages: impl IntoIterator<Item = Option<PageNumber>>,
         config: &TreeConfig,
     ) -> Result<Self, TreeError> {
         let classes = config.size_classes()?;
@@ -230,10 +253,10 @@ impl LeafMap {
             u32::from(config.second_chance_percent),
         )
         .map_err(|_| TreeError::InvalidConfig("invalid circular-buffer budget"))?;
-        Ok(Self::new(store, freed, circular_buffer, classes))
+        Ok(Self::new(store, pages, circular_buffer, classes))
     }
 
-    /// Number of slots, live or freed; IDs are `0..len()`.
+    /// Number of leaf IDs, live or holes; IDs are `0..len()`.
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -356,14 +379,13 @@ impl LeafMap {
             .ok_or(TreeError::UnknownLeaf(id))
     }
 
-    /// Whether `id` is an allocated slot that holds a page. Takes the entry's
-    /// shared lock briefly.
+    /// Whether `id` names a live leaf. Takes the entry's shared lock briefly.
     #[cfg(test)]
     pub(super) fn is_live(&self, id: LeafId) -> bool {
         self.entry(id).is_ok_and(|entry| !entry.read().freed)
     }
 
-    /// Lock leaf `id` shared. `UnknownLeaf` if it is not a live slot.
+    /// Lock leaf `id` shared. `UnknownLeaf` if it is not a live leaf.
     pub(super) fn read(&self, id: LeafId) -> Result<LeafRead<'_>, TreeError> {
         let entry = self.entry(id)?.read();
         if entry.freed {
@@ -372,7 +394,7 @@ impl LeafMap {
         Ok(LeafRead { id, entry })
     }
 
-    /// Lock leaf `id` exclusively. `UnknownLeaf` if it is not a live slot.
+    /// Lock leaf `id` exclusively. `UnknownLeaf` if it is not a live leaf.
     pub(super) fn write(&self, id: LeafId) -> Result<LeafWrite<'_>, TreeError> {
         let entry = self.entry(id)?.write();
         if entry.freed {
@@ -381,24 +403,51 @@ impl LeafMap {
         Ok(LeafWrite { id, entry })
     }
 
-    /// Allocate a fresh slot and return it locked exclusively. It is
-    /// unreachable until a separator names it.
+    /// Allocate a fresh leaf ID with no stored page and return it locked
+    /// exclusively. It is unreachable until a separator names it. Its first
+    /// write-through allocates its page.
     pub(super) fn alloc(&self) -> Result<LeafWrite<'_>, TreeError> {
-        let id = self.store.alloc()?;
-        self.entries.grow_to(id.index() + 1);
+        let index = self
+            .next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |index| {
+                (index < MAX_LEAVES).then_some(index + 1)
+            })
+            .map_err(|_| TreeError::TooManyLeaves)?;
+        self.entries.grow_to(index + 1);
+        self.pages.grow_to(index + 1);
+        let id = LeafId::from_index(index);
         let mut entry = self.entry(id)?.write();
         *entry = LeafEntry::default();
+        self.pages
+            .get(index)
+            .expect("a known leaf")
+            .store(NO_PAGE, Ordering::Release);
         Ok(LeafWrite { id, entry })
     }
 
-    /// Return a fresh, never-reachable slot to the store, for a split that
-    /// failed after `alloc`.
+    /// Give up a fresh, never-reachable leaf, for a split that failed after
+    /// `alloc`. A written page is zeroed and freed, so a later `open` does
+    /// not read it as a leaf.
     pub(super) fn discard(&self, mut leaf: LeafWrite<'_>) -> Result<(), TreeError> {
-        // Free the slot first: if that fails, the entry stays live and the
-        // slot keeps what was written, rather than claiming a free slot.
-        self.store.free(leaf.id)?;
+        if let Some(page_number) = self.page_of(leaf.id) {
+            // Free the page only once zeroed: if a step fails, the entry
+            // stays live and keeps its page.
+            self.store
+                .write(page_number, &vec![0; self.store.page_size()])?;
+            self.store.free(page_number)?;
+            self.pages
+                .get(leaf.id.index())
+                .expect("a known leaf")
+                .store(NO_PAGE, Ordering::Release);
+        }
         leaf.entry.freed = true;
         Ok(())
+    }
+
+    /// The page number of leaf `id`'s stored page, if it has one.
+    pub(super) fn page_of(&self, id: LeafId) -> Option<PageNumber> {
+        let raw = self.pages.get(id.index())?.load(Ordering::Acquire);
+        PageNumber::new(raw)
     }
 
     /// Read leaf's base page into `buf` and check its header. This is the
@@ -414,7 +463,17 @@ impl LeafMap {
         buf: &'s mut [u8],
     ) -> Result<&'s mut Page, TreeError> {
         let id = leaf.id();
-        self.store.read(id, buf)?;
+        let page_number = self.page_of(id).ok_or(TreeError::CorruptLeaf {
+            id,
+            reason: "no stored page",
+        })?;
+        self.store.read(page_number, buf)?;
+        if !bf_tree_page::verify_stored_checksum(buf) {
+            return Err(TreeError::CorruptLeaf {
+                id,
+                reason: "checksum mismatch",
+            });
+        }
         let corrupt = |error| match error {
             PageError::Corrupt(reason) => TreeError::CorruptLeaf { id, reason },
             other => TreeError::Page(other),
@@ -423,14 +482,24 @@ impl LeafMap {
             Page::validate(buf).map_err(corrupt)?;
         }
         Page::check_header(buf, buf.len()).map_err(corrupt)?;
+        let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(buf).expect("checked above");
+        if page.leaf() != Some(id) {
+            return Err(TreeError::CorruptLeaf {
+                id,
+                reason: "names another leaf",
+            });
+        }
 
-        Ok(zerocopy::FromBytes::mut_from_bytes(buf).expect("checked above"))
+        Ok(page)
     }
 
-    /// Write base pages to the store. The caller must hold the exclusive lock
-    /// of every leaf in `pages` and pass the reachable leaf first. The others
-    /// are written before it, so an error before the last write leaves the
-    /// reachable leaf's stored page unchanged. Takes no tree-level lock.
+    /// Write base pages to the store: stamp each with its leaf, seal its
+    /// checksum, and write it to the leaf's page, allocating one on the
+    /// leaf's first write. This is the only page write in the tree. The
+    /// caller must hold the exclusive lock of every leaf in `pages` and pass
+    /// the reachable leaf first. The others are written before it, so an
+    /// error before the last write leaves the reachable leaf's stored page
+    /// unchanged. Takes no tree-level lock.
     pub(super) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<(), TreeError> {
         let (first, rest) = pages.split_first_mut().expect("at least one page");
         for (id, bytes) in rest.iter_mut().chain([first]) {
@@ -438,7 +507,22 @@ impl LeafMap {
                 self.entry(*id)?.try_read().is_none(),
                 "the caller holds the leaf's exclusive lock"
             );
-            self.store.write(*id, bytes)?;
+            let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(bytes)
+                .map_err(|_| TreeError::Page(PageError::Corrupt("buffer is not a page")))?;
+            page.set_leaf(Some(*id))?;
+            page.seal(); // the last header change
+            let page_number = match self.page_of(*id) {
+                Some(page_number) => page_number, // in place; plan 0018 changes this
+                None => {
+                    let page_number = self.store.alloc()?;
+                    self.pages
+                        .get(id.index())
+                        .expect("a known leaf")
+                        .store(page_number.raw(), Ordering::Release);
+                    page_number
+                }
+            };
+            self.store.write(page_number, bytes)?;
         }
         Ok(())
     }
@@ -528,7 +612,24 @@ impl LeafMap {
         self.write_through(&mut [(leaf.id(), bytes)])
     }
 
-    /// Allocate a slot and return its ID, unlocked and unreachable.
+    /// Each leaf's page number, or `None` for a hole: what `LeafMap::new`
+    /// takes to map the same store afresh.
+    pub(super) fn page_table(&self) -> Vec<Option<PageNumber>> {
+        (0..self.len())
+            .map(|index| {
+                let id = LeafId::from_index(index);
+                self.is_live(id).then(|| self.page_of(id)).flatten()
+            })
+            .collect()
+    }
+
+    /// Make the next allocated leaf ID `next`, to test the 32-bit limit
+    /// without allocating billions of leaves.
+    pub(super) fn set_next_leaf(&self, next: usize) {
+        self.next.store(next, Ordering::Relaxed);
+    }
+
+    /// Allocate a leaf ID and return it, unlocked and unreachable.
     pub(super) fn alloc_id(&self) -> Result<LeafId, TreeError> {
         Ok(self.alloc()?.id())
     }
@@ -549,19 +650,19 @@ impl PageStore for ReleasedStore {
     fn page_size(&self) -> usize {
         unreachable!("released store")
     }
-    fn slots(&self) -> u64 {
+    fn page_count(&self) -> u64 {
         unreachable!("released store")
     }
-    fn alloc(&self) -> Result<LeafId, bf_tree_store::StoreError> {
+    fn alloc(&self) -> Result<PageNumber, bf_tree_store::StoreError> {
         unreachable!("released store")
     }
-    fn free(&self, _: LeafId) -> Result<(), bf_tree_store::StoreError> {
+    fn free(&self, _: PageNumber) -> Result<(), bf_tree_store::StoreError> {
         unreachable!("released store")
     }
-    fn read(&self, _: LeafId, _: &mut [u8]) -> Result<(), bf_tree_store::StoreError> {
+    fn read(&self, _: PageNumber, _: &mut [u8]) -> Result<(), bf_tree_store::StoreError> {
         unreachable!("released store")
     }
-    fn write(&self, _: LeafId, _: &[u8]) -> Result<(), bf_tree_store::StoreError> {
+    fn write(&self, _: PageNumber, _: &[u8]) -> Result<(), bf_tree_store::StoreError> {
         unreachable!("released store")
     }
     fn sync(&self) -> Result<(), bf_tree_store::StoreError> {
@@ -577,6 +678,9 @@ impl PageStore for ReleasedStore {
         unreachable!("released store")
     }
 }
+
+/// Leaf IDs below this fit a stored page's 32-bit leaf stamp.
+const MAX_LEAVES: usize = u32::MAX as usize;
 
 /// The largest legal page; scratch buffers are sliced to the tree's size.
 pub(super) const MAX_PAGE: usize = 4096;

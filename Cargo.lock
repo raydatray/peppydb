@@ -76,7 +76,6 @@ dependencies = [
 name = "bf-tree-store"
 version = "0.1.0"
 dependencies = [
- "bf-tree-node-id",
  "bf-tree-page",
  "bf-tree-sync",
  "crc32c",

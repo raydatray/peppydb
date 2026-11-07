@@ -1,26 +1,28 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{PageStore, State, StoreError, Superblock, check_buffer, check_commit_order};
-use bf_tree_node_id::LeafId;
+use super::{
+    PageNumber, PageStore, State, StoreError, Superblock, check_buffer, check_commit_order,
+};
 use bf_tree_sync::{Mutex, Table};
 
-/// An in-memory [`PageStore`]: one boxed buffer per slot and a free list.
+/// An in-memory [`PageStore`]: one boxed buffer per page and a free list.
 ///
-/// This is the fast test backend and the store behind `Tree::in_memory`. `sync` is
-/// a no-op; nothing outlives the value. A read or write locks only its slot.
+/// This is the fast test backend and the store behind `Tree::in_memory`.
+/// `sync` is a no-op; nothing outlives the value. A read or write locks only
+/// its page.
 #[derive(Debug)]
 pub struct MemStore {
     superblock: Superblock,
-    slots: Table<MemSlot>,
-    /// Freed slot indices, reused last-in first-out. Also serializes growth.
+    pages: Table<MemPage>,
+    /// Freed page indices, reused last-in first-out. Also serializes growth.
     free: Mutex<Vec<usize>>,
     state: Mutex<State>,
 }
 
 #[derive(Debug, Default)]
-struct MemSlot {
-    page: Mutex<Box<[u8]>>,
-    /// Whether the slot is on the free list.
+struct MemPage {
+    bytes: Mutex<Box<[u8]>>,
+    /// Whether the page is on the free list.
     freed: AtomicBool,
 }
 
@@ -31,17 +33,17 @@ impl MemStore {
 
         Ok(Self {
             superblock,
-            slots: Table::new(),
+            pages: Table::new(),
             free: Mutex::new(Vec::new()),
             state: Mutex::new(State::default()),
         })
     }
 
-    fn slot(&self, id: LeafId) -> Result<&MemSlot, StoreError> {
-        usize::try_from(id.raw())
-            .ok()
-            .and_then(|index| self.slots.get(index))
-            .ok_or(StoreError::UnknownSlot(id))
+    fn page(&self, page_number: PageNumber) -> Result<&MemPage, StoreError> {
+        page_number
+            .index()
+            .and_then(|index| self.pages.get(index))
+            .ok_or(StoreError::UnknownPage(page_number))
     }
 }
 
@@ -50,59 +52,58 @@ impl PageStore for MemStore {
         self.superblock.page_size
     }
 
-    fn slots(&self) -> u64 {
-        self.slots.len() as u64
+    fn page_count(&self) -> u64 {
+        self.pages.len() as u64
     }
 
-    fn alloc(&self) -> Result<LeafId, StoreError> {
-        // Allocate the page before taking the free-list mutex.
-        let page = vec![0; self.superblock.page_size].into_boxed_slice();
+    fn alloc(&self) -> Result<PageNumber, StoreError> {
+        // Allocate the buffer before taking the free-list mutex.
+        let bytes = vec![0; self.superblock.page_size].into_boxed_slice();
         let mut free = self.free.lock();
         if let Some(index) = free.pop() {
-            let slot = self.slots.get(index).expect("freed slots exist");
-            slot.freed.store(false, Ordering::Release);
+            let page = self.pages.get(index).expect("freed pages exist");
+            page.freed.store(false, Ordering::Release);
 
-            return Ok(LeafId::from_index(index));
+            return Ok(page_number(index));
         }
 
-        let index = self.slots.len();
-        self.slots.grow_to(index + 1);
-        *self.slots.get(index).expect("just grown").page.lock() = page;
+        let index = self.pages.len();
+        self.pages.grow_to(index + 1);
+        *self.pages.get(index).expect("just grown").bytes.lock() = bytes;
 
-        Ok(LeafId::from_index(index))
+        Ok(page_number(index))
     }
 
-    fn free(&self, id: LeafId) -> Result<(), StoreError> {
-        let slot = self.slot(id)?;
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError> {
+        let page = self.page(page_number)?;
         let mut free = self.free.lock();
-        if slot.freed.load(Ordering::Acquire) {
-            return Err(StoreError::FreedSlot(id));
+        if page.freed.load(Ordering::Acquire) {
+            return Err(StoreError::FreedPage(page_number));
         }
 
-        slot.page.lock().fill(0);
-        slot.freed.store(true, Ordering::Release);
-        free.push(id.index());
+        page.freed.store(true, Ordering::Release);
+        free.push(page_number.index().expect("a known page"));
 
         Ok(())
     }
 
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
-        let slot = self.slot(id)?;
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
+        let page = self.page(page_number)?;
         check_buffer(self.superblock.page_size, buf)?;
 
-        buf.copy_from_slice(&slot.page.lock());
+        buf.copy_from_slice(&page.bytes.lock());
 
         Ok(())
     }
 
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        let slot = self.slot(id)?;
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
+        let page = self.page(page_number)?;
         check_buffer(self.superblock.page_size, buf)?;
-        if slot.freed.load(Ordering::Acquire) {
-            return Err(StoreError::FreedSlot(id));
+        if page.freed.load(Ordering::Acquire) {
+            return Err(StoreError::FreedPage(page_number));
         }
 
-        slot.page.lock().copy_from_slice(buf);
+        page.bytes.lock().copy_from_slice(buf);
 
         Ok(())
     }
@@ -125,4 +126,8 @@ impl PageStore for MemStore {
         *current = *state;
         Ok(())
     }
+}
+
+fn page_number(index: usize) -> PageNumber {
+    PageNumber::new(index as u64).expect("page counts stay below u64::MAX")
 }

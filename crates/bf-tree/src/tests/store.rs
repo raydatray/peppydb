@@ -19,7 +19,7 @@ fn entry_lock_is_at_most_64_bytes() {
 fn a_new_tree_stores_its_one_leaf_at_once() {
     let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
     assert_eq!(tree.leaf_count(), 1);
-    assert_eq!(tree.leaves.store().slots(), 1);
+    assert_eq!(tree.leaves.store().page_count(), 1);
     let stored = stored_pages(&tree);
     let page = Page::validate(&stored[0]).unwrap();
     assert!(page.is_empty());
@@ -42,15 +42,16 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
     tree.flush().unwrap();
     let leaves = tree.leaf_count();
     assert!(leaves > 2);
-    assert_eq!(tree.leaves.store().slots() as usize, leaves);
+    assert_eq!(tree.leaves.store().page_count() as usize, leaves);
     assert_eq!(stored_pages(&tree), copied_pages(&tree));
 
     // Map the store afresh, keeping the inner nodes.
+    let pages = tree.leaves.page_table();
     let store = tree.leaves.into_store();
     let tree = Tree::assemble(
         tree.config,
         tree.inner,
-        LeafMap::for_config(store, (0..leaves).map(|_| false), &tree.config).unwrap(),
+        LeafMap::for_config(store, pages, &tree.config).unwrap(),
     );
     let key = 7u32.to_be_bytes();
     assert_eq!(tree.get(&key), Ok(Some(b"v".to_vec())));
@@ -88,7 +89,7 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
     let tree = Tree::assemble(
         tree.config,
         tree.inner,
-        LeafMap::for_config(store, [true], &tree.config).unwrap(),
+        LeafMap::for_config(store, [None], &tree.config).unwrap(),
     );
     assert_eq!(
         tree.leaves.page_copy(leaf(0)).err(),
@@ -101,7 +102,8 @@ fn unknown_and_freed_leaves_are_rejected_without_panicking() {
 fn corrupt_stored_leaves_are_reported_on_load() {
     let config = config(256, 128, 8, 16);
     let store = MemStore::new(Superblock::from(&config)).unwrap();
-    let id = store.alloc().unwrap();
+    let page_number = store.alloc().unwrap();
+    let id = leaf(0);
     let mut bytes = vec![0; 256];
     Page::init_with_fences(
         &mut bytes,
@@ -112,12 +114,13 @@ fn corrupt_stored_leaves_are_reported_on_load() {
     )
     .unwrap();
     bytes[2..4].copy_from_slice(&512u16.to_le_bytes());
-    store.write(id, &bytes).unwrap();
+    stamp(&mut bytes, 0);
+    store.write(page_number, &bytes).unwrap();
 
     let tree = Tree::assemble(
         config,
         Inner::new(config.inner_capacity, ChildRef::Leaf(id)),
-        LeafMap::for_config(Box::new(store), [false], &config).unwrap(),
+        LeafMap::for_config(Box::new(store), [Some(page_number)], &config).unwrap(),
     );
     assert_eq!(
         tree.get(b"a"),
@@ -136,11 +139,12 @@ fn a_split_loads_the_left_leaf_from_the_store() {
     }
     tree.flush().unwrap();
     // Map the store of the nearly full leaf afresh, then force a split.
+    let pages = tree.leaves.page_table();
     let store = tree.leaves.into_store();
     let tree = Tree::assemble(
         tree.config,
         tree.inner,
-        LeafMap::for_config(store, [false], &tree.config).unwrap(),
+        LeafMap::for_config(store, pages, &tree.config).unwrap(),
     );
 
     tree.put(&7u32.to_be_bytes(), &[1; 16]).unwrap();
@@ -190,22 +194,27 @@ impl PageStore for Counting {
     fn page_size(&self) -> usize {
         self.inner.page_size()
     }
-    fn slots(&self) -> u64 {
-        self.inner.slots()
+    fn page_count(&self) -> u64 {
+        self.inner.page_count()
     }
-    fn alloc(&self) -> Result<LeafId, StoreError> {
+    fn alloc(&self) -> Result<PageNumber, StoreError> {
         self.inner.alloc()
     }
-    fn free(&self, id: LeafId) -> Result<(), StoreError> {
-        self.inner.free(id)
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError> {
+        self.inner.free(page_number)
     }
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
         self.io.reads.fetch_add(1, Ordering::Relaxed);
-        self.inner.read(id, buf)
+        self.inner.read(page_number, buf)
     }
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
-        self.io.writes.lock().unwrap().push(id);
-        self.inner.write(id, buf)
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
+        // Record the leaf the page belongs to, from its stamp.
+        let leaf = <Page as zerocopy::FromBytes>::ref_from_bytes(buf)
+            .ok()
+            .and_then(Page::leaf)
+            .expect("written pages are stamped");
+        self.io.writes.lock().unwrap().push(leaf);
+        self.inner.write(page_number, buf)
     }
     fn sync(&self) -> Result<(), StoreError> {
         self.io.syncs.fetch_add(1, Ordering::Relaxed);
@@ -234,13 +243,16 @@ pub(super) fn counting(config: TreeConfig) -> (Box<dyn PageStore>, Io) {
     (Box::new(store), io)
 }
 
-/// Every stored page, read back through the store.
+/// Every leaf's stored page, read back through the store by its page
+/// number; all zeros for a leaf with no stored page.
 pub(super) fn stored_pages(tree: &Tree) -> Vec<Vec<u8>> {
     let store = tree.store();
-    (0..store.slots())
-        .map(|raw| {
+    (0..tree.leaf_count())
+        .map(|index| {
             let mut page = vec![0; store.page_size()];
-            store.read(leaf(raw), &mut page).unwrap();
+            if let Some(page_number) = tree.leaves.page_of(leaf(index as u64)) {
+                store.read(page_number, &mut page).unwrap();
+            }
             page
         })
         .collect()
@@ -281,7 +293,7 @@ fn create_checks_the_store_against_the_configuration() {
 
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     let tree = Tree::create(config, Box::new(store)).unwrap();
-    assert_eq!(tree.store().slots(), 1);
+    assert_eq!(tree.store().page_count(), 1);
     assert!(tree.leaves.is_live(leaf(0)));
     assert_eq!(tree.height(), 1);
 }
@@ -491,4 +503,59 @@ fn create_rejects_a_store_with_a_committed_state() {
         Tree::create(config, Box::new(store)).err(),
         Some(TreeError::InvalidStore("store already holds pages"))
     );
+}
+
+/// Every live leaf's stored page passes its checksum and names that leaf.
+fn assert_stamped(tree: &Tree) {
+    let store = tree.store();
+    for (index, page_number) in tree.leaves.page_table().into_iter().enumerate() {
+        let Some(page_number) = page_number else {
+            continue;
+        };
+        let mut bytes = vec![0; store.page_size()];
+        store.read(page_number, &mut bytes).unwrap();
+        assert!(bf_tree_page::verify_stored_checksum(&bytes), "leaf {index}");
+        let page = Page::validate(&bytes).unwrap();
+        assert_eq!(page.leaf(), Some(leaf(index as u64)));
+        assert_eq!(page.backing_leaf(), None, "base pages overlay nothing");
+    }
+}
+
+#[test]
+fn reopen_rebuilds_the_page_table_from_the_stamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pages.bf");
+    let config = config(256, 128, 8, 16);
+    let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
+    let tree = Tree::create(config, Box::new(store)).unwrap();
+    let mut oracle = std::collections::BTreeMap::new();
+    for i in 0..600u32 {
+        let key = i.wrapping_mul(2_654_435_761).to_be_bytes();
+        tree.put(&key, &[i as u8; 12]).unwrap();
+        oracle.insert(key.to_vec(), vec![i as u8; 12]);
+    }
+    tree.flush().unwrap();
+    assert!(tree.leaf_count() > 10);
+    assert_stamped(&tree);
+    let before = tree.leaves.page_table();
+    drop(tree);
+
+    let tree = Tree::open(Box::new(FileStore::open(&path).unwrap())).unwrap();
+    assert_eq!(tree.leaves.page_table(), before);
+    assert_stamped(&tree);
+    let all: Vec<_> = tree.iter().map(Result::unwrap).collect();
+    assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
+    assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+#[test]
+fn leaf_ids_stop_at_the_32_bit_stamp_limit() {
+    // Only the rejection is tested: allocating an ID near the limit would
+    // grow the leaf table to billions of entries. The check runs before
+    // any table grows.
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    tree.leaves.set_next_leaf(u32::MAX as usize);
+    assert_eq!(tree.leaves.alloc().err(), Some(TreeError::TooManyLeaves));
+    assert_eq!(tree.leaves.alloc().err(), Some(TreeError::TooManyLeaves));
+    assert_eq!(tree.leaves.len(), 1, "nothing grew");
 }

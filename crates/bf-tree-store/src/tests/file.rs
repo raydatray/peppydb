@@ -31,7 +31,7 @@ fn copy(state: &State) -> Vec<u8> {
 fn create_writes_both_superblock_copies_and_refuses_to_clobber() {
     let (_dir, path) = temp_path();
     let store = FileStore::create(&path, superblock(PAGE)).unwrap();
-    assert_eq!(store.slots(), 0);
+    assert_eq!(store.page_count(), 0);
     assert_eq!(store.state(), State::default());
     assert_eq!(fs::metadata(&path).unwrap().len(), PAGES_OFFSET);
 
@@ -50,7 +50,7 @@ fn create_writes_both_superblock_copies_and_refuses_to_clobber() {
 }
 
 #[test]
-fn reopening_sees_written_pages_and_treats_zero_slots_as_live() {
+fn reopening_sees_written_pages_and_treats_freed_pages_as_live() {
     let (_dir, path) = temp_path();
     {
         let store = FileStore::create(&path, superblock(PAGE)).unwrap();
@@ -65,23 +65,23 @@ fn reopening_sees_written_pages_and_treats_zero_slots_as_live() {
 
     let store = FileStore::open(&path).unwrap();
     assert_eq!(*store.superblock(), superblock(PAGE));
-    assert_eq!(store.slots(), 4);
+    assert_eq!(store.page_count(), 4);
 
     let mut buf = vec![0; PAGE];
-    store.read(leaf(1), &mut buf).unwrap();
+    store.read(page(1), &mut buf).unwrap();
     assert_eq!(buf, page_image(PAGE, 2));
-    store.read(leaf(2), &mut buf).unwrap();
-    assert!(buf.iter().all(|&byte| byte == 0));
+    store.read(page(2), &mut buf).unwrap();
+    assert_eq!(buf, page_image(PAGE, 3), "freeing kept the bytes");
 
-    // No scan on open: the zero slot is live until a caller frees it.
-    assert_eq!(store.alloc().unwrap(), leaf(4));
-    store.free(leaf(2)).unwrap();
+    // No scan on open: the freed page is live until a caller frees it.
+    assert_eq!(store.alloc().unwrap(), page(4));
+    store.free(page(2)).unwrap();
     assert_eq!(
-        store.write(leaf(2), &buf),
-        Err(StoreError::FreedSlot(leaf(2)))
+        store.write(page(2), &buf),
+        Err(StoreError::FreedPage(page(2)))
     );
-    assert_eq!(store.alloc().unwrap(), leaf(2));
-    assert_eq!(store.alloc().unwrap(), leaf(5));
+    assert_eq!(store.alloc().unwrap(), page(2));
+    assert_eq!(store.alloc().unwrap(), page(5));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn a_zeroed_first_copy_opens_from_the_second_without_probing() {
     fs::write(&path, &bytes).unwrap();
     let store = FileStore::open(&path).unwrap();
     assert_eq!(*store.superblock(), superblock(PAGE));
-    assert_eq!(store.slots(), 1);
+    assert_eq!(store.page_count(), 1);
 }
 
 #[test]

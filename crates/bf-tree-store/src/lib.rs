@@ -1,18 +1,18 @@
-//! Durable homes for leaf pages, addressed by [`LeafId`].
+//! Durable homes for leaf pages, addressed by [`PageNumber`].
 //!
-//! A [`PageStore`] owns fixed-size page slots, a [`Superblock`] that records
-//! the page size and the tree configuration the pages were written under,
-//! and the committed [`State`]. In a file, two 4096-byte superblock copies
-//! come first and slot `id` lives at byte offset
-//! `PAGES_OFFSET + id * page_size`, so a store is self-describing and needs
+//! A [`PageStore`] owns fixed-size pages, a [`Superblock`] that records the
+//! page size and the tree configuration the pages were written under, and
+//! the committed [`State`]. In a file, two 4096-byte superblock copies come
+//! first and page number `i` lives at byte offset
+//! `PAGES_OFFSET + i * page_size`, so a store is self-describing and needs
 //! no catalogue.
-//! A freed slot is all zeros; a valid page is never all zeros because its
-//! header carries a nonzero capacity, so free slots are recoverable by
-//! whoever reads every slot, such as `Tree::open`.
+//!
+//! A page number is a position, not a leaf: the tree stamps each stored page
+//! with the leaf it belongs to. A new page is all zeros; a freed page keeps
+//! its bytes until it is reused.
 //!
 //! ```
-//! use bf_tree_node_id::LeafId;
-//! use bf_tree_store::{MemStore, PageStore, Superblock};
+//! use bf_tree_store::{MemStore, PageNumber, PageStore, Superblock};
 //!
 //! let superblock = Superblock {
 //!     page_size: 256,
@@ -21,18 +21,16 @@
 //!     max_value_len: 16,
 //! };
 //! let store = MemStore::new(superblock).unwrap();
-//! let id = store.alloc().unwrap();
-//! assert_eq!(id, LeafId::new(0).unwrap());
+//! let page_number = store.alloc().unwrap();
+//! assert_eq!(page_number, PageNumber::new(0).unwrap());
 //!
 //! let page = vec![7; 256];
-//! store.write(id, &page).unwrap();
+//! store.write(page_number, &page).unwrap();
 //! let mut back = vec![0; 256];
-//! store.read(id, &mut back).unwrap();
+//! store.read(page_number, &mut back).unwrap();
 //! assert_eq!(back, page);
-//! assert_eq!(store.slots(), 1);
+//! assert_eq!(store.page_count(), 1);
 //! ```
-
-use bf_tree_node_id::LeafId;
 
 mod file;
 mod mem;
@@ -42,6 +40,32 @@ pub use file::FileStore;
 pub use mem::MemStore;
 #[cfg(test)]
 use superblock::ENCODED_BYTES;
+
+/// The position of a page in the store. Page numbers are not leaves: a
+/// leaf's page may move to another page number, and the page header names
+/// the leaf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageNumber(u64);
+
+impl PageNumber {
+    /// `None` for `u64::MAX`, which callers use as "no page".
+    pub const fn new(raw: u64) -> Option<Self> {
+        if raw == u64::MAX {
+            None
+        } else {
+            Some(Self(raw))
+        }
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    fn index(self) -> Option<usize> {
+        usize::try_from(self.0).ok()
+    }
+}
+
 pub use superblock::{COPY_BYTES, MAGIC, PAGES_OFFSET, State, Superblock, VERSION};
 
 /// A rejected store operation.
@@ -53,10 +77,10 @@ pub use superblock::{COPY_BYTES, MAGIC, PAGES_OFFSET, State, Superblock, VERSION
 pub enum StoreError {
     #[error("invalid superblock: {0}")]
     InvalidSuperblock(&'static str),
-    #[error("slot {} was never allocated", .0.raw())]
-    UnknownSlot(LeafId),
-    #[error("slot {} is free", .0.raw())]
-    FreedSlot(LeafId),
+    #[error("page {} was never allocated", .0.raw())]
+    UnknownPage(PageNumber),
+    #[error("page {} is free", .0.raw())]
+    FreedPage(PageNumber),
     #[error("buffer length {actual} does not match the page size {expected}")]
     BufferLength { expected: usize, actual: usize },
     #[error("store file length is not a whole number of pages")]
@@ -73,34 +97,35 @@ pub enum StoreError {
     },
 }
 
-/// Fixed-size page slots behind stable leaf IDs.
+/// Fixed-size pages addressed by page number.
 ///
 /// Reads and writes transfer exactly one page; the buffer length must equal
 /// [`PageStore::page_size`]. Writes are durable only after [`PageStore::sync`]
 /// returns.
 ///
 /// A store is shared between threads. It does not order concurrent accesses
-/// to one slot; the caller must serialize them (the tree does so with the
+/// to one page; the caller must serialize them (the tree does so with the
 /// leaf lock).
 pub trait PageStore: Send + Sync + std::fmt::Debug {
-    /// Length of every slot in bytes; equal to the superblock's `page_size`.
+    /// Length of every page in bytes; equal to the superblock's `page_size`.
     fn page_size(&self) -> usize;
 
-    /// Number of page slots ever allocated, including freed ones. Live and
-    /// freed slot IDs are `0..slots()`.
-    fn slots(&self) -> u64;
+    /// Number of page numbers ever allocated, live or freed:
+    /// `0..page_count()`.
+    fn page_count(&self) -> u64;
 
-    /// Hand out a zeroed slot: a freed slot if any, else a new one at the end.
-    fn alloc(&self) -> Result<LeafId, StoreError>;
+    /// Hand out a page: a freed one if any (its old bytes kept), else a new
+    /// zero page at the end.
+    fn alloc(&self) -> Result<PageNumber, StoreError>;
 
-    /// Zero a slot and return it for reuse.
-    fn free(&self, id: LeafId) -> Result<(), StoreError>;
+    /// Return a page for reuse. Its bytes are not changed.
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError>;
 
-    /// Copy a slot into `buf`. A freed slot reads as zeros.
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError>;
+    /// Copy a page into `buf`. A freed page reads as its old bytes.
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
 
-    /// Replace a live slot's bytes with `buf`.
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError>;
+    /// Replace a live page's bytes with `buf`.
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
 
     /// Make every completed write durable.
     fn sync(&self) -> Result<(), StoreError>;

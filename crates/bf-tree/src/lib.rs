@@ -41,7 +41,9 @@ use bf_tree_page::{Fence, Fences, Page};
 pub use bf_tree_inner::InnerError;
 pub use bf_tree_node_id::LeafId;
 pub use bf_tree_page::PageError;
-pub use bf_tree_store::{FileStore, MemStore, PageStore, State, StoreError, Superblock};
+pub use bf_tree_store::{
+    FileStore, MemStore, PageNumber, PageStore, State, StoreError, Superblock,
+};
 
 mod evict;
 mod frames;
@@ -262,13 +264,23 @@ pub enum TreeError {
     /// with the requested operation.
     #[error("invalid store: {0}")]
     InvalidStore(&'static str),
-    /// A leaf reached by routing is not an allocated, live slot. This
+    /// A leaf reached by routing is not an allocated, live leaf. This
     /// indicates a tree bug or an inconsistent store.
     #[error("leaf {} is not allocated", .0.raw())]
     UnknownLeaf(LeafId),
     /// Stored leaf bytes failed validation when loaded.
     #[error("leaf {} is corrupt: {reason}", id.raw())]
     CorruptLeaf { id: LeafId, reason: &'static str },
+    /// A stored page failed its checksum or validation on open.
+    #[error("page {} is corrupt: {reason}", page_number.raw())]
+    CorruptPage {
+        page_number: PageNumber,
+        reason: &'static str,
+    },
+    /// The tree has as many leaves as a stored page's 32-bit leaf stamp can
+    /// name.
+    #[error("the tree has the most leaves a page header can name")]
+    TooManyLeaves,
     /// The stored leaves do not tile the key space or exceed the stored
     /// configuration, so no tree can be rebuilt from them.
     #[error("inconsistent leaves: {0}")]
@@ -346,7 +358,7 @@ impl Tree {
                 "store superblock differs from the configuration",
             ));
         }
-        if store.slots() != 0 || store.state() != State::default() {
+        if store.page_count() != 0 || store.state() != State::default() {
             return Err(TreeError::InvalidStore("store already holds pages"));
         }
 
