@@ -36,7 +36,7 @@ use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
 use bf_tree_sync::Mutex;
-use bf_tree_sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use bf_tree_sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 // Types from the internal crates that appear in this crate's public API, so
 // that callers need no other dependency. Other items stay internal.
@@ -323,6 +323,13 @@ pub enum TreeError {
     /// tree-file damage.
     #[error("log error: {0}")]
     Log(LogError),
+    /// An entry's sequence is not above the applied watermark.
+    #[error("entry sequence {seq} is not above the applied watermark {applied}")]
+    SequenceOrder { seq: u64, applied: u64 },
+    /// Internal and external sequences were mixed in one process: `put` or
+    /// `remove` after `apply` or a logged write, or the reverse.
+    #[error("internal and external sequences cannot be mixed in one process")]
+    MixedSequencing,
     /// An earlier sync or commit failed, so no checkpoint can be trusted
     /// until the tree is reopened.
     #[error("an earlier sync or commit failed; reopen the tree")]
@@ -379,6 +386,8 @@ pub struct Tree {
     applied: AtomicU64,
     /// The highest sequence assigned; `put` and `remove` draw from it.
     last_seq: AtomicU64,
+    /// The latched [`apply::Sequencing`], as a `u8`.
+    sequencing: AtomicU8,
 }
 
 // Compile-time check: a tree and its scans can be shared between threads.
@@ -559,6 +568,7 @@ impl Tree {
             checkpointing: Mutex::new(()),
             applied: AtomicU64::new(0),
             last_seq: AtomicU64::new(0),
+            sequencing: AtomicU8::new(apply::Sequencing::Unset as u8),
         }
     }
 

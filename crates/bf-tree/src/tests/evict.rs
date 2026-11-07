@@ -116,9 +116,19 @@ fn busy_and_empty_claims() {
 
 /// A store that fails writes while `fail` is set.
 #[derive(Debug)]
-struct Failing {
+pub(super) struct Failing {
     inner: MemStore,
     fail: Arc<AtomicBool>,
+}
+
+impl Failing {
+    /// A memory store whose page writes fail while `fail` is set.
+    pub(super) fn new(config: &TreeConfig, fail: Arc<AtomicBool>) -> Self {
+        Self {
+            inner: MemStore::new(Superblock::from(config)).unwrap(),
+            fail,
+        }
+    }
 }
 
 impl PageStore for Failing {

@@ -74,6 +74,7 @@ impl Tree {
     /// A write that draws its sequence from the tree's own counter, then
     /// advances the applied watermark after the leaf lock is released.
     fn write_internal(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
+        self.claim(super::apply::Sequencing::Internal)?;
         let seq = self.write(key, state, &mut || {
             Ok(self.last_seq.fetch_add(1, Ordering::AcqRel) + 1)
         })?;
