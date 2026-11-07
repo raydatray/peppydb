@@ -55,7 +55,7 @@ fn an_empty_batch_appends_nothing() {
     let batch = WriteBatch::new();
     assert!(batch.is_empty());
     db.write(batch).unwrap();
-    assert_eq!(db.wal.last_seq(), 0);
+    assert_eq!(db.shared.wal.last_seq(), 0);
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn an_invalid_operation_rejects_the_batch_before_logging() {
         db.write(batch),
         Err(Error::Tree(TreeError::KeyTooLarge))
     ));
-    assert_eq!(db.wal.last_seq(), 0, "no WAL record");
+    assert_eq!(db.shared.wal.last_seq(), 0, "no WAL record");
     assert_eq!(db.get(b"a").unwrap(), None);
 }
 
