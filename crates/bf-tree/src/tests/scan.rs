@@ -147,7 +147,7 @@ fn scans_skip_empty_leaves() {
     for i in 0..400u32 {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Empty a run of whole leaves in the middle, then the first and last.
     let removed = |i: u32| (100..250).contains(&i) || !(30..370).contains(&i);
     for i in (0..400u32).filter(|&i| removed(i)) {
@@ -163,7 +163,7 @@ fn scans_skip_empty_leaves() {
     // after the merges have emptied the base pages.
     for flushed in [false, true] {
         if flushed {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
             assert_eq!(tree.check_invariants(), Ok(()));
             assert!(
                 empty_leaves(&tree) >= 3,
@@ -314,7 +314,7 @@ fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
     let (tree, all) = grown(600);
     // Merge every buffered insert first, so that the removes below only
     // buffer tombstones and no later merge splits a leaf.
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let fences = boundaries(&tree);
     assert!(fences.len() > 10);
     // Empty whole leaves: the first, two adjacent ones, one in the middle,
@@ -341,7 +341,7 @@ fn scans_over_emptied_leaves_yield_exactly_the_live_records() {
     // Tombstones hide the records while buffered, and the merges drop them.
     for flushed in [false, true] {
         if flushed {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
             assert_eq!(tree.check_invariants(), Ok(()));
             assert_eq!(tree.leaf_count(), leaves, "removes never split");
             assert_eq!(boundaries(&tree), fences);

@@ -34,7 +34,7 @@ fn flushed(config: TreeConfig, n: u32) -> (Tree, super::store::Io) {
     for i in 0..n {
         tree.put(&key(i * 2), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     while tree.evict_one() == Ok(Eviction::Evicted) {}
     io.take();
     (tree, io)
@@ -101,7 +101,7 @@ fn a_fill_never_hides_a_newer_buffered_write() {
     tree.put(&key(9), b"x").unwrap();
     tree.maintain(noted).unwrap();
     assert_eq!(tree.get(&key(9)), Ok(Some(b"x".to_vec())));
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(tree.get(&key(4)), Ok(Some(b"new".to_vec())));
 }
 
@@ -179,7 +179,7 @@ fn cache_only_mini_pages_are_freed_by_flush_and_eviction_without_writes() {
     tree.get(&key(3)).unwrap();
     assert_eq!(tree.buffered_leaves(), 1);
     io.take();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(io.take(), (0, vec![]), "flush wrote nothing");
     assert_eq!(tree.buffered_leaves(), 0);
 

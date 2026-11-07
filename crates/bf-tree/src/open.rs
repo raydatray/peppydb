@@ -7,7 +7,7 @@
 //! two are pure functions over fence lists, so they are tested without a
 //! store.
 
-use std::cmp::Ordering;
+use std::cmp::Ordering as Cmp;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry as Slot;
 use std::ops::Range;
@@ -19,10 +19,11 @@ use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, LeafId};
 use bf_tree_page::{Fence, KeyRef, Page, PageError};
 use bf_tree_store::{PageNumber, PageStore, StoreError, Superblock};
+use bf_tree_sync::atomic::Ordering;
 
 impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and
-    /// [`Tree::flush`], rebuilding the routing layer from leaf fences.
+    /// [`Tree::checkpoint`], rebuilding the routing layer from leaf fences.
     ///
     /// The configuration comes from the store's superblock. Every page is
     /// read once: all-zero pages are free (allocated but never written) and
@@ -85,7 +86,12 @@ impl Tree {
         // Keep every write sequence in the file unique, including erased
         // ones whose zeroing may not have landed.
         leaves.start_write_seq(selection.max_seen.max(state.write_seq));
-        Ok(Self::assemble(config, inner, leaves))
+        let tree = Self::assemble(config, inner, leaves);
+        // The committed image holds every write at or below `applied_seq`;
+        // later sequences continue from there.
+        tree.applied.store(state.applied_seq, Ordering::Release);
+        tree.last_seq.store(state.applied_seq, Ordering::Release);
+        Ok(tree)
     }
 }
 
@@ -282,9 +288,9 @@ pub(super) fn tile(mut leaves: Vec<LeafBounds>) -> Result<Vec<LeafBounds>, TreeE
 
     // An unbounded lower fence sorts first.
     leaves.sort_by(|a, b| match (&a.lower, &b.lower) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
+        (None, None) => Cmp::Equal,
+        (None, Some(_)) => Cmp::Less,
+        (Some(_), None) => Cmp::Greater,
         (Some(a), Some(b)) => a.cmp(b),
     });
 

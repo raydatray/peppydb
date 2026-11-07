@@ -10,7 +10,7 @@ type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 fn assert_model(tree: &Tree, model: &Model) {
     for flushed in [false, true] {
         if flushed {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
             assert_eq!(tree.buffered_leaves(), 0);
             assert_eq!(tree.circular_buffer_used(), 0);
         }
@@ -85,7 +85,7 @@ fn full_leaf(tree: &mut Tree, model: &mut Model) {
         put(tree, model, &key(i), &[1; 16]);
     }
     put(tree, model, &key(7), &[]);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(root_free_bytes(tree), 0);
     assert_eq!((tree.leaf_count(), tree.height()), (1, 1));
 }
@@ -99,7 +99,7 @@ fn replacement_can_force_a_split() {
     // not fit the full base page and splits it.
     put(&mut tree, &mut model, &key(7), &[2; 16]);
     assert_eq!(tree.height(), 1);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(tree.height(), 2);
     assert_model(&tree, &model);
 }

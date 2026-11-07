@@ -257,7 +257,7 @@ fn reopened_memory_trees_match_the_oracle_at_every_height() {
         let mut tree = Tree::create(config, Box::new(store)).unwrap();
         let mut model = Model::new();
         fill(&mut tree, &mut model, count);
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
         let height = tree.height();
         let leaves = tree.leaf_count();
 
@@ -285,7 +285,7 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
         let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
         let mut tree = Tree::create(config, Box::new(store)).unwrap();
         fill(&mut tree, &mut model, 2000);
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
         tree.height()
     };
     assert!(height >= 3);
@@ -296,7 +296,7 @@ fn reopened_file_trees_survive_drop_and_keep_accepting_writes() {
 
     fill(&mut tree, &mut model, 500);
     assert_matches_model(&tree, &model);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     drop(tree);
 
     let tree = Tree::open(Box::new(FileStore::open(&path).unwrap())).unwrap();
@@ -310,11 +310,11 @@ fn a_closed_trees_store_holds_every_flushed_write_and_no_buffered_one() {
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 100);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // A second batch, including splits, then a flush.
     let leaves_before = tree.leaf_count();
     fill(&mut tree, &mut model, 300);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let leaves_after = tree.leaf_count();
     assert!(leaves_after > leaves_before);
     // One more put after the flush. It is buffered in a fresh mini-page, so
@@ -343,7 +343,7 @@ fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>, Vec<PageNumber>) {
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
     let mut model = Model::new();
     fill(&mut tree, &mut model, 200);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaf_count() >= 4);
     let images = (0..tree.leaf_count())
         .map(|index| tree.leaves.page_copy(leaf(index as u64)).unwrap())

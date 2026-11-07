@@ -190,7 +190,7 @@ fn disk_baseline() {
     latencies.report("put, replace random", "ops");
 
     let started = Instant::now();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     println!("flush (sync):          {:.1?}", started.elapsed());
 
     drop(tree);

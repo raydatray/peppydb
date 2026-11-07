@@ -28,14 +28,14 @@ fn a_write_through_moves_the_leaf_and_supersedes_its_old_page() {
     let (first, page) = stored(&tree, leaf(0));
     assert_eq!(page.write_seq(), 1, "create wrote sequence 1");
     tree.put(b"a", b"1").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let (second, page) = stored(&tree, leaf(0));
     assert_ne!(second, first, "a fresh page");
     assert_eq!(page.write_seq(), 2);
     assert_eq!(tree.leaves.write_seq(), 2);
     // Flush freed the replaced page: the next write reuses it.
     tree.put(b"b", b"2").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(stored(&tree, leaf(0)).0, first);
     assert_eq!(tree.store().page_count(), 2);
 }
@@ -80,10 +80,10 @@ fn after_flush_and_reopen_each_leaf_has_one_page_and_sequences_continue() {
         tree.put(&i.wrapping_mul(2_654_435_761).to_be_bytes(), &[i as u8; 12])
             .unwrap();
         if i % 97 == 0 {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
         }
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let max = tree.leaves.write_seq();
     let live = tree.leaves.page_table().into_iter().flatten().count();
     drop(tree);
@@ -96,7 +96,7 @@ fn after_flush_and_reopen_each_leaf_has_one_page_and_sequences_continue() {
         "the counter restarts above every page"
     );
     tree.put(b"zz", b"v").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaves.write_seq() > max);
     assert_eq!(tree.check_invariants(), Ok(()));
 }
@@ -106,12 +106,12 @@ fn open_keeps_the_newest_copy_of_a_leaf_and_releases_older_ones() {
     let config = config(256, 128, 8, 16);
     let tree = Tree::in_memory(config).unwrap();
     tree.put(b"a", b"old").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let (old_page, _) = stored(&tree, leaf(0));
     let mut old_bytes = vec![0; 256];
     tree.store().read(old_page, &mut old_bytes).unwrap();
     tree.put(b"a", b"new").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Plant the older copy back into a freed page, as a crash would leave it.
     let freed = tree.store().alloc().unwrap();
     tree.store().write(freed, &old_bytes).unwrap();

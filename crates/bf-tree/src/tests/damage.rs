@@ -27,7 +27,7 @@ fn flushed(file: bool) -> (Tree, Option<tempfile::TempDir>) {
     for i in 0..300u32 {
         tree.put(&i.to_be_bytes(), &[i as u8; 12]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaf_count() >= 4);
     (tree, dir)
 }
@@ -179,7 +179,7 @@ fn a_hole_below_the_largest_leaf_stays_freed_after_open() {
     for i in 300..600u32 {
         tree.put(&i.to_be_bytes(), &[i as u8; 12]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaf_count() > leaves);
     assert!(!tree.leaves.is_live(id));
     let tree = Tree::open(tree.into_store()).unwrap();

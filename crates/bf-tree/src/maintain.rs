@@ -160,7 +160,15 @@ impl Tree {
         let state = value.map_or(RecordState::Phantom, RecordState::Cache);
         match self.leaves.buffer(leaf, key, state)? {
             None => Ok(Promotion::NoRoom),
-            Some(WriteOutcome::NeedsMerge) => with_scratch(|scratch| self.promote(leaf, scratch)),
+            Some(WriteOutcome::NeedsMerge) => {
+                // The promotion's merge may split the leaf, so `key` may no
+                // longer belong to it: whatever the promotion achieved, the
+                // fill is never retried. Deferring it would compare against
+                // the version after the split and cache `key` in the wrong
+                // half (found by the plan 0018 contention runs).
+                with_scratch(|scratch| self.promote(leaf, scratch))?;
+                Ok(Promotion::Promoted)
+            }
             Some(WriteOutcome::Buffered | WriteOutcome::SkippedDirty) => Ok(Promotion::Promoted),
         }
     }

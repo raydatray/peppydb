@@ -107,7 +107,7 @@ fn run_on(
         let key = generate_key(&mut rng, keys, max_key);
         let context = format!("{backend:?} {config:?} {keys:?} seed {seed:#x} step {step}");
         if step % reopen_every == reopen_every - 1 {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
             tree = match backend {
                 Backend::Memory => tree,
                 // Reopen with the same runtime settings, such as the budget.
@@ -382,7 +382,7 @@ fn baseline_file_store() {
     let leaves = tree.leaf_count();
 
     let started = Instant::now();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let flush = started.elapsed();
     drop(tree);
     let bytes = std::fs::metadata(&path).unwrap().len();

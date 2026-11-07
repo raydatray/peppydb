@@ -61,7 +61,7 @@ fn open_with_takes_runtime_settings_and_checks_the_layout() {
     let tree = Tree::in_memory(config).unwrap();
     tree.put(b"k", b"v").unwrap();
     // Buffered writes reach the store only through a merge.
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let store = tree.into_store();
 
     // A different budget is a runtime setting.

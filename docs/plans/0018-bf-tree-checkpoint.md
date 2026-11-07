@@ -569,7 +569,7 @@ Resolved (2026-11-06, review):
 - [x] Diff 3: fresh-page writes.
 - [x] Diff 4: commit, erase, and create.
 - [x] Diff 5: suspect classification.
-- [ ] Diff 6: checkpoint and watermarks.
+- [x] Diff 6: checkpoint and watermarks.
 - [ ] Diff 7: fault store and crash model.
 - [ ] Diff 8: concurrent crash variant and documents.
 - [ ] Stack-wide verification.
@@ -609,6 +609,25 @@ Resolved (2026-11-06, review):
   fixture covers all 16 subsets of four 64-byte sectors landing, over a
   fresh page and over a reused page; disabling the release rule makes it
   fail.
+- **A plan 0015 hint bug surfaced in diff 6.** A cache fill whose
+  mini-page is full turns into a page promotion, which may split the leaf.
+  If the full-page allocation then failed, `promote` returned `NoRoom`,
+  and `maintain` deferred the *fill* with the leaf's version taken after
+  the split. The retry then cached the key in the left half, which no
+  longer owned it, and scans briefly returned that record past the leaf's
+  upper fence (out of order) until a merge dropped it. Diff 6's shared
+  sequence counter changed timing enough to expose it: the
+  concurrent and contention suites failed about once in 20 to 120 release
+  runs under parallel load. A fill that turned into a promotion is now
+  never retried; 300 runs passed after the fix. No deterministic test
+  exists, because the failing allocation needs a racing allocator; the
+  invariant checker already rejects such records at quiescence.
+- **The pass-coverage test moved to diff 8.** A split during the pass into
+  a new leaf is a race; the concurrent crash variant with a checkpoint
+  thread beside writers covers it, as does
+  `concurrent_checkpoints_commit_consecutive_ids_beside_writers` (1600
+  writes, 60 checkpoints from three threads, consecutive ids, and a
+  reopen with every write).
 
 ## Agent notes
 

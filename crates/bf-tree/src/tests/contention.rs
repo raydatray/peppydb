@@ -193,7 +193,7 @@ fn run_phases(config: TreeConfig, backend: Backend, writers: u8, readers: usize,
     check_final(&tree, std::slice::from_ref(&first));
     assert!(tree.circular_buffer_used() <= config.circular_buffer_bytes);
 
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let tree = match backend {
         Backend::Memory => Tree::open_with(config, tree.into_store()).unwrap(),
         Backend::File => {

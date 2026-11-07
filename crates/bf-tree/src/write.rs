@@ -1,3 +1,5 @@
+use bf_tree_sync::atomic::Ordering;
+
 use super::leaf_map::{LeafWrite, Locked, Scratch, with_scratch};
 use super::maintain::has_clean_mini;
 use super::{Tree, TreeError};
@@ -32,7 +34,8 @@ fn write_full(page: &mut Page, key: &[u8], state: RecordState<'_>) -> Result<boo
 
 /// The result of one write attempt under the leaf lock.
 enum Attempt {
-    Done,
+    /// The record is applied, under this sequence.
+    Done(u64),
     /// The circular buffer could not supply a block. Every guard of the
     /// attempt has been dropped; the caller must make room and route again.
     NeedRoom,
@@ -55,7 +58,7 @@ impl Tree {
             return Err(TreeError::ValueTooLarge);
         }
 
-        self.write(key, RecordState::Insert(value))
+        self.write_internal(key, RecordState::Insert(value))
     }
 
     /// Remove `key` if it is present.
@@ -65,18 +68,38 @@ impl Tree {
     pub fn remove(&self, key: &[u8]) -> Result<(), TreeError> {
         self.check_key(key)?;
 
-        self.write(key, RecordState::Delete)
+        self.write_internal(key, RecordState::Delete)
+    }
+
+    /// A write that draws its sequence from the tree's own counter, then
+    /// advances the applied watermark after the leaf lock is released.
+    fn write_internal(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
+        let seq = self.write(key, state, &mut || {
+            Ok(self.last_seq.fetch_add(1, Ordering::AcqRel) + 1)
+        })?;
+        self.applied.fetch_max(seq, Ordering::Release);
+        Ok(())
     }
 
     /// Buffer the record blindly in the owning leaf's mini-page, making room
     /// in the circular buffer when it is full. Eviction runs with no leaf
     /// lock held, so a full buffer ends the attempt; the write then routes
     /// again.
-    fn write(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
+    ///
+    /// `seq` runs under the owning leaf's exclusive lock, after the route is
+    /// validated and before the record is applied, so for each key sequence
+    /// order equals apply order. A retry runs it again; the abandoned
+    /// sequence names no record. Returns the applied record's sequence.
+    pub(super) fn write(
+        &self,
+        key: &[u8],
+        state: RecordState<'_>,
+        seq: &mut dyn FnMut() -> Result<u64, TreeError>,
+    ) -> Result<u64, TreeError> {
         self.check_store()?;
         loop {
-            match self.write_attempt(key, state)? {
-                Attempt::Done => return Ok(()),
+            match self.write_attempt(key, state, seq)? {
+                Attempt::Done(seq) => return Ok(seq),
                 Attempt::NeedRoom => self.make_room(self.leaves.classes.largest())?,
             }
         }
@@ -87,8 +110,14 @@ impl Tree {
     /// if needed), keep the merged page as a full page if the configuration
     /// asks for it, then place the record in the half that owns the key,
     /// under the locks still held. Every guard is dropped before it returns.
-    fn write_attempt(&self, key: &[u8], state: RecordState<'_>) -> Result<Attempt, TreeError> {
+    fn write_attempt(
+        &self,
+        key: &[u8],
+        state: RecordState<'_>,
+        seq: &mut dyn FnMut() -> Result<u64, TreeError>,
+    ) -> Result<Attempt, TreeError> {
         self.with_leaf_write(key, |leaf| {
+            let seq = seq()?;
             let outcome = match self.place(leaf, key, state)? {
                 None => return Ok(Attempt::NeedRoom),
                 Some(WriteOutcome::NeedsMerge) => {
@@ -116,7 +145,7 @@ impl Tree {
                     // After the write: a write that grew the mini-page has
                     // already moved it to the tail.
                     self.relocate(leaf);
-                    Ok(Attempt::Done)
+                    Ok(Attempt::Done(seq))
                 }
                 // A fresh mini-page takes any admitted record.
                 Some(WriteOutcome::NeedsMerge) => {
@@ -182,7 +211,7 @@ impl Tree {
     /// Under the exclusive lock of the reachable leaf `leaf`: fold its
     /// mini-page into the base page, in place or by a split, write the
     /// result through, and free the block. Returns the right half of a
-    /// split, still locked, and its separator. Callers: writes, `flush`, and
+    /// split, still locked, and its separator. Callers: writes, `checkpoint`, and
     /// eviction (plan 0014).
     ///
     /// The block is freed only after the pages are written and the separator
