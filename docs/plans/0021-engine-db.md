@@ -448,7 +448,7 @@ Scenarios:
 | Negative control: hook replaced by a no-op (local patch, not committed) | The prefix-of-the-log assertion of the first checkpoint test fails deterministically |
 | Reader sees an unsynced write, then `crash(0)` | The write is absent: documents the guarantee boundary |
 | `crash` with checkpoints running concurrently with 4 writer threads | Every acknowledged write present; batches whole |
-| A garbage page appended to `tree.bf` after a crash | Open succeeds (the slot is released by 0018's rules); state equals the oracle |
+| A garbage page appended to `tree.bf` after a crash | Open succeeds (the page is released by 0018's rules); state equals the oracle |
 | Two crashes without a full replay in between | As above at each generation |
 
 ### Guarantees
@@ -466,8 +466,10 @@ The design document records these, and the crash tests check each:
 
 Not guaranteed: isolation of a batch from concurrent readers; durability of
 a value a reader saw before its writer returned; snapshot-consistent scans
-across leaves; detection of a committed page that the device corrupts later
-(the store format decides page checksums in 0017).
+across leaves; detection of every device corruption of a committed page.
+Plan 0017's page CRC32C detects a damaged body, but a corrupted header that
+makes a committed page look uncommitted or superseded is released on open
+(see the known limit in plan 0018).
 
 ## Decisions and trade-offs
 
