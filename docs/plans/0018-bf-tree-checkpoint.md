@@ -568,7 +568,7 @@ Resolved (2026-11-06, review):
 - [x] Diff 2: `write_seq` header field.
 - [x] Diff 3: fresh-page writes.
 - [x] Diff 4: commit, erase, and create.
-- [ ] Diff 5: suspect classification.
+- [x] Diff 5: suspect classification.
 - [ ] Diff 6: checkpoint and watermarks.
 - [ ] Diff 7: fault store and crash model.
 - [ ] Diff 8: concurrent crash variant and documents.
@@ -598,6 +598,17 @@ Resolved (2026-11-06, review):
 - **`create` commits through the same path as `flush`.** `with_store`
   writes the root (sequence 1) and calls the commit step, so
   `Tree::in_memory` also starts at checkpoint 1 with `write_seq` 1.
+- **Selection stays inside `open.rs` as `select`.** The planned
+  `select_committed(store, config, &State)` is `select(store, config, W)`,
+  a private function that returns the chosen pages, the pages to release,
+  the pages to erase, and the largest sequence seen. Plan 0019's snapshot
+  calls it with the `W` it read once.
+- **Suspects are decided after the scan.** Whether a failed page's leaf
+  has a newer page is known only once every page is read, so pages that
+  fail their checksum are collected and classified at the end. The tear
+  fixture covers all 16 subsets of four 64-byte sectors landing, over a
+  fresh page and over a reused page; disabling the release rule makes it
+  fail.
 
 ## Agent notes
 
