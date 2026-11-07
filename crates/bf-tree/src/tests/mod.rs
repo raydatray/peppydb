@@ -2,6 +2,7 @@ use super::*;
 use crate::inner::Path;
 use bf_tree_node_id::InnerId;
 
+mod apply;
 mod bench;
 mod buffered;
 mod checkpoint;

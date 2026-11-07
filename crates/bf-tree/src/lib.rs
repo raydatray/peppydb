@@ -47,6 +47,7 @@ pub use bf_tree_store::{
     FileStore, MemStore, PageNumber, PageStore, State, StoreError, Superblock,
 };
 
+mod apply;
 mod evict;
 mod frames;
 mod inner;
@@ -60,6 +61,7 @@ mod read;
 mod scan;
 mod write;
 
+pub use apply::{Entry, Log, LogError, Op};
 use inner::Inner;
 #[cfg(test)]
 pub use invariants::InvariantError;
@@ -316,6 +318,11 @@ pub enum TreeError {
     /// An inner-node operation failed unexpectedly. This indicates a tree bug.
     #[error("internal inner-node error: {0}")]
     Inner(#[from] InnerError),
+    /// The log failed: in `Log::append`, or in a checkpoint's pre-commit
+    /// hook. Kept apart from store errors, so a log failure never looks like
+    /// tree-file damage.
+    #[error("log error: {0}")]
+    Log(LogError),
     /// An earlier sync or commit failed, so no checkpoint can be trusted
     /// until the tree is reopened.
     #[error("an earlier sync or commit failed; reopen the tree")]
