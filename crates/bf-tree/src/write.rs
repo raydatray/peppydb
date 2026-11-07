@@ -73,6 +73,7 @@ impl Tree {
     /// lock held, so a full buffer ends the attempt; the write then routes
     /// again.
     fn write(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeError> {
+        self.check_store()?;
         loop {
             match self.write_attempt(key, state)? {
                 Attempt::Done => return Ok(()),

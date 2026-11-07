@@ -305,6 +305,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
     let (store, io) = counting(config);
     let tree = Tree::create(config, store).unwrap();
     assert_eq!(io.take(), (0, vec![leaf(0)]), "create writes the root");
+    assert_eq!(io.syncs(), 1, "and commits it");
 
     // A put to a leaf without a mini-page allocates one: no store I/O.
     tree.put(&0u32.to_be_bytes(), b"v").unwrap();
@@ -346,7 +347,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
         "{buffered} {in_place} {splits}"
     );
     assert!(in_place >= 1 && splits >= 2, "{in_place} {splits}");
-    assert_eq!(io.syncs(), 0);
+    assert_eq!(io.syncs(), 1, "no sync since create");
 
     // Flush merges each buffered leaf with one read and one or two writes,
     // then syncs once.
@@ -365,7 +366,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
             assert!(written[index + 1].index() < leaves, "{written:?}");
         }
     }
-    assert_eq!(io.syncs(), 1);
+    assert_eq!(io.syncs(), 2);
     assert_eq!(tree.buffered_leaves(), 0);
     assert_eq!(tree.circular_buffer_used(), 0);
     assert_eq!(stored_pages(&tree), copied_pages(&tree));
@@ -374,7 +375,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
     io.take();
     tree.flush().unwrap();
     assert_eq!(io.take(), (0, vec![]));
-    assert_eq!(io.syncs(), 2);
+    assert_eq!(io.syncs(), 3);
 
     // Reads: a key the leaf does not buffer reads the base page once; a
     // buffered record or tombstone needs no read. Writes and rejected
@@ -398,8 +399,8 @@ fn blind_writes_touch_the_store_only_through_merges() {
     assert_eq!(io.take(), (1, vec![]), "get the mini-page misses");
 
     tree.flush().unwrap();
-    assert_eq!(io.take(), (1, vec![owner]), "one merge in place");
-    assert_eq!(io.syncs(), 3);
+    assert_eq!(io.take(), (1, vec![owner]), "one merge");
+    assert_eq!(io.syncs(), 4);
     assert_eq!(tree.get(&key3), Ok(None));
     assert_eq!(stored_pages(&tree), copied_pages(&tree));
     assert_eq!(tree.check_invariants(), Ok(()));

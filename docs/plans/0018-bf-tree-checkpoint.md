@@ -567,7 +567,7 @@ Resolved (2026-11-06, review):
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: `write_seq` header field.
 - [x] Diff 3: fresh-page writes.
-- [ ] Diff 4: commit, erase, and create.
+- [x] Diff 4: commit, erase, and create.
 - [ ] Diff 5: suspect classification.
 - [ ] Diff 6: checkpoint and watermarks.
 - [ ] Diff 7: fault store and crash model.
@@ -592,6 +592,12 @@ Resolved (2026-11-06, review):
 - **A failed page write frees its fresh page.** If `store.write` fails in
   `write_through`, the fresh page names no state, so it is returned to the
   store before the error propagates.
+- **The checkpointing mutex arrived in diff 4.** The commit requires the
+  next checkpoint id, so two concurrent `flush` calls would race on it. The
+  mutex that diff 6 planned is taken by `flush` from diff 4 on.
+- **`create` commits through the same path as `flush`.** `with_store`
+  writes the root (sequence 1) and calls the commit step, so
+  `Tree::in_memory` also starts at checkpoint 1 with `write_seq` 1.
 
 ## Agent notes
 

@@ -4,6 +4,7 @@ use bf_tree_node_id::InnerId;
 
 mod bench;
 mod buffered;
+mod checkpoint;
 mod concurrent;
 mod config;
 mod contention;
@@ -49,6 +50,7 @@ fn config(
         scan_promotion_percent: 0,
         read_record_cache: true,
         policy_seed: 0x5eed,
+        on_store_failure: StoreFailurePolicy::RejectWrites,
     }
 }
 

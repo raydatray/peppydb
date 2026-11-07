@@ -35,6 +35,8 @@ use bf_tree_inner::{HEADER_BYTES, InnerNode, entry_size};
 use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
+use bf_tree_sync::Mutex;
+use bf_tree_sync::atomic::{AtomicBool, Ordering};
 
 // Types from the internal crates that appear in this crate's public API, so
 // that callers need no other dependency. Other items stay internal.
@@ -101,6 +103,27 @@ pub struct TreeConfig {
     pub read_record_cache: bool,
     /// Seed of the promotion rolls.
     pub policy_seed: u64,
+    /// What writes do after a failed sync or commit; checkpoints always fail
+    /// then. A runtime setting. Default: reject writes.
+    pub on_store_failure: StoreFailurePolicy,
+}
+
+/// What writes do after a failed sync or commit (plan 0018).
+///
+/// After a failed sync, the operating system may have dropped dirty pages,
+/// and a later sync can report success without them. So a later commit
+/// could name pages that never reached the disk: every later checkpoint
+/// fails until the tree is reopened, whatever the policy. Reads continue.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StoreFailurePolicy {
+    /// Writes return `TreeError::StoreFailed`. Fail-stop: with checkpoints
+    /// as the only durability, no later write could become durable, and a
+    /// log could never be truncated.
+    #[default]
+    RejectWrites,
+    /// Writes continue, for deployments whose durability comes from a log:
+    /// the tree keeps serving until it is restarted.
+    AcceptWrites,
 }
 
 /// The default second-chance share, 10 percent, as upstream.
@@ -125,6 +148,7 @@ impl Default for TreeConfig {
             scan_promotion_percent: 20,
             read_record_cache: true,
             policy_seed: 0x5eed,
+            on_store_failure: StoreFailurePolicy::RejectWrites,
         }
     }
 }
@@ -240,6 +264,7 @@ impl From<&Superblock> for TreeConfig {
             scan_promotion_percent: 20,
             read_record_cache: true,
             policy_seed: 0x5eed,
+            on_store_failure: StoreFailurePolicy::RejectWrites,
         }
     }
 }
@@ -291,6 +316,14 @@ pub enum TreeError {
     /// An inner-node operation failed unexpectedly. This indicates a tree bug.
     #[error("internal inner-node error: {0}")]
     Inner(#[from] InnerError),
+    /// An earlier sync or commit failed, so no checkpoint can be trusted
+    /// until the tree is reopened.
+    #[error("an earlier sync or commit failed; reopen the tree")]
+    CheckpointFailed,
+    /// An earlier sync or commit failed and the configuration rejects writes
+    /// until the tree is reopened.
+    #[error("the store failed; writes are rejected until the tree is reopened")]
+    StoreFailed,
 }
 
 /// An ordered map from nonempty byte keys to byte values, shared between
@@ -324,6 +357,10 @@ pub struct Tree {
     inner: Inner,
     leaves: LeafMap,
     policy: Policy,
+    /// A sync or commit failed; see [`StoreFailurePolicy`].
+    store_failed: AtomicBool,
+    /// One checkpoint at a time.
+    checkpointing: Mutex<()>,
 }
 
 // Compile-time check: a tree and its scans can be shared between threads.
@@ -376,6 +413,10 @@ impl Tree {
     /// two page writes of a split can leave overlapping fences, which
     /// [`Tree::open`] rejects (until shadow paging, plan 0018).
     pub fn flush(&self) -> Result<(), TreeError> {
+        let _one = self.checkpointing.lock();
+        if self.store_failed() {
+            return Err(TreeError::CheckpointFailed);
+        }
         for id in self.leaves.ids() {
             let Some(mut leaf) = self.leaves.write_if_live(id) else {
                 continue;
@@ -389,13 +430,25 @@ impl Tree {
                 Residency::Base => {}
             }
         }
-        // Every superseding write recorded so far finished before the sync,
-        // so after it their replaced pages are free (until plan 0018's
-        // commit, which frees only what a commit covers).
-        let superseded = self.leaves.take_superseded();
-        self.leaves.sync()?;
-        self.leaves
-            .free_pages(superseded.into_iter().map(|(page_number, _)| page_number))
+        self.commit_written()
+    }
+
+    /// Commit every write-through so far: read the write watermark `W` with
+    /// none in flight, sync, commit, then free the pages that writes at or
+    /// below `W` replaced. Holds `checkpointing`.
+    fn commit_written(&self) -> Result<(), TreeError> {
+        let written = self.leaves.write_watermark();
+        self.durable(|| self.leaves.sync())?;
+        let current = self.leaves.store().state();
+        let next = State {
+            checkpoint_id: current.checkpoint_id + 1,
+            write_seq: written,
+            ..current
+        };
+        self.durable(|| Ok(self.leaves.store().commit(&next)?))?;
+        // The committed image names no page a covered write replaced.
+        let covered = self.leaves.take_superseded_through(written);
+        self.leaves.free_pages(covered)
     }
 
     /// Number of leaves holding a mini-page: an O(leaves) diagnostic.
@@ -446,11 +499,15 @@ impl Tree {
             leaf.id()
         };
 
-        Ok(Self::assemble(
+        let tree = Self::assemble(
             config,
             Inner::new(config.inner_capacity, ChildRef::Leaf(root)),
             leaves,
-        ))
+        );
+        // Commit the empty tree, so that a store that is created and never
+        // checkpointed reopens as an empty tree.
+        tree.commit_written()?;
+        Ok(tree)
     }
 
     fn assemble(config: TreeConfig, inner: Inner, leaves: LeafMap) -> Self {
@@ -459,7 +516,28 @@ impl Tree {
             inner,
             leaves,
             policy: Policy::new(config.policy_seed),
+            store_failed: AtomicBool::new(false),
+            checkpointing: Mutex::new(()),
         }
+    }
+
+    /// Whether a sync or commit failed since the tree was opened.
+    pub fn store_failed(&self) -> bool {
+        self.store_failed.load(Ordering::Acquire)
+    }
+
+    /// Reject a write after a store failure, if the configuration says so.
+    fn check_store(&self) -> Result<(), TreeError> {
+        let reject = self.config.on_store_failure == StoreFailurePolicy::RejectWrites;
+        if reject && self.store_failed() {
+            return Err(TreeError::StoreFailed);
+        }
+        Ok(())
+    }
+
+    /// Run a sync or commit, and remember a failure.
+    fn durable<T>(&self, step: impl FnOnce() -> Result<T, TreeError>) -> Result<T, TreeError> {
+        step().inspect_err(|_| self.store_failed.store(true, Ordering::Release))
     }
 
     /// The validated configuration.

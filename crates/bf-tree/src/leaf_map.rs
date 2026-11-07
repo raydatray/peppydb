@@ -553,8 +553,30 @@ impl LeafMap {
     }
 
     /// Take every superseded page recorded so far.
+    #[cfg(test)]
     pub(super) fn take_superseded(&self) -> Vec<(PageNumber, u64)> {
         std::mem::take(&mut *self.superseded.lock())
+    }
+
+    /// Take the superseded pages whose replacing write is at or below
+    /// `written`; later ones stay until a commit covers them.
+    pub(super) fn take_superseded_through(&self, written: u64) -> Vec<PageNumber> {
+        let mut superseded = self.superseded.lock();
+        let (covered, later): (Vec<_>, Vec<_>) =
+            superseded.drain(..).partition(|&(_, seq)| seq <= written);
+        *superseded = later;
+        covered
+            .into_iter()
+            .map(|(page_number, _)| page_number)
+            .collect()
+    }
+
+    /// The write watermark: the last sequence drawn, read with the gate
+    /// held exclusively, so every write-through at or below it has finished
+    /// its writes and recorded its superseded pages.
+    pub(super) fn write_watermark(&self) -> u64 {
+        let _none_in_flight = self.gate.write();
+        self.write_seq.load(Ordering::Acquire)
     }
 
     /// Free pages that a durable write replaced. Called with no lock held.
@@ -571,6 +593,12 @@ impl LeafMap {
     /// Continue write sequences above `seq`, after open.
     pub(super) fn start_write_seq(&self, seq: u64) {
         self.write_seq.store(seq, Ordering::Release);
+    }
+
+    /// Hold the write-through gate shared, as a write-through in flight does.
+    #[cfg(test)]
+    pub(super) fn hold_gate(&self) -> bf_tree_sync::RwLockReadGuard<'_, ()> {
+        self.gate.read()
     }
 
     /// The last write sequence drawn.
