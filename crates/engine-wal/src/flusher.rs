@@ -264,8 +264,9 @@ impl Wal {
     /// `written` can cut a record anywhere, which makes a torn tail.
     ///
     /// Production code calls [`Wal::close`], which makes every appended
-    /// record durable.
-    pub fn abandon(self, written: usize) {
+    /// record durable. After `abandon`, appends return
+    /// [`WalError::Closed`], and dropping the log writes nothing more.
+    pub fn abandon(&self, written: usize) {
         self.shared.state.store(ABANDONED, Ordering::Release);
         drop(lock(&self.shared.pending));
         self.shared.wake.notify_all();

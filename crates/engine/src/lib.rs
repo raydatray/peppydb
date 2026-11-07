@@ -432,6 +432,15 @@ impl Db {
         Ok(self.shared.tree.write_snapshot(out)?.into())
     }
 
+    /// Simulate a process crash, for tests: stop the policy thread, abandon
+    /// the WAL with only the first `written` bytes of its pending records
+    /// written and none synced, and drop the tree without a checkpoint.
+    #[cfg(test)]
+    pub(crate) fn crash(mut self, written: usize) {
+        self.stop_policy();
+        self.shared.wal.abandon(written);
+    }
+
     fn stop_policy(&mut self) {
         if let Some(thread) = self.policy_thread.take() {
             self.shared.policy.stop.store(true, Ordering::Release);
