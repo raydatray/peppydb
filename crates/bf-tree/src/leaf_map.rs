@@ -354,13 +354,13 @@ impl LeafMap {
     }
 
     /// Lock leaf `id` exclusively without waiting; `None` if it is busy or
-    /// not a live slot.
+    /// not a live leaf.
     pub(super) fn try_write(&self, id: LeafId) -> Option<LeafWrite<'_>> {
         let entry = self.entry(id).ok()?.try_write()?;
         (!entry.freed).then_some(LeafWrite { id, entry })
     }
 
-    /// Lock leaf `id` exclusively if it is a live slot.
+    /// Lock leaf `id` exclusively if it is a live leaf.
     pub(super) fn write_if_live(&self, id: LeafId) -> Option<LeafWrite<'_>> {
         self.write(id).ok()
     }

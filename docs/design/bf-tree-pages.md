@@ -37,17 +37,24 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
 | `6..8` | `prefix_len` | Length of the key prefix stored once in the low fence and omitted from other keys; see [Prefix compression](#prefix-compression) |
 | `8..16` | `backing_leaf` | Base leaf that a mini-page overlays; `u64::MAX` for base pages and full pages; see [Backing leaf](#backing-leaf) |
-| `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive |
-| `24..32` | `snapshot_version` | Checkpoint snapshot version; inactive |
+| `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive. Plan 0018 renames it to `write_seq` |
+| `24..28` | `leaf` | `U32`: the leaf that a stored base page belongs to; `u32::MAX` (`NO_LEAF`) for none; see [Leaf stamp and checksum](#leaf-stamp-and-checksum) |
+| `28..32` | `crc` | `U32`: CRC32C of the whole page with this field taken as zero |
 
-`snapshot_version` follows upstream, which uses it for CPR (Concurrent Prefix
-Recovery) checkpoints. peppydb does not use CPR; [plan 0017](../plans/0017-bf-tree-store-format.md)
-replaces the field with a 32-bit leaf stamp and a 32-bit page CRC32C.
+Bytes `0..16` describe the page structure. Bytes `16..32` hold storage and
+recovery state: `lsn` stays inactive, and `leaf` and `crc` identify and
+protect a page in the store. The
+[persistence design](bf-tree-persistence.md#base-page-identity-and-the-page-checksum)
+records how the tree uses them. A smaller mini-page header without this
+state is deferred: it would not shrink upstream's allocation sizes, and the
+state would need another home.
 
-Bytes `0..16` describe the page structure. Bytes `16..32` hold recovery state,
-which the logging and checkpoint design will define. A smaller mini-page header
-without recovery state is deferred to that design: it would not shrink
-upstream's allocation sizes, and the recovery state would need another home.
+Bytes `24..32` held `snapshot_version` until it was replaced in
+[plan 0017](../plans/0017-bf-tree-store-format.md). The field followed
+upstream, which uses it for CPR (Concurrent Prefix Recovery) checkpoints:
+per-page copy-on-write by checkpoint version. peppydb does not use CPR, so
+the field was free; shadow paging (plan 0018) takes its role, and the 32-bit
+leaf stamp and the 32-bit page CRC32C took its bytes.
 
 ### Backing leaf
 
@@ -58,6 +65,32 @@ so no real leaf ID can collide with it. `init` and `init_with_fences` store
 `None`. Splits and batch merges copy the field from the source page to every
 output. The page itself gives the field no meaning; role types decide when it
 must be set (see [`Page` as a base type](#page-as-a-base-type)).
+
+### Leaf stamp and checksum
+
+The page crate provides the fields; the tree gives them their roles.
+
+- `leaf()` returns `Option<LeafId>`. `set_leaf(Option<LeafId>)` writes the
+  field and returns `PageError::LeafIdTooLarge` for a raw ID of `u32::MAX`
+  or more. The stored sentinel for `None` is `u32::MAX`, so an all-zero
+  header reads as leaf 0, not `None`.
+- `checksum()` computes the CRC32C of every page byte with the `crc` field
+  (`CRC_RANGE`, bytes `28..32`) taken as zero. `stored_checksum()` reads the
+  field, `seal()` stores `checksum()` in it, and `verify_checksum()`
+  compares the two. `seal` must be the last change to a page.
+- The free function `verify_stored_checksum(&[u8])` checks raw bytes that
+  may not be a valid page. It reads only the `crc` field and computes the
+  CRC over the slice length, never over a `capacity` read from the header.
+- `init` and `init_with_fences` set `leaf` to `None` and `crc` to zero.
+  Split and batch-merge outputs copy `backing_leaf`, `lsn`, `leaf`, and
+  `crc` from the source page, and in-place operations leave them unchanged,
+  so after any change the stored checksum is stale. No page operation
+  seals.
+- Only the tree's `write_through` stamps and seals, immediately before a
+  base page is written to the store. A stored base page therefore names its
+  leaf and carries a valid checksum. Mini-pages and in-memory full pages do
+  not maintain the checksum. `Page::validate` stays structural: it checks
+  neither field.
 
 ## Slots and records
 
@@ -435,7 +468,9 @@ model pages mutated with random bit flips, byte overwrites, and truncation.
 
 Validation is structural. It does not know the tree configuration, so the
 tree checks key and value lengths against its limits separately when it
-opens a store.
+opens a store. It also ignores the `leaf` stamp and the `crc` field: the
+tree verifies the checksum on the raw bytes before it validates, and checks
+the stamp afterwards.
 
 ## `Page` as a base type
 
@@ -464,7 +499,9 @@ tree's leaf page capacity and `M` the largest mini-page size class:
 | Mini-page | Implemented as `MiniPage` in `bf-tree-mini-page` | None | Its base leaf | Any | One size class, `64..=M` |
 | Full page | Implemented as a plain `Page` in a `Kind::Full` block ([plan 0015](../plans/0015-bf-tree-caching.md)) | Required | `None` | `Insert` only | `L` |
 
-A base page never stores a tombstone: a [batch merge](#batch-merges) drops a
+A stored base page also carries its own leaf in `leaf` and a sealed `crc`
+([Leaf stamp and checksum](#leaf-stamp-and-checksum)); mini-pages and full
+pages in memory do not maintain them. A base page never stores a tombstone: a [batch merge](#batch-merges) drops a
 `Delete` after it removes the base key. [BF-Tree mini-pages](bf-tree-mini-page.md)
 defines the mini-page rules, size classes, and reference bits.
 
@@ -481,7 +518,8 @@ All mutations require exclusive access (`&mut Page`), and reads require only
 shared access (`&Page`). No read writes page bytes, so concurrent readers under
 a shared leaf lock need no write protocol inside the page; access tracking
 lives outside the format (see [Slots and records](#slots-and-records)).
-Page operations do not log, advance the LSN, or change the snapshot version.
+Page operations do not log, advance the LSN, stamp the leaf, or seal the
+checksum.
 Callers must protect borrowed results against relocation.
 
 ## References
@@ -493,11 +531,13 @@ Callers must protect borrowed results against relocation.
   and mini-pages share one packed record format.
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `LeafNode` in
-  `src/nodes/leaf_node.rs` has the same header fields, field order, and slot
-  packing. peppydb differs by encoding integers as explicit little-endian
-  values, measuring payload offsets from the page start, capping pages at
-  4096 bytes (upstream allows up to 32 KiB), and reserving the slot bit where
-  upstream stores its reference bit.
+  `src/nodes/leaf_node.rs` has the same header size, the same fields and
+  field order in bytes `0..24`, and the same slot packing. peppydb differs
+  by encoding integers as explicit little-endian values, measuring payload
+  offsets from the page start, capping pages at 4096 bytes (upstream allows
+  up to 32 KiB), reserving the slot bit where upstream stores its reference
+  bit, and storing `leaf` and `crc` in bytes `24..32`, where upstream stores
+  `snapshot_version`.
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.5: fence-derived prefix
   compression and look-ahead (preview) bytes. The
   [upstream page explanation](../explanations/bf-tree-upstream-pages.md#fences-prefixes-and-previews)
@@ -509,3 +549,6 @@ Callers must protect borrowed results against relocation.
   peppydb follows upstream's current slot packing, except for the reserved bit.
 - [Plan 0011](../plans/0011-bf-tree-mini-page.md) retired the in-slot
   reference bit and added backing-leaf accessors, `Merge`, and batch merges.
+- [Plan 0017](../plans/0017-bf-tree-store-format.md) replaced
+  `snapshot_version` with the `leaf` stamp and the `crc` checksum; see the
+  [persistence design](bf-tree-persistence.md).

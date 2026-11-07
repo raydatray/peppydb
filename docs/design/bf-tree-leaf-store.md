@@ -20,17 +20,22 @@ flowchart LR
     Tree --> Inner["Inner: root word + frames, derived, in memory"]
     Tree --> Map["LeafMap"]
     Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
+    Map --> PT["pages: Table&lt;AtomicU64&gt;, leaf to page number"]
     Map --> CB["CircularBuffer: mini-page blocks"]
     Map --> C["SizeClasses"]
     Map --> PS["Box&lt;dyn PageStore&gt;"]
     E -. "block bytes: MiniPage" .-> CB
+    PT -. "page number" .-> PS
     PS --> Mem["MemStore"]
-    PS --> File["FileStore: superblock page + slots"]
+    PS --> File["FileStore: two superblock copies, then pages"]
     Tree -. per thread .-> S["Scratch: page, right"]
 ```
 
 Inner nodes stay in memory and are rebuilt on open. Only leaves cross the
-store boundary. No base page stays in memory between operations: each
+store boundary. The [persistence design](bf-tree-persistence.md) records
+the durable format: the file layout, the checksummed superblock copies,
+page numbers, and the leaf stamp and checksum in every stored page
+([plan 0017](../plans/0017-bf-tree-store-format.md)). No base page stays in memory between operations: each
 access that needs one loads it into a thread-local scratch buffer. Writes
 buffer in mini-pages, which stay in memory until a merge writes them to the
 store.
@@ -40,32 +45,45 @@ store.
 ```rust
 pub trait PageStore: Send + Sync + std::fmt::Debug {
     fn page_size(&self) -> usize;
-    fn slots(&self) -> u64;
-    fn alloc(&self) -> Result<LeafId, StoreError>;
-    fn free(&self, id: LeafId) -> Result<(), StoreError>;
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError>;
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError>;
+    fn page_count(&self) -> u64;
+    fn alloc(&self) -> Result<PageNumber, StoreError>;
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError>;
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
     fn sync(&self) -> Result<(), StoreError>;
     fn superblock(&self) -> &Superblock;
+    fn state(&self) -> State;
+    fn commit(&self, state: &State) -> Result<(), StoreError>;
 }
 ```
 
-- A store is a sequence of fixed-size slots. `LeafId` is the slot index.
-  Reads and writes transfer exactly one page; a buffer of any other length is
-  a `BufferLength` error.
+- A store is a sequence of fixed-size pages addressed by `PageNumber`, a
+  position that is distinct from `LeafId`. The tree maps leaves to page
+  numbers in its [page table](#the-page-table), and each stored page names
+  its leaf in its header
+  ([persistence](bf-tree-persistence.md#page-numbers-and-leaf-ids)). Reads
+  and writes transfer exactly one page; a buffer of any other length is a
+  `BufferLength` error.
 - A store is shared between threads, and every method takes `&self`.
-  Concurrent `alloc` calls return distinct IDs. The store does not order
-  concurrent accesses to one slot: the caller must serialize them, and the
-  tree does so with the leaf lock. The
+  Concurrent `alloc` calls return distinct page numbers. The store does not
+  order concurrent accesses to one page: the caller must serialize them,
+  and the tree does so with the leaf lock. The
   [concurrency design](bf-tree-concurrency.md#the-shareable-store-contract)
   records the full contract.
-- `alloc` hands out a zeroed slot: a freed one if any, else a new slot at the
-  end. `free` zeroes a slot and returns it for reuse. A write to a freed slot
-  is an error; a read of one returns zeros. Leaves are never merged, so the
-  tree calls `free` in two places only: `Tree::open` reclaims all-zero slots,
-  and a split that fails after it allocated its right leaf returns that
-  slot.
+- `alloc` hands out a freed page if any, with its old bytes, else a new
+  zero page at the end. `free` returns a page for reuse and does not change
+  its bytes. A write to a freed page and a second `free` are
+  `FreedPage`; a page number at or beyond `page_count()` is `UnknownPage`.
+  `page_count()` counts every page ever allocated, live or freed. The tree
+  calls `alloc` only in `write_through`, on a leaf's first write, and
+  `free` in two places only: `Tree::open` reclaims all-zero pages, and
+  `LeafMap::discard` zeroes and frees the page of a split's right half when
+  the split fails after writing it.
 - Writes are durable only after `sync` returns.
+- `state()` returns the last committed `State`, and `commit` replaces it
+  durably and atomically through alternating superblock copies
+  ([persistence](bf-tree-persistence.md#commit)). The tree does not commit
+  yet; plan 0018's checkpoint is the first caller.
 - The tree holds a `Box<dyn PageStore>`, so one `Tree` type serves every
   backend. The virtual call sits next to a page read and costs nothing
   measurable.
@@ -73,26 +91,35 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
   keeps the operation name, the `std::io::ErrorKind`, and the raw OS code
   rather than the boxed `io::Error`.
 
-### Placement and the superblock
+### Placement
 
-Slot `id` lives at byte offset `(id + 1) * page_size`, after a one-page
-superblock. There is no catalogue: the file length determines the slot count,
-and the slot index determines the offset. Fixed placement costs the ability to
-resize a leaf in place, which fixed-capacity leaves never need.
+Two 4096-byte superblock copies fill the first 8 KiB of a file, and page
+number `i` lives at byte offset `8192 + i * page_size`. There is no
+catalogue: the file length determines the page count, and the page number
+determines the offset. Fixed placement costs the ability to resize a page in
+place, which fixed-capacity leaves never need. The
+[persistence design](bf-tree-persistence.md#on-disk-layout) records the
+layout and its alignment.
 
-A freed slot is all zeros. No valid page is all zeros, because its header
-carries a nonzero capacity, so free slots are recoverable by scanning.
-`FileStore::open` does not scan: on a 96 GiB file one probe per slot cost
-three minutes. A reopened store treats every slot as live, and `Tree::open`,
-which reads every slot anyway, returns the all-zero ones with `free`.
+A new page is all zeros, and no valid stored page is all zeros, so `open`
+recognizes a page that was allocated but never written. `FileStore` does
+not persist its free list, and `FileStore::open` does not scan: on a 96 GiB
+file one probe per page cost three minutes. A reopened store treats every
+page as live, and `Tree::open`, which reads every page anyway, returns the
+all-zero ones with `free`.
 
-The superblock (version 1, magic `PEPPYBF\0`) records the page size and the
-tree configuration: `inner_capacity`, `max_key_len`, and `max_value_len`,
-all little-endian `u32`, zero-padded to one page. The configuration fixes the
-admission rule for the file. `Tree::create` refuses a store whose superblock
-disagrees with the requested configuration, and `Tree::open` takes its
-configuration from the superblock, so a reopened tree never admits a key or
-value that the stored pages could not split.
+### The superblock
+
+Each superblock copy (version 2, magic `PEPPYBF\0`) records the page size,
+the tree configuration (`inner_capacity`, `max_key_len`, and
+`max_value_len`), and the committed `State`, protected by a CRC32C. The
+[persistence design](bf-tree-persistence.md#superblock-version-2) records
+the encoding, the selection between the two copies, and the commit rule.
+In memory, `Superblock` holds only the configuration. The configuration
+fixes the admission rule for the file. `Tree::create` refuses a store whose
+superblock disagrees with the requested configuration, and `Tree::open`
+takes its configuration from the superblock, so a reopened tree never
+admits a key or value that the stored pages could not split.
 
 The superblock records only layout settings. `circular_buffer_bytes` and
 `second_chance_percent` are runtime settings: `From<&TreeConfig> for
@@ -105,37 +132,47 @@ and requires `Superblock::from(&config) == *store.superblock()`.
 ### Backends
 
 `MemStore` is the fast test backend and the store behind `Tree::in_memory`.
-It keeps its slots in a `Table<MemSlot>`; each slot has its own page mutex
-and a `freed` flag, and a `Mutex<Vec<usize>>` holds the free list. A read or
-write locks only its slot. `FileStore` wraps one `std::fs::File` with
-positioned reads and writes and `sync_data`. Positioned I/O needs only
-`&File`, so reads and writes take no store-wide lock. Its per-slot freed
-flags live in a `Table<AtomicBool>` whose length is the slot count, and a
-`Mutex<Vec<u64>>` holds the free list. `FileStore::create` fails if the path
-exists; `FileStore::open` rejects a file whose length is not a whole number
-of pages. `alloc` extends the file with a zeroed page before returning the
-slot, while it holds the free-list mutex, so the file length stays
-authoritative. Both backends are synchronous and portable; direct and
-asynchronous I/O are later tuning. A shared contract test runs the same
-scenarios against both, including threaded allocation and threaded writes
-to distinct slots.
+It keeps its pages in a `Table<MemPage>`; each page has its own byte mutex
+and a `freed` flag, a `Mutex<Vec<usize>>` holds the free list, and a
+`Mutex<State>` holds the committed state. A read or write locks only its
+page. `FileStore` wraps one `std::fs::File` with positioned reads and
+writes and `sync_data`. Positioned I/O needs only `&File`, so reads and
+writes take no store-wide lock. Its per-page freed flags live in a
+`Table<AtomicBool>` whose length is the page count, a `Mutex<Vec<u64>>`
+holds the free list, a commit mutex serializes commits, and a separate
+short-held mutex holds the state. `FileStore::create` fails if the path
+exists and writes both superblock copies. `FileStore::open` selects the
+newer intact copy and rejects a file shorter than the superblock area or
+whose page area is not a whole number of pages (`TruncatedFile`). `alloc`
+extends the file with a zero page before returning the page number, while
+it holds the free-list mutex, so the file length stays authoritative. Both
+backends are synchronous and portable; direct and asynchronous I/O are
+later tuning. A shared contract test runs the same scenarios against both,
+including threaded allocation, threaded writes to distinct pages, freed
+pages that keep their bytes, and commit order.
 
 ## `LeafMap`
 
-The mapping table gives each `LeafId` a lock and resolves it to the leaf's
-base page in the store and its mini-page, if any, in the circular buffer.
+The mapping table gives each `LeafId` a lock and resolves it to the page
+number of the leaf's base page in the store and to its mini-page, if any,
+in the circular buffer.
 
 ```rust
 pub(super) struct LeafMap {
     store: Box<dyn PageStore>,
     entries: Table<RwLock<LeafEntry>>,
+    /// Page number of each leaf's stored page, or `NO_PAGE` (`u64::MAX`).
+    pages: Table<AtomicU64>,
+    /// The next leaf ID; holes are never reused.
+    next: AtomicUsize,
     circular_buffer: CircularBuffer,
     classes: SizeClasses,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct LeafEntry {
-    /// The slot holds no page.
+    /// The ID names no leaf: a hole left by a leaf that was never written,
+    /// or a discarded split half.
     freed: bool,
     /// A circular-buffer block holding this leaf's mini-page, or, without
     /// `refs`, its full page.
@@ -173,19 +210,26 @@ so a leaf read under S or X is consistent. (Readers set reference bits
 under S through atomics.)
 
 - `read(id)` takes S and `write(id)` takes X. Both return `UnknownLeaf` for
-  an ID beyond the table or a freed slot. Eviction locks a victim's owner
+  an ID beyond the table or a hole. Eviction locks a victim's owner
   with `write(id)`.
 - `try_write(id)` takes X without waiting and returns `None` if the lock is
-  busy or the slot is not live. `Tree::maintain` uses it to apply a read's
+  busy or the leaf is not live. `Tree::maintain` uses it to apply a read's
   hint.
 - `holds(leaf, victim)` reports whether the X-locked entry still holds the
   block that an eviction claim names.
-- `alloc()` allocates a store slot, grows the table to `id + 1`, resets the
-  entry, and returns it under X. The leaf is unreachable until a separator
-  names it.
-- `discard(leaf)` returns a fresh slot to the store and then marks its
-  entry freed, so a failed free leaves the entry live. A split that fails
-  after `alloc` uses it.
+- `alloc()` takes the next leaf ID from the atomic counter `next`, grows
+  both tables to `id + 1`, resets the entry, sets the page number to
+  `NO_PAGE`, and returns the leaf under X. It does not touch the store: the
+  leaf's first `write_through` allocates its page. The leaf is unreachable
+  until a separator names it. Leaf IDs are append-only within a process,
+  and at the 32-bit stamp limit `alloc` returns `TooManyLeaves`
+  ([persistence](bf-tree-persistence.md#leaf-id-allocation)).
+- `discard(leaf)` gives up a fresh, never-reachable leaf. If the leaf has a
+  page, `discard` writes a zero page over it, frees it, and resets the page
+  number; then it marks the entry freed. A failed step leaves the entry
+  live with its page. A split that fails after `alloc` uses it. The zero
+  write keeps a stamped but unreachable page from appearing as an extra
+  leaf at the next `open`, because `free` keeps bytes.
 - `LeafEntry` holds `freed`, `block`, and `refs`
   ([plan 0013](../plans/0013-bf-tree-mini-tree.md)) and `version`
   ([plan 0014](../plans/0014-bf-tree-eviction.md)). `LeafWrite::take_mini`
@@ -198,11 +242,22 @@ under S through atomics.)
   ([caching policy](bf-tree-caching.md#residency)). A test requires
   `size_of::<RwLock<LeafEntry>>() <= 64`.
 - `ids()` yields `0..len()` at the time of the call; `write_if_live(id)`
-  X-locks a live slot or returns `None`. `flush` walks leaves by ID with
+  X-locks a live leaf or returns `None`. `flush` walks leaves by ID with
   them.
 
 This is upstream's `PageTable` row of `RwLock<PageLocation>`: `block` plays
 the role of the `Mini` variant's circular-buffer pointer.
+
+### The page table
+
+`pages[id]` holds the page number of leaf `id`'s stored page, or `NO_PAGE`
+for a leaf that has none yet and for a hole. `page_of(id)` returns it as
+`Option<PageNumber>`. The table lives beside `entries`, not in
+`LeafEntry`, so the entry lock stays within 64 bytes, and only base-page
+I/O and `open` read it. A thread writes `pages[id]` only under the leaf's X
+lock (`alloc`, `write_through`, `discard`) and reads it under S or X.
+`open` builds the table from the leaf stamp in each stored page
+([persistence](bf-tree-persistence.md#the-leaf-to-page-table)).
 
 ### Scratch
 
@@ -233,15 +288,26 @@ fn load_base<'s>(&self, leaf: &impl Locked, buf: &'s mut [u8]) -> Result<&'s mut
 
 `load_base` is the only function that reads a base page. It takes a guard
 (`Locked` is implemented by `LeafRead` and `LeafWrite`), so the caller must
-hold S or X. It reads the slot and checks the header with the O(1)
-`Page::check_header`: the capacity equals the page size, only known flags
-are set, the fences are present, and the slot directory and free gap fit.
-Debug builds also run the full `Page::validate` on every load, so that tests
-exercise it. Release builds do not: `open` validates every slot fully, every
-page written afterwards was produced by this process, and a full validation
-costs far more than the read. A header failure is `CorruptLeaf { id,
-reason }`. Bytes that another process changes while the tree is open can
-cause a panic or an error, never undefined behaviour.
+hold S or X. It resolves the leaf's page number (a leaf with none is
+`CorruptLeaf { reason: "no stored page" }`), reads the page, and checks, in
+order:
+
+1. The page checksum, on the raw bytes. A mismatch is
+   `CorruptLeaf { id, reason: "checksum mismatch" }`.
+2. The header, with the O(1) `Page::check_header`: the capacity equals the
+   page size, only known flags are set, the fences are present, and the
+   slot directory and free gap fit. Debug builds also run the full
+   `Page::validate` on every load, so that tests exercise it. Release
+   builds do not: `open` validates every page fully, every page written
+   afterwards was produced by this process, and a full validation costs far
+   more than the read. A failure is `CorruptLeaf { id, reason }`.
+3. The leaf stamp. A page that names another leaf is
+   `CorruptLeaf { id, reason: "names another leaf" }`.
+
+Bytes that another process changes while the tree is open can cause a panic
+or an error, never undefined behaviour. The
+[persistence design](bf-tree-persistence.md#load_base-checks) records why
+the checksum comes first.
 
 ### `write_through`: the one write path
 
@@ -249,15 +315,20 @@ cause a panic or an error, never undefined behaviour.
 fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<(), TreeError>;
 ```
 
-`write_through` is the only function that writes a base page. The caller
+`write_through` is the only function that writes a base page for a leaf.
+(`discard` also writes, but only a zero page on a failed split.) The caller
 must hold the X lock of every leaf in `pages` (a debug assertion checks it)
 and must pass the reachable leaf first. The other pages are written before
 the first one, so an error before the last write leaves the reachable
-leaf's stored page unchanged. It takes no tree-level lock. A split passes
-both halves in one call, so that later plans can give them one sequence
-number and one atomic switch. The pages are `&mut` because plans 0017 and
-0018 stamp the leaf ID and a sequence number into their headers. Persistence
-changes only the bodies of `load_base` and `write_through`.
+leaf's stored page unchanged. It takes no tree-level lock. For each page it
+stamps the leaf ID into the header, seals the page checksum as the last
+header change, and writes the page to the leaf's page number. On a leaf's
+first write it allocates a page from the store and records it in the page
+table. Writes are in place: a leaf keeps its page number. A split passes
+both halves in one call, so that plan 0018 can give them one sequence
+number and one atomic switch; plan 0018 changes only the internals of
+`write_through` (fresh pages, a `write_seq` stamp) and the selection rule
+in `open`.
 
 ## Tree lifecycle
 
@@ -269,15 +340,15 @@ impl Tree {
     pub fn open_with(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError>;
     pub fn flush(&self) -> Result<(), TreeError>;               // merge every mini-page, then sync
     pub fn into_store(self) -> Box<dyn PageStore>;              // close; buffered records are lost
-    pub fn leaf_count(&self) -> usize;                          // slots, live or freed
+    pub fn leaf_count(&self) -> usize;                          // leaf IDs, live or holes
     pub fn buffered_leaves(&self) -> usize;                     // leaves holding a mini-page
     pub fn circular_buffer_used(&self) -> usize;                // used bytes, dead blocks included
     pub fn store(&self) -> &dyn PageStore;
 }
 ```
 
-`create` requires an empty store whose superblock matches the configuration.
-It allocates the first unbounded leaf and writes it through at once.
+`create` requires an empty store (`page_count() == 0`) with the default
+committed state whose superblock matches the configuration. It allocates the first unbounded leaf and writes it through at once.
 `flush` merges every buffered mini-page into its base page and then calls
 `store.sync()`. `Drop` neither merges nor syncs.
 
@@ -285,29 +356,33 @@ It allocates the first unbounded leaf and writes it through at once.
 
 ```mermaid
 flowchart TD
-    S[configuration from superblock, validate] --> V[read every slot]
+    S["configuration from superblock, validate"] --> V[read every page]
     V --> Z{all zeros?}
-    Z -->|yes| F[free the slot in the store]
-    Z -->|no| P[Page::validate, fences present, keys and values within limits]
+    Z -->|yes| F[free the page in the store]
+    Z -->|no| C["checksum, Page::validate"]
+    C --> L["leaf stamp: present, plausible, unclaimed"]
+    L --> P["fences present, keys and values within limits"]
     P --> T{fences tile the key space?}
     T -->|no| E[InconsistentLeaves]
     T -->|yes| B[bulk-build inner levels from lower fences]
-    B --> R[set root, map every slot with its freed flag]
+    B --> R["set root, map each leaf to its page, IDs without a page are holes"]
 ```
 
 1. The configuration comes from the superblock (`open`) or from the caller
    (`open_with`, whose layout settings must equal the superblock's). It must
    pass `TreeConfig::validate`.
-2. Every slot is read once. An all-zero slot is free: a slot allocated for a
-   split but never written. `open` returns it to the store's free list, so
-   the next allocation reuses it. Every other slot must pass
-   `Page::validate`, carry fences, and keep every fence, key, and value within
-   the configured limits. Failures are `CorruptLeaf { id, reason }` or
-   `InconsistentLeaves(reason)`.
+2. Every page is read once. An all-zero page is free: a page allocated but
+   never written. `open` returns it to the store's free list, so the next
+   allocation reuses it. Every other page must pass its checksum and
+   `Page::validate` (else `CorruptPage { page_number, reason }`), name a
+   leaf that no other page names and that lies below a plausibility bound,
+   carry fences, and keep every fence, key, and value within the configured
+   limits (else `InconsistentLeaves(reason)`). The
+   [persistence design](bf-tree-persistence.md#open) records each check and
+   its order.
 3. Leaves are sorted by lower fence. There must be exactly one unbounded lower
    fence, exactly one unbounded upper fence, and `upper(i) == lower(i + 1)` for
-   every adjacent pair. Any gap, overlap, or duplicate is
-   `InconsistentLeaves`.
+   every adjacent pair. Any gap or overlap is `InconsistentLeaves`.
 4. Inner levels are bulk-built from the sorted list. The separators are the
    lower fences of leaves `1..n`. Each level is filled left to right by entry
    size, exactly as `InnerNode::try_insert` would accept separators until
@@ -316,11 +391,12 @@ flowchart TD
    separator borrows the last entry of its left neighbour instead; under the
    admission rule a full node holds at least two separators, so the neighbour
    keeps at least one. A single leaf is its own root.
-5. The `LeafMap` gets one entry per slot, with the freed flag from step 2,
-   and an empty circular buffer. No leaf has a mini-page, and no page is
+5. The `LeafMap` gets one entry per leaf ID up to the largest stamped leaf,
+   with the page number from the stamps, and an empty circular buffer. IDs
+   that no page names are holes. No leaf has a mini-page, and no page is
    loaded until an operation needs it.
 
-Open is `O(leaves)` in I/O and memory and is the complete recovery path:
+Open is `O(pages)` in I/O and memory and is the complete recovery path:
 inner nodes are derived and nothing else is persisted. Bulk-built levels are
 packed, so a reopened tree can be shorter than the incrementally built tree
 that wrote it; the next inserts into full nodes simply split them. Upstream
@@ -353,9 +429,10 @@ There is no per-operation atomicity across pages. A split writes two pages
 (the right half first, then the left) and then updates the parent in
 memory. A stop between the two page writes leaves a window:
 
-- **Stop before the right page is written.** The right slot is all zeros
-  (`alloc` extended the file with a zeroed page). The store still holds the
-  pre-split leaf, so it is consistent, and `open` reclaims the slot.
+- **Stop before the right page is written.** If `write_through` already
+  allocated the right page, it is all zeros: a new page is zero, and in
+  this stack every page that the tree frees is zero. The store still holds
+  the pre-split leaf, so it is consistent, and `open` reclaims the page.
 - **Stop between the two writes.** The right page and the pre-split left
   page overlap. `open` refuses the store with `InconsistentLeaves`. Without
   a `sync` the device can also persist the left write and lose the right
@@ -368,15 +445,19 @@ returns an error, but it cannot make two writes atomic. The user accepted
 this window until shadow paging in
 [plan 0018](../plans/0018-bf-tree-checkpoint.md) removes it.
 
-A torn page write leaves bytes that `Page::validate` rejects at the next
-`open`. Within a running process, a split that fails at any point after
-`alloc` frees the fresh right slot, because a written but unreachable right
-page would overlap its left neighbour at the next `open`. A failed
+A torn page write leaves bytes that fail the page checksum, and the next
+`open` returns `CorruptPage`; with writes in place, no older copy exists
+to fall back to. Within a running process, a split that fails at any point
+after `alloc` discards the fresh right leaf, and `discard` zeroes and frees
+its page if it was written, because a written but unreachable right page
+would overlap its left neighbour at the next `open`. A failed
 `install` still leaves the left page rewritten; under the admission rule
 that is an internal bug, and shadow paging (plan 0018) removes the window.
 
-The write-ahead log and crash atomicity are separate components. The page header's
-`lsn` and `snapshot_version` fields stay inactive.
+The write-ahead log and crash atomicity are separate components. The page
+header's `lsn` field stays inactive until plan 0018 renames it to
+`write_seq`; the `leaf` stamp and the `crc` checksum are active
+([persistence](bf-tree-persistence.md#base-page-identity-and-the-page-checksum)).
 
 ## Baselines
 
@@ -507,11 +588,13 @@ the current design keeps no base page resident.
   I/O, the mapping table, and the per-leaf reader-writer lock.
 - Plans [0008](../plans/0008-bf-tree-leaf-store.md) (the store boundary,
   validation, and open), [0012](../plans/0012-bf-tree-shared-tree.md)
-  (locked entries, scratch, and write-through), and
+  (locked entries, scratch, and write-through),
   [0013](../plans/0013-bf-tree-mini-tree.md) (mini-pages in entries,
-  `open_with`, and flush merges), and
+  `open_with`, and flush merges),
   [0014](../plans/0014-bf-tree-eviction.md) (eviction, `version`, and
-  relocation).
+  relocation), and [0017](../plans/0017-bf-tree-store-format.md) (page
+  numbers, the page table, leaf stamps, page checksums, and the version 2
+  superblock, recorded in the [persistence design](bf-tree-persistence.md)).
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `src/storage.rs`
   (`PageTable`, `PageLocation`), `src/utils/mapping_table.rs`, `src/fs/mod.rs`

@@ -1,11 +1,11 @@
 # 0017: Durable store format
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Leaf storage](../design/bf-tree-leaf-store.md),
 [shared pages](../design/bf-tree-pages.md),
-[build system](../design/build-system.md). This stack creates
-`docs/design/bf-tree-persistence.md`.
+[build system](../design/build-system.md). This stack created the
+[persistence design](../design/bf-tree-persistence.md).
 
 **Parent roadmap:** [BF-Tree implementation](0002-bf-tree-roadmap.md),
 milestone 9 (first of three tree-side stacks).
@@ -599,8 +599,22 @@ Resolved:
 - [x] Diff 5: committed state in both backends.
 - [x] Diff 6: page-number addressing, leaf stamps, and checksums in the tree.
 - [x] Diff 7: open fixtures and damaged pages.
-- [ ] Diff 8: design documents and roadmap.
-- [ ] Stack-wide verification.
+- [x] Diff 8: design documents and roadmap.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-06)
+
+| Check | Outcome |
+| --- | --- |
+| CRC32C vectors | `tests/crc.rs` in `bf-tree-store`: the RFC 3720 §B.4 values pass: `"123456789"` gives `0xE3069283`, and 32 zero bytes give `0x8A9136AA`. |
+| Page checksum | `tests/layout.rs` in `bf-tree-page`: `set_leaf` and `leaf` round trip, including `None`; a raw ID of `u32::MAX` is `LeafIdTooLarge`; a sealed 256-byte page verifies, and flipping any single byte of it fails verification; split outputs inherit the leaf stamp and a stale checksum. |
+| Superblock codec | `tests/superblock.rs`: copies round trip with their state; flipping any encoded byte fails decode; decode names a bad magic, version 1, and a checksum mismatch; `select` takes the newer copy and falls back from a flipped, zeroed, or half-written copy in either position; a configuration mismatch is rejected; two damaged copies give `NoSuperblock`. |
+| `FileStore` | `tests/file.rs`: create writes both copies and refuses an existing path; commits alternate copies and survive reopen; a torn newer copy (garbage, zeros, or half written) reopens at the previous state; a zeroed copy 0 opens from copy 1; short and ragged files are `TruncatedFile`; a foreign file is `NoSuperblock`. |
+| Store contract | `tests/contract.rs` on `MemStore` and `FileStore`: commit order (`CommitOrder` for ids 0, 1, and 3 after commit 1, with no change); freed pages keep their bytes and are reused before growth; freed and unknown pages are rejected; threaded allocation and writes. |
+| Tree identity | `tests/store.rs`: `reopen_rebuilds_the_page_table_from_the_stamps` (`FileStore`, 600 keys) finds the rebuilt page table equal to the table before close, every stored page stamped with its leaf and sealed, and the tree equal to its oracle and passing `check_invariants`; `leaf_ids_stop_at_the_32_bit_stamp_limit` returns `TooManyLeaves` without growing a table; `create` rejects a store with a committed state. |
+| Damaged pages | `tests/damage.rs` fixtures on both backends: a flipped byte gives `CorruptLeaf` ("checksum mismatch") on load and `CorruptPage` on open; a page naming another leaf fails the load and then the open as a duplicate claim; a page with no leaf or an implausibly large ID fails the open; holes stay unused; zero pages are reused after open; a hole below the largest leaf stays freed. `tests/open.rs` covers torn, resealed-but-invalid, duplicated, unfenced, and gapped pages. |
+| Existing suites | The model, concurrent, and contention suites pass. The concurrent and contention suites passed 10 of 10 release runs after diff 6. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (345 tests), and `go vet` and `go test` pass. Miri was not needed: the stack does not change `crates/bf-tree-circular-buffer`. |
 
 ## Discoveries and plan changes
 
@@ -637,6 +651,12 @@ Resolved:
   table, which stops a damaged stamp from forcing a table of billions of
   entries. The exact bound has no correctness role; plan 0018 rechecks it
   with fresh-page writes.
+- **Open's fence and limit checks stay `InconsistentLeaves`.** The Approach
+  diagram groups fences and limits with `Page::validate` under
+  `CorruptPage`. The code returns `CorruptPage` only for the checksum and
+  `Page::validate`; the leaf stamp, the ID bound, and duplicate claims come
+  next, and missing fences or exceeded limits remain `InconsistentLeaves`,
+  as in plan 0008. The persistence design records the implemented order.
 - **The counting test store records leaves from stamps.** It sees page
   numbers, so it reads the leaf stamp of each written page; the tests that
   assert which leaves were written are unchanged.
