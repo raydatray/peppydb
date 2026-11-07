@@ -64,7 +64,8 @@ impl Tree {
             store.sync()?;
         }
         // Older copies of a leaf are superseded: no commit needs them.
-        for page_number in selection.released.iter().chain(&selection.erased) {
+        let freed = selection.zero.iter().chain(&selection.released);
+        for page_number in freed.chain(&selection.erased) {
             match store.free(*page_number) {
                 Ok(()) | Err(StoreError::FreedPage(_)) => {}
                 Err(error) => return Err(error.into()),
@@ -98,18 +99,21 @@ impl Tree {
 }
 
 /// The page that open keeps for one leaf.
-struct Chosen {
+pub(super) struct Chosen {
     write_seq: u64,
-    page_number: PageNumber,
-    bounds: LeafBounds,
+    pub(super) page_number: PageNumber,
+    pub(super) bounds: LeafBounds,
 }
 
 /// What a scan of every stored page selected.
-struct Selection {
+pub(super) struct Selection {
     /// The newest page of each leaf, by leaf ID.
-    chosen: HashMap<LeafId, Chosen>,
-    /// Pages to free: older copies of a leaf.
+    pub(super) chosen: HashMap<LeafId, Chosen>,
+    /// Pages to free: older copies of a leaf, and pages that fail their
+    /// checksum in a way a crash explains.
     released: Vec<PageNumber>,
+    /// All-zero pages: allocated, never written.
+    zero: Vec<PageNumber>,
     /// Pages written after the committed write watermark, to zero and free.
     erased: Vec<PageNumber>,
     /// The largest write sequence in any page.
@@ -118,9 +122,9 @@ struct Selection {
 
 /// Read every page and keep the newest committed page of each leaf: the one
 /// with the highest write sequence at or below `written`, the committed
-/// write watermark. Pages above it are erased. All-zero pages were
-/// allocated and never written, and are freed at once.
-fn select(
+/// write watermark. Has no side effects: the caller frees, erases, or
+/// ignores what it reports.
+pub(super) fn select(
     store: &dyn PageStore,
     config: &TreeConfig,
     written: u64,
@@ -134,6 +138,7 @@ fn select(
     let mut selection = Selection {
         chosen: HashMap::new(),
         released: Vec::new(),
+        zero: Vec::new(),
         erased: Vec::new(),
         max_seen: 0,
     };
@@ -144,12 +149,9 @@ fn select(
         let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
         store.read(page_number, &mut bytes)?;
         if bytes.iter().all(|&byte| byte == 0) {
-            // A page allocated but never written. Return it to the store's
-            // free list; a backend that rescanned on open already has it.
-            match store.free(page_number) {
-                Ok(()) | Err(StoreError::FreedPage(_)) => continue,
-                Err(error) => return Err(error.into()),
-            }
+            // A page allocated but never written.
+            selection.zero.push(page_number);
+            continue;
         }
         let (write_seq, _) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
         selection.max_seen = selection.max_seen.max(write_seq);
