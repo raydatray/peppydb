@@ -15,6 +15,10 @@ pages, and deferred eviction, also without a new lock rank
 [Plan 0016](../plans/0016-bf-tree-concurrency.md) replaced the interim
 tree-wide inner lock and its global routing version with per-node
 version-locked frames: the paper's optimistic latch coupling (§3.4).
+[Plan 0018](../plans/0018-bf-tree-checkpoint.md) added three locks for
+shadow paging and checkpoints: the checkpointing mutex, the write-through
+gate, and the superseded-page mutex
+([persistence](bf-tree-persistence.md#the-checkpoint-protocol)).
 
 Related documents: [tree structure](bf-tree-structure.md) (writes, splits,
 scans), [inner nodes](bf-tree-inner-nodes.md) (the node format that frames
@@ -45,8 +49,11 @@ flowchart LR
     Inner --> F["Frames: a Table of Frame, never freed"]
     F --> Fr["Frame: version AtomicU64 + ArcSwapOption of Image"]
     Inner --> RG["root_grow: Mutex"]
+    Tree --> CK["checkpointing: Mutex, applied and last_seq: AtomicU64"]
     Tree --> Map["LeafMap"]
     Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version, dirty"]
+    Map --> GT["gate: RwLock, write_seq: AtomicU64"]
+    Map --> SS["superseded: Mutex of page numbers"]
     Map --> CB["CircularBuffer: Mutex&lt;State&gt; + slab"]
     Map --> PS["Box&lt;dyn PageStore&gt;: Send + Sync, &amp;self"]
     Tree -. per thread .-> S["thread-local Scratch: page, right"]
@@ -60,6 +67,13 @@ pub struct Tree {
     leaves: LeafMap,
     /// Promotion rolls: a seed, a tree identity, and a stream counter.
     policy: Policy,
+    /// A sync or commit failed (plan 0018).
+    store_failed: AtomicBool,
+    /// One checkpoint at a time.
+    checkpointing: Mutex<()>,
+    /// The applied watermark and the operation-sequence counter.
+    applied: AtomicU64,
+    last_seq: AtomicU64,
 }
 
 /// The routing layer (crates/bf-tree/src/inner.rs).
@@ -76,7 +90,10 @@ struct Inner {
 
 | Lock | Type | Protects | Taken by |
 | --- | --- | --- | --- |
-| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`, `dirty`), the mini-page or full-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), `flush` and eviction (X, by ID), `maintain`, the deferred retry, and `evict_if_clean` (X, by ID, `try_write` only) |
+| Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`, `dirty`), the mini-page or full-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), the checkpoint pass and eviction (X, by ID), `maintain`, the deferred retry, and `evict_if_clean` (X, by ID, `try_write` only) |
+| Checkpointing mutex | `Mutex<()>` in `Tree` | one checkpoint at a time: the next checkpoint id and the free step | `Tree::checkpoint`, for the whole call; `create` commits before the tree is shared, without it |
+| Write-through gate | `RwLock<()>` in `LeafMap` | the write watermark: no write-through is in flight while it is held exclusively | `LeafMap::write_through` (S, for the whole call); `LeafMap::write_watermark` in the checkpoint (X, for one load) |
+| `superseded` mutex | `Mutex<Vec<(PageNumber, u64)>>` in `LeafMap` | the list of replaced pages and their replacing sequences | `write_through` (push), `take_superseded_through` (drain); the pages are freed after it is released |
 | Frame version lock | `AtomicU64` in each `Frame` | the frame's image: only the holder publishes a new one | `Inner::install`, through `Inner::confirm` and `FrameRef::write`; readers only load the version |
 | `root_grow` | `Mutex<()>` in `Inner` | replacement of the root word | `Inner::install`, only when the split node is the root |
 | Root word | `AtomicU64` (not a lock) | the root `ChildRef` | stored by root growth under `root_grow`, and by `open` and test fixtures before the tree is shared |
@@ -204,13 +221,21 @@ level.
 
 ```mermaid
 flowchart LR
-    A["1 reachable leaf lock, at most one"] --> B["2 fresh leaf lock, split only"]
+    Z["0 checkpointing mutex"] --> A["1 reachable leaf lock, at most one"]
+    A --> B["2 fresh leaf lock, split only"]
     B --> C["3 frame write locks, bottom-up by level"]
     C --> D["4 root_grow"]
-    D --> E["5 store free list"]
-    E --> F["6 Table growth, MemStore page mutex, circular-buffer mutex"]
+    D --> G["5 write-through gate"]
+    G --> E["6 store free list, FileStore commit mutex"]
+    E --> F["7 superseded mutex, Table growth, MemStore page mutex, store state mutex, circular-buffer mutex"]
 ```
 
+- Rank 0 is the checkpointing mutex. `Tree::checkpoint` takes it first,
+  with no other lock held, and holds it for the whole call. Under it the
+  checkpoint takes leaf locks one at a time in the pass, then the gate
+  exclusively, then the store's locks for `sync`, `commit`, and `free`. No
+  other thread takes it, so no thread waits for it while it holds another
+  lock.
 - Rank 1 is the leaf that routing named. An operation holds at most one.
 - Rank 2 is the right half of a split. It is freshly allocated and no
   separator names it yet.
@@ -221,21 +246,36 @@ flowchart LR
   candidate is locked. Fresh frames are never locked.
 - Rank 4 is `root_grow`. `install` takes it only while it holds the current
   root's lock: the root leaf's X lock, or the root frame's write lock.
-- Ranks 5 and 6 are innermost. `MemStore::alloc` and `FileStore::alloc`
+- Rank 5 is the write-through gate. `write_through` takes it shared for
+  its whole duration, under the X locks of the leaves it writes and never
+  under a frame lock or `root_grow`: a split calls `write_through` before
+  `install`. Under the shared gate it takes only rank 6 and 7 locks
+  (`alloc`, `write`, a `free` of a failed page, and the `superseded` push),
+  and it waits for nothing else. The checkpoint takes the gate exclusively
+  in `write_watermark`, holding only the checkpointing mutex, with no leaf
+  or frame lock, and releases it after one atomic load.
+- Ranks 6 and 7 are innermost. `MemStore::alloc` and `FileStore::alloc`
   hold the free-list mutex while they grow their page table (and
   `FileStore::alloc` while it extends the file). `free` holds it while it
   sets the page's freed flag; it does not change page bytes.
   `MemStore::read` and `write` take only the page mutex. `FileStore` reads
   and writes take no lock. `state` and `commit` take the store's state
   mutex; `FileStore::commit` first takes its commit mutex and holds it
-  across the copy write and its sync, and the tree does not commit yet. The
-  tree reaches the free list only under leaf locks: `write_through`
-  allocates a leaf's first page, and `LeafMap::discard` frees a discarded
-  split half's page, never while `install` holds frame locks. `LeafMap::alloc` takes no store
-  lock: it advances an atomic leaf-ID counter and grows the leaf tables
-  (table growth) under the left leaf's X lock. `Frames::alloc` takes table
-  growth under frame locks or `root_grow`. No holder of a rank 5 or 6 lock
-  takes a leaf lock, a frame lock, or `root_grow`.
+  across the copy write and its sync. The tree commits only from the
+  checkpoint, under the checkpointing mutex alone, and from `create` before
+  the tree is shared. The tree reaches the free list under leaf locks
+  (`write_through` allocates every fresh page, and `LeafMap::discard` frees
+  a discarded split half's page, never while `install` holds frame locks)
+  and from the checkpoint's free step, which holds only the checkpointing
+  mutex. `LeafMap::alloc` takes no store lock: it advances an atomic
+  leaf-ID counter and grows the leaf tables (table growth) under the left
+  leaf's X lock. `Frames::alloc` takes table growth under frame locks or
+  `root_grow`. No holder of a rank 6 or 7 lock takes a leaf lock, a frame
+  lock, `root_grow`, or the gate.
+- The `superseded` mutex is innermost. `write_through` pushes under it
+  while it holds the gate shared, and `take_superseded_through` drains it
+  under the checkpointing mutex. Its holder calls nothing: the checkpoint
+  frees the drained pages after it releases the mutex.
 - The circular-buffer mutex is innermost too. Allocation and free take it
   only under a leaf's X lock: `LeafMap::buffer` allocates and grows
   mini-pages, `Tree::relocate` allocates a copy and frees the old block,
@@ -254,14 +294,16 @@ Readers take no frame lock and no `root_grow`, and hold at most one leaf S
 lock. Scans release a leaf before they lock the next. Eviction and
 `make_room` run with no leaf lock. Plans 0014 and 0015 added no rank.
 Eviction, `maintain`, and the deferred path take a leaf lock by ID while
-they hold no other leaf lock, exactly as `flush` does. The `Tree` doc
-comment in `crates/bf-tree/src/lib.rs` states the same order in four
-groups (leaves, frames, `root_grow`, innermost).
+they hold no other leaf lock, exactly as the checkpoint pass does. Plan
+0018 added ranks 0 and 5 and the `superseded` mutex. The `Tree` doc
+comment in `crates/bf-tree/src/lib.rs` states the order of plan 0016 in
+five groups (leaves, frames, `root_grow`, store locks, innermost); it does
+not yet name the checkpointing mutex, the gate, or the `superseded` mutex.
 
-**Future extension.** [Plan 0018](../plans/0018-bf-tree-checkpoint.md)
-plans a write-through gate, an `RwLock<()>` that `write_through` holds
-shared and `checkpoint` holds exclusively. It would sit after `root_grow`
-and before the innermost locks. It does not exist yet.
+**`checkpoint` must not be called with a leaf lock held.** The pass locks
+every live leaf in turn. A caller that holds a leaf lock, for example a
+`get_with` or `scan_with` callback, would wait for its own lock. This is
+the same rule as for [callbacks](#deadlock-freedom).
 
 ## Route, lock, validate, retry
 
@@ -421,7 +463,7 @@ while the caller holds the left node's lock (the leaf's X lock, or the
 frame's write lock one level up), so every consistent descent with the
 separator reaches the left node. Paths recorded before the leaf lock would
 go stale under concurrent splits anyway, and without them no caller
-(writes, `flush`, eviction, promotion) carries a path.
+(writes, `checkpoint`, eviction, promotion) carries a path.
 
 Propagation blocks bottom-up instead of splitting on descent. Frame locks
 wait rather than fail, and the level order makes waiting deadlock-free, so
@@ -515,35 +557,47 @@ has no cycle. The cases:
    drops the leaf lock before it routes again.
 2. **A write** holds one reachable leaf. A split allocates a leaf ID (an
    atomic counter and table growth, rank 6, released before the entry is
-   locked) and then X-locks the fresh leaf. Its `write_through` allocates
-   the right half's page under both leaf locks (ranks 5 and 6, released
-   before `alloc` returns).
+   locked) and then X-locks the fresh leaf. Its `write_through` takes the
+   gate shared (rank 5) and allocates fresh pages for both halves under
+   both leaf locks (ranks 6 and 7, released before `alloc` returns).
    No route names the fresh leaf. Only a thread that locks leaves by ID can
    contend for it, and such a thread must hold no other leaf lock, so it
-   releases the lock without waiting. `check_invariants`, `flush`,
-   eviction, and `maintain` are such threads.
-3. **`flush`** locks leaves by ID, one at a time, and holds no other leaf
-   lock when it waits for one. Under that X lock it calls `merge_leaf`,
-   which may split through `split_leaf` and `install` exactly as a write
-   does, so the leaf it holds acts as rank 1 and the fresh right leaf as
-   rank 2. It releases both before it locks the next ID.
-4. **Eviction** runs only when the evicting thread holds no leaf lock: a
+   releases the lock without waiting. `check_invariants`, the checkpoint
+   pass, eviction, and `maintain` are such threads.
+3. **The checkpoint pass** holds the checkpointing mutex (rank 0), locks
+   leaves by ID, one at a time, and holds no other leaf lock when it waits
+   for one. Under that X lock it calls `merge_leaf`, which may split
+   through `split_leaf` and `install` exactly as a write does, so the leaf
+   it holds acts as rank 1 and the fresh right leaf as rank 2. It releases
+   both before it locks the next ID. No other thread waits for the
+   checkpointing mutex while it holds a leaf lock: a second checkpoint
+   waits for it holding nothing.
+4. **The gate.** A write-through waits for the gate shared while it holds
+   leaf X locks (ranks 1 and 2). The checkpoint waits for the gate
+   exclusively while it holds only rank 0. The holders of the shared gate
+   are write-throughs in flight; they wait only for rank 6 and 7 locks,
+   whose holders wait for nothing, so they finish and release the gate.
+   std's `RwLock` may block new shared requests behind the waiting
+   exclusive request. Those write-throughs then wait for one atomic load,
+   and no cycle forms, because the checkpoint holds no lock that a
+   write-through needs.
+5. **Eviction** runs only when the evicting thread holds no leaf lock: a
    writer returns `Attempt::NeedRoom` and drops every guard before it
    calls `make_room`. `Tree::evict` then locks exactly one leaf, the
    victim's owner, by ID with the blocking `LeafMap::write`. The victim can
    be the writer's own leaf or another evicting writer's leaf; because the
    writer holds nothing, neither case can deadlock. Under the owner's X
-   lock, `merge_leaf` may split exactly as in a write or `flush`. The
+   lock, `merge_leaf` may split exactly as in a write or a checkpoint. The
    split's right guard drops before the owner's guard. `evict` releases
    both before it retires or unclaims the claim.
-5. **`maintain`** applies a read's hint after the read drops its S lock.
+6. **`maintain`** applies a read's hint after the read drops its S lock.
    It holds no leaf lock and calls `LeafMap::try_write`, which never
    waits. If the lock is busy, the hint is skipped. A promotion under that
    X lock may merge and split exactly as a write does. A deferred hint
    releases the X lock first, so the deferred path holds no leaf lock
    while it evicts: a full-page victim is evicted through `Tree::evict` as
-   in case 4, and `evict_if_clean` and the final retry use `try_write`.
-6. **`install`** holds the leaf X locks (ranks 1 and 2) and takes frame
+   in case 5, and `evict_if_clean` and the final retry use `try_write`.
+7. **`install`** holds the leaf X locks (ranks 1 and 2) and takes frame
    locks bottom-up. While it holds frames up to level `k`, it waits only
    for the level `k + 1` parent. `find_parent` cannot read a held frame on
    its path, so it also retries while a frame above level `k + 1` is held;
@@ -552,15 +606,16 @@ has no cycle. The cases:
    it holds the root's lock, and under frame locks or `root_grow` it only
    edits drafts and allocates frames (table growth). It never touches a
    leaf.
-7. **Store, table, and circular-buffer locks** are innermost. Their holders
-   take no leaf lock, no frame lock, and no `root_grow`.
-8. **`check_invariants`** copies the routing layer from frame snapshots
+8. **Store, table, `superseded`, and circular-buffer locks** are
+   innermost. Their holders take no leaf lock, no frame lock, no
+   `root_grow`, and no gate.
+9. **`check_invariants`** copies the routing layer from frame snapshots
    without a lock, and then locks leaves one at a time. Its result is
    meaningful only at quiescence, but it cannot deadlock.
 
 **Callbacks must not re-enter the tree.** `get_with` and `scan_with` run
 user code under a leaf's S lock. A write to the same leaf from the callback
-deadlocks on X. A second S request on the same leaf can also deadlock when
+deadlocks on X, and so does a `checkpoint`, whose pass X-locks every leaf. A second S request on the same leaf can also deadlock when
 a writer is queued, because std's reader-writer lock may block new readers
 behind a waiting writer. `Scan` holds no lock between `next` calls,
 so iterator users are not affected.
@@ -633,8 +688,11 @@ version bump from `install` made the concurrent model test fail in 10 of
   leaf's full page, under X (after a merge, if one was needed), so every
   later operation on `k` observes it. A key's value is
   the value of its last completed write.
-- **Flush.** Every write that returned before `flush` began is in the store
-  when `flush` returns, even with concurrent writers.
+- **Checkpoint.** Every write that returned before `checkpoint` was called
+  is in the commit when `checkpoint` returns, even with concurrent writers
+  and concurrent checkpoints. Concurrent checkpoints commit consecutive
+  ids. The [persistence design](bf-tree-persistence.md#why-n-is-complete)
+  gives the argument.
 - **No multi-key atomicity.** Operations on different keys are independent.
 - **Scans.** Both scan forms (`Scan` and `scan_with`) visit one leaf at a
   time under its S lock. A scan yields each key at most once and in
@@ -755,7 +813,8 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
   write and its sync, and keeps the state in a separate short-held mutex,
   so `state()` never waits for a sync. A commit whose `checkpoint_id` does
   not succeed the current one is `CommitOrder`, which catches two
-  concurrent committers.
+  concurrent committers. The tree never has two: its checkpointing mutex
+  serializes checkpoints.
 
 The tests check the contract on both backends: concurrent allocations
 return distinct page numbers, and threads that write distinct pages read
@@ -785,16 +844,16 @@ their own bytes back.
   forms. Tiny nodes force frequent splits and root growth. After the
   threads join, the tree must equal the union of the oracles and pass
   `check_invariants`. The test runs with 2, 4, and 8 writers, on a
-  `FileStore` with flush and reopen, and with 8 threads on one leaf's
+  `FileStore` with a checkpoint and reopen, and with 8 threads on one leaf's
   keys. A watchdog turns a deadlock into a failure. Since plan 0013 every
   write goes through mini-pages, so these runs exercise buffering, merges,
   and merge splits under contention. Since plan 0014,
   `threads_agree_under_constant_eviction` runs writers, readers, scanners,
-  and a looping `flush` on small circular buffers, so every thread evicts
+  and a looping `checkpoint` on small circular buffers, so every thread evicts
   and relocates; since plan 0015 it runs five caching cases (page mode
   with full pages, record mode, record mode with full pages, and no
   caching, at 1 KiB and 2 KiB with second-chance shares of 0, 10, and 100
-  percent). It checks invariants only after the flusher stops.
+  percent). It checks invariants only after the checkpoint thread stops.
   `a_writer_waits_while_every_block_is_claimed` claims every live block,
   starts a writer that needs room, and then evicts the claims; under a
   watchdog, the writer must finish. Since plan 0016,
@@ -808,7 +867,7 @@ their own bytes back.
   sequence number. Readers check that every value is well formed and that
   one writer's sequence number never decreases for one key; scanners check
   order. It runs 6 writers and 6 readers and scanners, 1500 operations per
-  phase, in two phases with `flush` and reopen between them, for record
+  phase, in two phases with a checkpoint and reopen between them, for record
   caching, page caching with full pages, and no caching, each on a
   `MemStore` with a 1 KiB circular buffer and on a `FileStore` with a
   2 KiB circular buffer, plus an 8-writer run with 512-byte leaves. At quiescence every key holds one of its writers' last
@@ -816,13 +875,29 @@ their own bytes back.
   `concurrent_soak` (ignored) repeats such rounds across policies, buffer
   sizes, and backends for `PEPPYDB_SOAK_SECS` seconds (default 60).
 - `crates/bf-tree/src/tests/buffered.rs` runs four writers on a
-  `FileStore` while another thread calls `flush` in a loop. After a final
-  `flush` and a reopen, the tree must hold every write.
+  `FileStore` while another thread calls `checkpoint` in a loop. After a
+  final checkpoint and a reopen, the tree must hold every write.
+- `crates/bf-tree/src/tests/checkpoint.rs` (plan 0018):
+  `concurrent_checkpoints_commit_consecutive_ids_beside_writers` runs three
+  checkpoint threads beside two writers; the 60 checkpoints commit ids 2
+  to 61 once each, every returned `applied_seq` is at least the value read
+  before the call, and a reopen holds all 1600 writes.
+  `a_write_through_in_flight_holds_back_the_commit` holds the gate shared
+  and checks that the checkpoint waits for it.
+- `crates/bf-tree/src/tests/crash.rs` (plan 0018):
+  `crashes_with_checkpoints_beside_writers_recover_after_replay` runs four
+  writers and a checkpoint thread on a fault-injecting store that dies
+  after 200 to 3200 calls. A split during the pass into a new leaf is one
+  of the races it covers. After recovery every key holds a value that the
+  fuzzy bound allows, and replay above `N` gives the oracle
+  ([persistence](bf-tree-persistence.md#guarantees-and-their-tests)).
 - Repeated runs: plans 0013 to 0015 ran the concurrent suites 10 to 20
   times in release builds without a failure. Plan 0016 ran the concurrent,
   route, frames, and contention suites 30 of 30 and 20 of 20 times in
   release builds, and 48 of 48 times in debug builds with 12 copies in
   parallel. The soak test ran 30 s on macOS (125 rounds, 12 threads).
+  Plan 0018 ran the concurrent, contention, checkpoint, buffered, and
+  crash suites 20 of 20 times in release builds.
 - The `bf-tree-sync` tests check that a lock stays usable after a panic
   while it was held, and that `Table` growth is idempotent, order
   independent, and safe under concurrent reads.

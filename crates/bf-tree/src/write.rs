@@ -276,10 +276,10 @@ impl Tree {
     /// Returns the right leaf still locked.
     ///
     /// On any error after the allocation, including a failed install, the
-    /// fresh slot is freed: a written but unreachable right page would
-    /// overlap its neighbour at the next open. (A failed install also leaves
-    /// the left page already rewritten; the admission rule makes that
-    /// unreachable, and shadow paging in plan 0018 removes the window.)
+    /// fresh leaf is discarded and its page zeroed: a written but
+    /// unreachable right page would overlap its neighbour at the next open.
+    /// (A failed install also leaves the left page rewritten to its half;
+    /// the admission rule makes that unreachable.)
     pub(super) fn split_leaf(
         &self,
         left: LeafId,

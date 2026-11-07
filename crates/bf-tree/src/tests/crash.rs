@@ -431,3 +431,125 @@ fn crashes_recover_the_committed_state_with_a_large_buffer() {
         run(config, 0x0b16 + seed * 104_729, 10, 400);
     }
 }
+
+/// Writers on disjoint keys and a checkpoint thread, with the store dying
+/// at a random call. After recovery each key holds the oracle's value at
+/// some sequence in `[N, last assigned]` (a fuzzy checkpoint), and replaying
+/// every operation above `N` in sequence order gives the full oracle.
+#[test]
+fn crashes_with_checkpoints_beside_writers_recover_after_replay() {
+    let config = TreeConfig {
+        circular_buffer_bytes: 2048,
+        ..config(256, 128, 8, 16)
+    };
+    for seed in 0..12u64 {
+        super::concurrent::with_watchdog(std::time::Duration::from_secs(60), move || {
+            crash_beside_writers(config, seed);
+        });
+    }
+}
+
+/// `put` or `remove` as the tree does it, returning the sequence.
+fn apply_seq(tree: &Tree, op: &Op) -> Result<u64, TreeError> {
+    let state = match op {
+        Op::Put(_, value) => bf_tree_page::RecordState::Insert(value),
+        Op::Remove(_) => bf_tree_page::RecordState::Delete,
+    };
+    let key = match op {
+        Op::Put(key, _) | Op::Remove(key) => key,
+    };
+    let seq = tree.write(key, state, &mut || {
+        Ok(tree
+            .last_seq
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1)
+    })?;
+    tree.applied
+        .fetch_max(seq, std::sync::atomic::Ordering::Release);
+    Ok(seq)
+}
+
+fn crash_beside_writers(config: TreeConfig, seed: u64) {
+    let mut rng = Rng(0xfeed + seed * 6151);
+    let store = FaultStore::new(&config);
+    let tree = Tree::create(config, Box::new(store.clone())).unwrap();
+    store.die_after(200 + rng.below(3000));
+    let mut log: Vec<(u64, Op)> = std::thread::scope(|scope| {
+        let tree = &tree;
+        let writers: Vec<_> = (0..4u8)
+            .map(|w| {
+                scope.spawn(move || {
+                    let mut rng = Rng(seed * 31 + u64::from(w) + 1);
+                    let mut log = Vec::new();
+                    for _ in 0..600 {
+                        let key = vec![rng.below(60) as u8, w];
+                        let op = if rng.below(5) == 0 {
+                            Op::Remove(key)
+                        } else {
+                            let len = rng.below(17) as usize;
+                            Op::Put(key, vec![rng.below(256) as u8; len])
+                        };
+                        if let Ok(seq) = apply_seq(tree, &op) {
+                            log.push((seq, op));
+                        }
+                    }
+                    log
+                })
+            })
+            .collect();
+        let checkpointer = scope.spawn(move || while tree.checkpoint().is_ok() {});
+        let log = writers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect();
+        // Writers are done; stop the checkpoints if the store still lives.
+        store.die_after(0);
+        checkpointer.join().unwrap();
+        log
+    });
+    log.sort_by_key(|(seq, _)| *seq);
+    let log = Log(log);
+    let last = log.0.last().map_or(0, |(seq, _)| *seq);
+    drop(tree);
+
+    let crashed = store.crash(&mut rng);
+    let (tree, _) = recover(crashed, config, &mut rng);
+    let applied = tree.applied_seq();
+    let context = format!("seed {seed} applied {applied} last {last}");
+
+    // Per key: the value is the oracle's value at some sequence in
+    // [N, last]: after every operation on the key at or below N, or after
+    // one later operation on it.
+    let base = log.state_at(applied);
+    let found = contents(&tree);
+    let keys: std::collections::BTreeSet<_> = log
+        .0
+        .iter()
+        .map(|(_, op)| match op {
+            Op::Put(key, _) | Op::Remove(key) => key.clone(),
+        })
+        .collect();
+    for key in &keys {
+        let mut allowed = vec![base.get(key).cloned()];
+        allowed.extend(log.0.iter().filter(|(seq, _)| *seq > applied).filter_map(
+            |(_, op)| match op {
+                Op::Put(k, value) if k == key => Some(Some(value.clone())),
+                Op::Remove(k) if k == key => Some(None),
+                _ => None,
+            },
+        ));
+        let value = found.get(key).cloned();
+        assert!(
+            allowed.contains(&value),
+            "{context}: key {key:?} holds {value:?}"
+        );
+    }
+    assert!(found.keys().all(|key| keys.contains(key)), "{context}");
+    assert_eq!(tree.check_invariants(), Ok(()), "{context}");
+
+    // Replay every operation above N in sequence order.
+    for (_, op) in log.0.iter().filter(|(seq, _)| *seq > applied) {
+        apply_seq(&tree, op).unwrap();
+    }
+    assert_eq!(contents(&tree), log.state_at(u64::MAX), "{context}");
+}

@@ -37,13 +37,13 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
 | `6..8` | `prefix_len` | Length of the key prefix stored once in the low fence and omitted from other keys; see [Prefix compression](#prefix-compression) |
 | `8..16` | `backing_leaf` | Base leaf that a mini-page overlays; `u64::MAX` for base pages and full pages; see [Backing leaf](#backing-leaf) |
-| `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive. Plan 0018 renames it to `write_seq` |
+| `16..24` | `write_seq` | `U64`: the write sequence of the tree write-through that stored the page; zero in pages never stored, including mini-pages (plan 0018) |
 | `24..28` | `leaf` | `U32`: the leaf that a stored base page belongs to; `u32::MAX` (`NO_LEAF`) for none; see [Leaf stamp and checksum](#leaf-stamp-and-checksum) |
 | `28..32` | `crc` | `U32`: CRC32C of the whole page with this field taken as zero |
 
 Bytes `0..16` describe the page structure. Bytes `16..32` hold storage and
-recovery state: `lsn` stays inactive, and `leaf` and `crc` identify and
-protect a page in the store. The
+recovery state: `write_seq` orders the stored copies of a leaf, and `leaf`
+and `crc` identify and protect a page in the store. The
 [persistence design](bf-tree-persistence.md#base-page-identity-and-the-page-checksum)
 records how the tree uses them. A smaller mini-page header without this
 state is deferred: it would not shrink upstream's allocation sizes, and the
@@ -81,13 +81,16 @@ The page crate provides the fields; the tree gives them their roles.
 - The free function `verify_stored_checksum(&[u8])` checks raw bytes that
   may not be a valid page. It reads only the `crc` field and computes the
   CRC over the slice length, never over a `capacity` read from the header.
-- `init` and `init_with_fences` set `leaf` to `None` and `crc` to zero.
-  Split and batch-merge outputs copy `backing_leaf`, `lsn`, `leaf`, and
-  `crc` from the source page, and in-place operations leave them unchanged,
+- `init` and `init_with_fences` set `write_seq` to zero, `leaf` to `None`,
+  and `crc` to zero.
+  Split and batch-merge outputs copy `backing_leaf`, `write_seq`, `leaf`,
+  and `crc` from the source page, and in-place operations leave them unchanged,
   so after any change the stored checksum is stale. No page operation
   seals.
-- Only the tree's `write_through` stamps and seals, immediately before a
-  base page is written to the store. A stored base page therefore names its
+- `write_seq()` and `set_write_seq(seq)` read and write the write
+  sequence. Plan 0018 renamed the field from the inactive `lsn`.
+- Only the tree's `write_through` stamps (`write_seq`, then `leaf`) and
+  seals, immediately before a base page is written to the store. A stored base page therefore names its
   leaf and carries a valid checksum. Mini-pages and in-memory full pages do
   not maintain the checksum. `Page::validate` stays structural: it checks
   neither field.
@@ -315,8 +318,9 @@ Both outputs are built in 4096-byte stack scratch images with
 `init_with_fences` and `try_insert_record`, then copied. Each output therefore
 gets the prefix its own fences imply, even if the source stored a shorter
 one. Record kinds are preserved. Tombstones lose retained
-value bytes, as in any rebuild. Both outputs inherit the source's backing-leaf,
-LSN, and snapshot-version fields; other header flags are not copied.
+value bytes, as in any rebuild. Both outputs inherit the source's
+`backing_leaf`, `write_seq`, `leaf`, and `crc` fields; other header flags
+are not copied.
 
 Validation checks the right buffer's capacity (`InvalidCapacity`), that it
 equals the source capacity (`CapacityMismatch`), that the source is fenced
@@ -376,7 +380,7 @@ not count, because the rebuild packs the page. Sizes use the page's stored
 prefix length. `merge_batch_in_place` builds the result in a 4096-byte stack
 scratch image with `init_with_fences` and `try_insert_record`, then copies it
 back. The page keeps its fences and gets the prefix they imply. It keeps its
-backing-leaf, LSN, and snapshot-version fields. `merge_batch_split` uses the
+`backing_leaf`, `write_seq`, `leaf`, and `crc` fields. `merge_batch_split` uses the
 split selector, so it returns `CannotSplit` under the same conditions as
 `split_with_insert`.
 
@@ -518,8 +522,8 @@ All mutations require exclusive access (`&mut Page`), and reads require only
 shared access (`&Page`). No read writes page bytes, so concurrent readers under
 a shared leaf lock need no write protocol inside the page; access tracking
 lives outside the format (see [Slots and records](#slots-and-records)).
-Page operations do not log, advance the LSN, stamp the leaf, or seal the
-checksum.
+Page operations do not log, stamp the write sequence or the leaf, or seal
+the checksum.
 Callers must protect borrowed results against relocation.
 
 ## References

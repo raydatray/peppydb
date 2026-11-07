@@ -6,7 +6,7 @@ use bf_tree_mini_page::{BufferError, Mini, MiniPage, RefBits, SizeClasses, Write
 use bf_tree_node_id::LeafId;
 use bf_tree_page::{Page, PageError};
 use bf_tree_store::{PageNumber, PageStore};
-use bf_tree_sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use bf_tree_sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use bf_tree_sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Table};
 
 /// Raw value in the page table for "no stored page".
@@ -43,6 +43,9 @@ pub(super) struct LeafMap {
     /// Pages that a later write of the same leaf replaced, each with the
     /// replacing write's sequence. Freed once a commit covers the sequence.
     superseded: Mutex<Vec<(PageNumber, u64)>>,
+    /// A page write failed. Its bytes may have landed anyway, so no later
+    /// commit may cover its sequence; see `Tree::store_failed`.
+    write_failed: AtomicBool,
     /// Every mini-page block. Its mutex is innermost: it may be taken under
     /// a leaf lock, and it never waits for one.
     pub(super) circular_buffer: CircularBuffer,
@@ -244,6 +247,7 @@ impl LeafMap {
             write_seq: AtomicU64::new(0),
             gate: RwLock::new(()),
             superseded: Mutex::new(Vec::new()),
+            write_failed: AtomicBool::new(false),
             entries,
             pages: table,
             circular_buffer,
@@ -530,8 +534,9 @@ impl LeafMap {
             page.seal(); // last: the checksum covers the stamps
             let page_number = self.store.alloc()?;
             if let Err(error) = self.store.write(page_number, bytes) {
-                // The page names no committed state; give it back.
-                let _ = self.store.free(page_number);
+                // The bytes may have landed anyway, under a sequence that a
+                // later commit would cover; so no later commit may happen.
+                self.write_failed.store(true, Ordering::Release);
                 return Err(error.into());
             }
             let old = self
@@ -544,6 +549,11 @@ impl LeafMap {
             }
         }
         Ok(seq)
+    }
+
+    /// Whether a page write failed since the map was created.
+    pub(super) fn write_failed(&self) -> bool {
+        self.write_failed.load(Ordering::Acquire)
     }
 
     /// Take every superseded page recorded so far.
