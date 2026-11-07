@@ -1,0 +1,3 @@
+# Run the build script, as Cargo does. It generates the CRC tables that the
+# crate includes from OUT_DIR and sets the armsimd cfg on aarch64.
+buildscript.run = true

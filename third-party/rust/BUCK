@@ -119,6 +119,95 @@ cargo.rust_library(
     visibility = [],
 )
 
+alias(
+    name = "crc32c",
+    actual = ":crc32c-0.6",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "crc32c-0.6.9.crate",
+    sha256 = "7f132a176423ee852e8f0a35d43088d1850966b50745be818a88b76f64b1c6cb",
+    size_bytes = 19751,
+    strip_prefix = "crc32c-0.6.9",
+    urls = ["https://static.crates.io/crates/crc32c/0.6.9/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "crc32c-0.6",
+    srcs = [":crc32c-0.6.9.crate"],
+    crate = "crc32c",
+    crate_root = "crc32c-0.6.9.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "crc32c",
+        "CARGO_CRATE_NAME": "crc32c",
+        "CARGO_MANIFEST_DIR": "crc32c-0.6.9.crate",
+        "CARGO_PKG_AUTHORS": "Zack Owens",
+        "CARGO_PKG_DESCRIPTION": "Safe implementation for hardware accelerated CRC32C instructions with software fallback",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_NAME": "crc32c",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.6.9",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "6",
+        "CARGO_PKG_VERSION_PATCH": "9",
+        "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :crc32c-0.6-build-script-run[out_dir])",
+    },
+    rustc_flags = ["@$(location :crc32c-0.6-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+cargo.rust_binary(
+    name = "crc32c-0.6-build-script-build",
+    srcs = [":crc32c-0.6.9.crate"],
+    crate = "build_script_build",
+    crate_root = "crc32c-0.6.9.crate/build.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "crc32c-0.6.9.crate",
+        "CARGO_PKG_AUTHORS": "Zack Owens",
+        "CARGO_PKG_DESCRIPTION": "Safe implementation for hardware accelerated CRC32C instructions with software fallback",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_NAME": "crc32c",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.6.9",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "6",
+        "CARGO_PKG_VERSION_PATCH": "9",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+    deps = [":rustc_version-0.4"],
+)
+
+buildscript_run(
+    name = "crc32c-0.6-build-script-run",
+    package_name = "crc32c",
+    buildscript_rule = ":crc32c-0.6-build-script-build",
+    env = {
+        "CARGO_PKG_AUTHORS": "Zack Owens",
+        "CARGO_PKG_DESCRIPTION": "Safe implementation for hardware accelerated CRC32C instructions with software fallback",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/zowens/crc32c",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "6",
+        "CARGO_PKG_VERSION_PATCH": "9",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    version = "0.6.9",
+)
+
 http_archive(
     name = "errno-0.3.14.crate",
     sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb",
@@ -652,6 +741,42 @@ buildscript_run(
 )
 
 http_archive(
+    name = "rustc_version-0.4.1.crate",
+    sha256 = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92",
+    size_bytes = 12245,
+    strip_prefix = "rustc_version-0.4.1",
+    urls = ["https://static.crates.io/crates/rustc_version/0.4.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "rustc_version-0.4",
+    srcs = [":rustc_version-0.4.1.crate"],
+    crate = "rustc_version",
+    crate_root = "rustc_version-0.4.1.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "rustc_version",
+        "CARGO_CRATE_NAME": "rustc_version",
+        "CARGO_MANIFEST_DIR": "rustc_version-0.4.1.crate",
+        "CARGO_PKG_AUTHORS": "",
+        "CARGO_PKG_DESCRIPTION": "A library for querying the version of a installed rustc compiler",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "rustc_version",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/djc/rustc-version-rs",
+        "CARGO_PKG_RUST_VERSION": "1.32",
+        "CARGO_PKG_VERSION": "0.4.1",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "4",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+    deps = [":semver-1"],
+)
+
+http_archive(
     name = "rustix-1.1.5.crate",
     sha256 = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d",
     size_bytes = 425681,
@@ -853,6 +978,45 @@ buildscript_run(
         "CARGO_PKG_VERSION_PRE": "",
     },
     version = "1.0.23",
+)
+
+http_archive(
+    name = "semver-1.0.28.crate",
+    sha256 = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd",
+    size_bytes = 33064,
+    strip_prefix = "semver-1.0.28",
+    urls = ["https://static.crates.io/crates/semver/1.0.28/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "semver-1",
+    srcs = [":semver-1.0.28.crate"],
+    crate = "semver",
+    crate_root = "semver-1.0.28.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "semver",
+        "CARGO_CRATE_NAME": "semver",
+        "CARGO_MANIFEST_DIR": "semver-1.0.28.crate",
+        "CARGO_PKG_AUTHORS": "David Tolnay <dtolnay@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Parser and evaluator for Cargo's flavor of Semantic Versioning",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "semver",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/dtolnay/semver",
+        "CARGO_PKG_RUST_VERSION": "1.68",
+        "CARGO_PKG_VERSION": "1.0.28",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "0",
+        "CARGO_PKG_VERSION_PATCH": "28",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "std",
+    ],
+    visibility = [],
 )
 
 http_archive(

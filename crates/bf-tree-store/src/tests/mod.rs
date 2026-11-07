@@ -1,6 +1,7 @@
 use super::*;
 
 mod contract;
+mod crc;
 mod file;
 mod superblock;
 
