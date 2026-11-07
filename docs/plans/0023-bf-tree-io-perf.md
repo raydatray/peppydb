@@ -34,7 +34,7 @@ numbers in the design documents.
 - **In scope:**
   - `Io { Cached, Direct }` for `FileStore`, with `O_DIRECT` on Linux through
     an aligned bounce buffer and no `unsafe`;
-  - batched aligned reads for the open-time slot scan;
+  - batched aligned reads for the open-time page scan;
   - `engine::Options::io`;
   - page and lookup fast paths: routed lookups without fence checks, integer
     comparison of previews and short key parts, slot-directory warming;
@@ -44,7 +44,7 @@ numbers in the design documents.
   - Linux measurements in the design documents.
 - **Out of scope:** asynchronous I/O (`io_uring`), direct I/O on macOS,
   persisting the leaf selection to make open proportional to leaves rather
-  than slots, background merges, spin wrappers around locks.
+  than pages, background merges, spin wrappers around locks.
 - **Done when:** `Io::Direct` passes the store contract tests and the crash
   model on Linux; each fast path either lands with a measured Linux
   improvement or is recorded as rejected; every benchmark in the
@@ -81,7 +81,7 @@ impl FileStore {
 `O_DIRECT` requires the buffer address, the file offset, and the length to be
 multiples of the device's logical block size. The store meets the offset and
 length rules by construction: 0017 fixes superblock copy 2 at offset 4096 and
-slots at multiples of the page size, and `Direct` requires a 4096-byte page.
+pages at multiples of the page size, and `Direct` requires a 4096-byte page.
 4096 covers devices with 512-byte and 4096-byte logical blocks. The
 buffer-address rule needs care, because the tree's buffers do not meet it.
 Scratch pages are ordinary heap slices with no alignment guarantee.
@@ -153,19 +153,22 @@ and run `tools/autocargo`.
 
 ### Batched reads at open
 
-Open (0018) reads every slot. With `Direct`, each `read` is a synchronous
+Open (0018) reads every page. With `Direct`, each `read` is a synchronous
 device round trip, so open runs at the device's queue-depth-one rate. This
 stack adds a default method to the store trait and uses it in open:
 
 ```rust
 pub trait PageStore: Send + Sync {
     // ... existing methods ...
-    /// Read `buf.len() / page_size` consecutive slots starting at `first`.
+    /// Read `buf.len() / page_size` consecutive pages starting at `first`.
     /// The default reads them one at a time.
-    fn read_run(&self, first: Slot, buf: &mut [u8]) -> Result<(), StoreError> {
+    fn read_run(&self, first: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
         buf.chunks_mut(self.page_size())
             .zip(first.raw()..)
-            .try_for_each(|(page, slot)| self.read(Slot::new(slot), page))
+            .try_for_each(|(page, raw)| {
+                let page_number = PageNumber::new(raw).expect("page numbers stay below u64::MAX");
+                self.read(page_number, page)
+            })
     }
 }
 ```
@@ -236,7 +239,7 @@ macOS profiles overstate lock costs.
 | Benchmark | Crate | What it measures |
 | --- | --- | --- |
 | `baseline_threads`, `baseline_hot_set`, `baseline_components` (from 0016) | `bf-tree` | Re-run after the fast paths; record before and after |
-| `bench_persistence` | `bf-tree` | Load of N keys; checkpoint of all leaves and of 10% dirty leaves; file size before and after checkpoints; open rate (slots/s); random `get` with the circular buffer smaller than the data; each with `Cached` and `Direct` |
+| `bench_persistence` | `bf-tree` | Load of N keys; checkpoint of all leaves and of 10% dirty leaves; file size before and after checkpoints; open rate (pages/s); random `get` with the circular buffer smaller than the data; each with `Cached` and `Direct` |
 | `bench_eviction_io` | `bf-tree` | Replacing puts into a file larger than the circular buffer; ops/s, p50, p99 |
 | `bench_circular_buffer_free` | `bf-tree-circular-buffer` | Size-class free lists against tombstone-on-free (a crate-private switch used only by this benchmark): alloc/free throughput, budget utilisation, eviction count under a recorded trace |
 | `bench_circular_buffer_lock` | `bf-tree` | 12-thread `put` under a 32 MiB circular-buffer budget; share of time waiting on the circular-buffer mutex (`perf` profile on Linux) |
@@ -327,13 +330,13 @@ Ten diffs.
   reopens with `Cached` and the reverse; non-Linux and non-4096 page sizes
   return `DirectIo`; the crash model (0018) passes over a `Direct` store.
 
-### `[3/10][bf-io-perf][store] read slots in aligned runs at open`
+### `[3/10][bf-io-perf][store] read pages in aligned runs at open`
 
-- **Purpose:** Avoid one device round trip per slot during open.
+- **Purpose:** Avoid one device round trip per page during open.
 - **Core changes:** `PageStore::read_run` with a default; the `FileStore`
   override; open's scan uses runs.
 - **Verification:** Open results identical with runs of 1, 7, and 64 pages
-  and with a slot count that is not a multiple of the run; `bench_persistence`
+  and with a page count that is not a multiple of the run; `bench_persistence`
   open rate with `Direct` before and after.
 
 ### `[4/10][bf-io-perf][engine] pass the store I/O mode through engine options`

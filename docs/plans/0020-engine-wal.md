@@ -84,20 +84,18 @@ a pattern for a package that does not exist yet. After adding the `BUCK` file,
 run `tools/autocargo`; it adds `crates/engine-wal` to the workspace members
 and writes `crates/engine-wal/Cargo.toml`. Commit both.
 
-**CRC32C.** Plan 0017 decides the source. The WAL works with either choice:
+**CRC32C.** Plan 0017 decided the source: the third-party `crc32c` crate,
+added through `tools/buckify` in 0017's diff 2 (with a reindeer fixup for its
+build script if needed). `engine-wal` lists `//third-party/rust:crc32c`
+directly. It does not depend on `bf-tree` or its internal crates for the
+checksum.
 
-- *Third-party crate* (`crc32c` through `tools/buckify`): `engine-wal` lists
-  `//third-party/rust:crc32c`. This is the recommended outcome. The crate has
-  a build script, so `third-party/rust/fixups/crc32c/fixups.toml` needs
-  `buildscript.run = true` (0017 adds it).
-- *Hand-written in `bf-tree-store`*: `engine-wal` must not depend on an
-  internal crate of another component, and depending on `bf-tree` only for a
-  checksum would couple the log to the tree. `engine-wal` then carries its own
-  table-driven implementation (about 40 lines) in `src/crc.rs`, tested with the
-  same check value (`crc32c(b"123456789") == 0xE306_9283`, RFC 3720 §B.4).
+Not chosen: a hand-written table-driven implementation. `engine-wal` would
+have needed its own copy, because it must not depend on an internal crate of
+another component.
 
-The code calls one function, `crc32c(&[u8]) -> u32`, behind a private module,
-so the choice changes one `use` line.
+The code calls one function, `crc32c(&[u8]) -> u32`, behind a private module.
+Tests check the RFC 3720 §B.4 value, `crc32c(b"123456789") == 0xE306_9283`.
 
 ### Operations without the tree
 
@@ -502,7 +500,7 @@ reviewed against its own tests.
   - `crates/engine-wal/BUCK` (as above), `src/lib.rs` with `Op`, `Record`,
     `WalError`; `src/record.rs` with `encode_header`, `decode_header`,
     `encode_op`, `encode_batch`, `decode(&[u8]) -> Option<(Record, usize)>`.
-  - The CRC32C dependency as decided by 0017.
+  - The `//third-party/rust:crc32c` dependency (the crate 0017 adds).
   - `tools/autocargo`; commit the root `Cargo.toml`, `Cargo.lock`, and
     `crates/engine-wal/Cargo.toml`.
 - **Verification:** Round trip of every kind, empty keys and values, empty
@@ -568,7 +566,7 @@ reviewed against its own tests.
 
 ## Open questions
 
-- **CRC32C source.** Decided in 0017. This plan supports both outcomes.
+- **CRC32C source.** Resolved in 0017: the `crc32c` crate.
 - **Maximum record size.** 64 MiB is proposed. It bounds a `WriteBatch` in
   0021. A smaller bound (for example 16 MiB) limits memory at replay.
 

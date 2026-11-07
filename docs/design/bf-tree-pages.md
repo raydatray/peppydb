@@ -36,9 +36,13 @@ Every leaf-level page uses the same 32-byte header, as upstream does:
 | `2..4` | `capacity` | Page length in bytes |
 | `4..6` | `remaining_size` | Free bytes between the slots and the payloads |
 | `6..8` | `prefix_len` | Length of the key prefix stored once in the low fence and omitted from other keys; see [Prefix compression](#prefix-compression) |
-| `8..16` | `backing_leaf` | Base leaf that a mini-page or full-page cache belongs to; `u64::MAX` if none; see [Backing leaf](#backing-leaf) |
+| `8..16` | `backing_leaf` | Base leaf that a mini-page overlays; `u64::MAX` for base pages and full pages; see [Backing leaf](#backing-leaf) |
 | `16..24` | `lsn` | Log sequence number (LSN) for recovery; inactive |
 | `24..32` | `snapshot_version` | Checkpoint snapshot version; inactive |
+
+`snapshot_version` follows upstream, which uses it for CPR (Concurrent Prefix
+Recovery) checkpoints. peppydb does not use CPR; [plan 0017](../plans/0017-bf-tree-store-format.md)
+replaces the field with a 32-bit leaf stamp and a 32-bit page CRC32C.
 
 Bytes `0..16` describe the page structure. Bytes `16..32` hold recovery state,
 which the logging and checkpoint design will define. A smaller mini-page header
@@ -458,7 +462,7 @@ tree's leaf page capacity and `M` the largest mini-page size class:
 | --- | --- | --- | --- | --- | --- |
 | Base page | Implemented as a plain `Page` | Required | `None` | `Insert` only | `L` |
 | Mini-page | Implemented as `MiniPage` in `bf-tree-mini-page` | None | Its base leaf | Any | One size class, `64..=M` |
-| Full-page cache | Planned ([plan 0015](../plans/0015-bf-tree-caching.md)) | — | Its base leaf | — | — |
+| Full page | Implemented as a plain `Page` in a `Kind::Full` block ([plan 0015](../plans/0015-bf-tree-caching.md)) | Required | `None` | `Insert` only | `L` |
 
 A base page never stores a tombstone: a [batch merge](#batch-merges) drops a
 `Delete` after it removes the base key. [BF-Tree mini-pages](bf-tree-mini-page.md)
