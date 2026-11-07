@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use bf_tree::{Entry, FileStore, Superblock, Tree};
 use engine_wal::{Wal, WalOptions};
 
-pub use bf_tree::{LogError, Scan, TreeConfig, TreeError};
+pub use bf_tree::{LogError, Op, Scan, TreeConfig, TreeError};
 pub use engine_wal::WalError;
 
 #[cfg(test)]
@@ -115,6 +115,18 @@ pub enum Mode {
     /// The engine keeps a WAL; writes return once durable.
     #[default]
     Standalone,
+    /// Another log sequences and stores writes and hands them over with
+    /// [`Db::apply`]. The engine keeps no WAL and runs no background
+    /// thread; the WAL and checkpoint-policy options are ignored.
+    External,
+}
+
+/// What [`Db::apply`] did with an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applied {
+    Applied,
+    /// At or below the applied sequence: a redelivery, ignored.
+    AlreadyApplied,
 }
 
 /// A database failure.
@@ -134,6 +146,12 @@ pub enum Error {
     Options(&'static str),
     #[error("the database is open in another process or handle")]
     Locked,
+    #[error("operation is not available in this mode")]
+    WrongMode,
+    /// The owner's pre-commit hook failed; the checkpoint was not
+    /// committed. Carries the owner's own error.
+    #[error("the checkpoint hook failed: {0}")]
+    Hook(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<TreeError> for Error {
@@ -255,17 +273,25 @@ fn tree_ops(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<bf_tree::Op<'_>> {
 /// The embedded database.
 pub struct Db {
     path: PathBuf,
+    options: Options,
     shared: Arc<Shared>,
-    /// The checkpoint policy thread; `None` once stopped.
+    /// The checkpoint policy thread; `None` once stopped, and in external
+    /// mode.
     policy_thread: Option<JoinHandle<()>>,
     /// Held for the database's lifetime; dropping it releases the lock.
-    _lock: File,
+    /// Taken by a snapshot install, which keeps it across the reopen.
+    #[expect(dead_code, reason = "taken by install_snapshot from diff 3")]
+    lock: Option<File>,
 }
+
+/// Where a snapshot install writes before its rename.
+const PARTIAL: &str = "tree.bf.partial";
 
 /// What the database and its policy thread share.
 struct Shared {
     tree: Tree,
-    wal: Wal,
+    /// `None` in external mode.
+    wal: Option<Wal>,
     /// Single writes hold it shared; a batch holds it exclusively from its
     /// WAL append until it is applied, so no single write to one of its
     /// keys can take a later sequence and apply first. Readers and
@@ -328,23 +354,31 @@ impl Policy {
 }
 
 impl Shared {
-    /// Checkpoint the tree with WAL-before-data, then truncate the WAL.
+    /// The WAL; `WrongMode` in external mode.
+    fn wal(&self) -> Result<&Wal, Error> {
+        self.wal.as_ref().ok_or(Error::WrongMode)
+    }
+
+    /// Checkpoint the tree with WAL-before-data, then truncate the WAL. In
+    /// external mode there is no WAL: the owner is responsible for its log.
     fn checkpoint(&self) -> Result<Checkpoint, Error> {
+        let Some(wal) = &self.wal else {
+            return Ok(self.tree.checkpoint()?.into());
+        };
         // Writes during this checkpoint do not re-kick it for bytes it
         // already covers.
         self.policy
             .bytes_at_checkpoint
-            .store(self.wal.appended_bytes(), Ordering::Relaxed);
+            .store(wal.appended_bytes(), Ordering::Relaxed);
         let state = self.tree.checkpoint_with(|point| {
             // Every effect in the pages being committed has a sequence at or
             // below `captured_seq`, and its record was appended before the
             // effect was applied: syncing through it makes every committed
             // effect durable in the WAL first.
-            self.wal
-                .sync_to(point.captured_seq)
+            wal.sync_to(point.captured_seq)
                 .map_err(|error| to_log_error(&error))
         })?;
-        self.wal.truncate_below(state.applied_seq)?;
+        wal.truncate_below(state.applied_seq)?;
         self.policy
             .applied_at_checkpoint
             .store(state.applied_seq, Ordering::Relaxed);
@@ -363,7 +397,8 @@ impl Shared {
             let grown = self.policy.kicked.swap(false, Ordering::AcqRel)
                 || self
                     .wal
-                    .appended_bytes()
+                    .as_ref()
+                    .map_or(0, Wal::appended_bytes)
                     .saturating_sub(self.policy.bytes_at_checkpoint.load(Ordering::Relaxed))
                     >= self.policy.threshold;
             let now = Instant::now();
@@ -400,25 +435,48 @@ impl Db {
         let path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&path).map_err(io("create database directory"))?;
         let lock = lock_file(&path)?;
+        Self::open_locked(path, options, lock)
+    }
+
+    /// [`Db::open`] with the lock file already held.
+    fn open_locked(path: PathBuf, options: Options, lock: File) -> Result<Db, Error> {
+        // A snapshot install that crashed before its rename leaves this.
+        match std::fs::remove_file(path.join(PARTIAL)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(io("remove a stale partial snapshot")(error));
+            }
+            _ => {}
+        }
+        let wal_dir = path.join("wal");
+        if options.mode == Mode::External && has_segments(&wal_dir)? {
+            // Replaying it would be wrong for an external owner, and ignoring
+            // it would lose standalone writes.
+            return Err(Error::Options("a standalone WAL exists"));
+        }
         let tree = open_or_create_tree(&path, &options)?;
         let applied = tree.applied_seq();
-        let wal_dir = path.join("wal");
-        let replayed = Wal::replay(&wal_dir, applied + 1, |record| {
-            let ops: Vec<_> = record.ops.iter().map(to_tree_op).collect();
-            tree.apply(Entry {
-                seq: record.seq,
-                ops: &ops,
-            })
-            .map_err(Error::from)
-        })?;
-        let next = applied.max(replayed.last_seq.unwrap_or(0)) + 1;
-        let wal = Wal::open(&wal_dir, options.wal(), next)?;
-        wal.truncate_below(applied)?;
+        let wal = match options.mode {
+            Mode::External => None,
+            Mode::Standalone => {
+                let replayed = Wal::replay(&wal_dir, applied + 1, |record| {
+                    let ops: Vec<_> = record.ops.iter().map(to_tree_op).collect();
+                    tree.apply(Entry {
+                        seq: record.seq,
+                        ops: &ops,
+                    })
+                    .map_err(Error::from)
+                })?;
+                let next = applied.max(replayed.last_seq.unwrap_or(0)) + 1;
+                let wal = Wal::open(&wal_dir, options.wal(), next)?;
+                wal.truncate_below(applied)?;
+                Some(wal)
+            }
+        };
         let shared = Arc::new(Shared {
             policy: Policy {
                 threshold: options.checkpoint_wal_bytes,
                 interval: options.checkpoint_interval,
-                bytes_at_checkpoint: AtomicU64::new(wal.appended_bytes()),
+                bytes_at_checkpoint: AtomicU64::new(wal.as_ref().map_or(0, Wal::appended_bytes)),
                 applied_at_checkpoint: AtomicU64::new(applied),
                 kicked: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
@@ -429,20 +487,83 @@ impl Db {
             gate: RwLock::new(()),
             background_error: Mutex::new(None),
         });
-        let policy_thread = {
-            let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("engine-checkpoint".into())
-                .spawn(move || shared.run_policy())
-                .map_err(io("spawn the checkpoint thread"))?
+        let policy_thread = match options.mode {
+            Mode::External => None,
+            Mode::Standalone => {
+                let thread = {
+                    let shared = shared.clone();
+                    std::thread::Builder::new()
+                        .name("engine-checkpoint".into())
+                        .spawn(move || shared.run_policy())
+                        .map_err(io("spawn the checkpoint thread"))?
+                };
+                let _ = shared.policy.thread.set(thread.thread().clone());
+                Some(thread)
+            }
         };
-        let _ = shared.policy.thread.set(policy_thread.thread().clone());
         Ok(Db {
             path,
+            options,
             shared,
-            policy_thread: Some(policy_thread),
-            _lock: lock,
+            policy_thread,
+            lock: Some(lock),
         })
+    }
+
+    /// External mode: apply one entry of the owner's log. Sequences must
+    /// increase; gaps are allowed. An entry at or below the applied
+    /// sequence is a redelivery and is ignored. The entry's operations are
+    /// normalized (the last per key wins) and checked against the limits
+    /// before anything is written. Returns once applied, not durable: the
+    /// owner's log provides durability. Entries are applied one at a time.
+    pub fn apply(&self, seq: u64, ops: &[Op<'_>]) -> Result<Applied, Error> {
+        self.external()?;
+        let tree = &self.shared.tree;
+        let _serial = self
+            .shared
+            .gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if seq <= tree.applied_seq() {
+            return Ok(Applied::AlreadyApplied);
+        }
+        let last: BTreeMap<&[u8], Op<'_>> = ops.iter().map(|op| (op.key(), *op)).collect();
+        let ops: Vec<Op<'_>> = last.into_values().collect();
+        ops.iter().try_for_each(|op| tree.check_op(op))?;
+        tree.apply(Entry { seq, ops: &ops })?;
+        Ok(Applied::Applied)
+    }
+
+    /// External mode: commit a checkpoint. `hook(seq)` runs before the
+    /// commit with the highest sequence the checkpoint may include; the
+    /// owner makes its log durable through it. An error aborts the commit
+    /// and comes back as [`Error::Hook`]. The hook must not call back into
+    /// this database.
+    pub fn checkpoint_with(
+        &self,
+        hook: impl FnOnce(u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<Checkpoint, Error> {
+        self.external()?;
+        let mut failure = None;
+        let result = self.shared.tree.checkpoint_with(|point| {
+            hook(point.captured_seq).map_err(|error| {
+                failure = Some(error);
+                LogError::Other("external hook")
+            })
+        });
+        match (result, failure) {
+            (Ok(state), _) => Ok(state.into()),
+            (Err(_), Some(error)) => Err(Error::Hook(error)),
+            (Err(error), None) => Err(error.into()),
+        }
+    }
+
+    fn external(&self) -> Result<(), Error> {
+        if self.options.mode == Mode::External {
+            Ok(())
+        } else {
+            Err(Error::WrongMode)
+        }
     }
 
     /// Commit a checkpoint now: the tree at every write applied so far, with
@@ -465,7 +586,9 @@ impl Db {
     #[cfg(test)]
     pub(crate) fn crash(mut self, written: usize) {
         self.stop_policy();
-        self.shared.wal.abandon(written);
+        if let Some(wal) = &self.shared.wal {
+            wal.abandon(written);
+        }
     }
 
     fn stop_policy(&mut self) {
@@ -481,36 +604,34 @@ impl Db {
     /// before it is durable; a crash before the sync loses it, and this call
     /// never returned `Ok`.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        let wal = self.shared.wal()?;
         let seq = {
             let _single = self
                 .shared
                 .gate
                 .read()
                 .unwrap_or_else(PoisonError::into_inner);
-            self.shared
-                .tree
-                .put_logged(&WalLog(&self.shared.wal), key, value)?
+            self.shared.tree.put_logged(&WalLog(wal), key, value)?
         };
         // After the leaf lock is released: a slow sync holds no lock.
-        self.shared.policy.note_append(&self.shared.wal);
-        self.shared.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(wal);
+        wal.wait_durable(seq)?;
         Ok(())
     }
 
     /// Remove `key` if present. Returns once the removal is durable.
     pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
+        let wal = self.shared.wal()?;
         let seq = {
             let _single = self
                 .shared
                 .gate
                 .read()
                 .unwrap_or_else(PoisonError::into_inner);
-            self.shared
-                .tree
-                .remove_logged(&WalLog(&self.shared.wal), key)?
+            self.shared.tree.remove_logged(&WalLog(wal), key)?
         };
-        self.shared.policy.note_append(&self.shared.wal);
-        self.shared.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(wal);
+        wal.wait_durable(seq)?;
         Ok(())
     }
 
@@ -519,6 +640,7 @@ impl Db {
     /// first, because a logged batch that the tree rejects would fail every
     /// later replay. Returns once the batch is durable.
     pub fn write(&self, batch: WriteBatch) -> Result<(), Error> {
+        let wal = self.shared.wal()?;
         let ops = batch.normalize();
         if ops.is_empty() {
             return Ok(());
@@ -534,15 +656,15 @@ impl Db {
                 .gate
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            let seq = self.shared.wal.append_batch(&wal_ops)?;
+            let seq = wal.append_batch(&wal_ops)?;
             self.shared.tree.apply(Entry {
                 seq,
                 ops: &tree_ops,
             })?;
             seq
         };
-        self.shared.policy.note_append(&self.shared.wal);
-        self.shared.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(wal);
+        wal.wait_durable(seq)?;
         Ok(())
     }
 
@@ -592,7 +714,7 @@ impl Db {
     pub fn close(mut self) -> Result<(), Error> {
         self.stop_policy();
         let checkpointed = self.shared.checkpoint();
-        let closed = self.shared.wal.close();
+        let closed = self.shared.wal.as_ref().map_or(Ok(()), Wal::close);
         let background = self
             .shared
             .background_error
@@ -636,5 +758,16 @@ impl Drop for Db {
     /// the last reference drops. No checkpoint; a reopen replays the WAL.
     fn drop(&mut self) {
         self.stop_policy();
+    }
+}
+
+/// Whether `dir` holds WAL segments.
+fn has_segments(dir: &Path) -> Result<bool, Error> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".wal"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io("list the WAL directory")(error)),
     }
 }

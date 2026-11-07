@@ -93,7 +93,7 @@ fn slow() -> Options {
 fn unsynced_put(db: &Db, key: &[u8], value: &[u8]) -> u64 {
     db.shared
         .tree
-        .put_logged(&WalLog(&db.shared.wal), key, value)
+        .put_logged(&WalLog(db.shared.wal.as_ref().unwrap()), key, value)
         .unwrap()
 }
 
@@ -101,7 +101,7 @@ fn unsynced_put(db: &Db, key: &[u8], value: &[u8]) -> u64 {
 /// the long flush interval `Db::put` itself would wait an hour.
 fn synced_put(db: &Db, key: &[u8], value: &[u8]) {
     let seq = unsynced_put(db, key, value);
-    db.shared.wal.sync_to(seq).unwrap();
+    db.shared.wal.as_ref().unwrap().sync_to(seq).unwrap();
 }
 
 /// Acknowledged writes survive a crash; unsynced ones are lost.
@@ -175,7 +175,7 @@ fn a_checkpoint_makes_its_unsynced_effects_durable_first() {
             value: value.as_deref().unwrap(),
         })
         .collect();
-    let seq = db.shared.wal.append_batch(&ops).unwrap();
+    let seq = db.shared.wal.as_ref().unwrap().append_batch(&ops).unwrap();
     let tree_ops = tree_ops(&changes);
     db.shared
         .tree
