@@ -8,6 +8,8 @@
 //! store.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry as Slot;
 use std::ops::Range;
 
 use super::inner::Inner;
@@ -47,98 +49,167 @@ impl Tree {
         }
         config.validate()?;
 
-        let page_count = store.page_count();
-        // Leaf IDs from disk are bounded before any table grows, so a damaged
-        // stamp cannot make open allocate a huge table. IDs can exceed the
-        // page count (a discarded split half uses an ID, and its page is
-        // reused), but not by more than a generous margin.
-        let max_leaf = page_count.saturating_mul(4).max(1 << 16);
+        let selection = select(store.as_ref(), &config)?;
+        // Older copies of a leaf are superseded: no commit needs them.
+        for page_number in &selection.released {
+            match store.free(*page_number) {
+                Ok(()) | Err(StoreError::FreedPage(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         let mut pages: Vec<Option<PageNumber>> = Vec::new();
         let mut leaves = Vec::new();
-        let mut bytes = vec![0; store.page_size()];
-        for raw in 0..page_count {
-            let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
-            store.read(page_number, &mut bytes)?;
-            if bytes.iter().all(|&byte| byte == 0) {
-                // A page allocated but never written. Return it to the
-                // store's free list; a backend that rescanned on open
-                // already has it.
-                match store.free(page_number) {
-                    Ok(()) | Err(StoreError::FreedPage(_)) => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            let corrupt = |reason| TreeError::CorruptPage {
-                page_number,
-                reason,
-            };
-            if !bf_tree_page::verify_stored_checksum(&bytes) {
-                return Err(corrupt("checksum mismatch"));
-            }
-            let page = Page::validate(&bytes).map_err(|error| match error {
-                PageError::Corrupt(reason) => corrupt(reason),
-                other => TreeError::Page(other),
-            })?;
-            let id = page
-                .leaf()
-                .ok_or(TreeError::InconsistentLeaves("a stored page names no leaf"))?;
-            if id.raw() >= max_leaf {
-                return Err(TreeError::InconsistentLeaves(
-                    "a stored page names an implausibly large leaf ID",
-                ));
-            }
+        for (id, chosen) in selection.chosen {
             if pages.len() <= id.index() {
                 pages.resize(id.index() + 1, None);
             }
-            if pages[id.index()].replace(page_number).is_some() {
-                return Err(TreeError::InconsistentLeaves(
-                    "two stored pages name the same leaf",
-                ));
-            }
-
-            let fences = page
-                .fences()
-                .ok_or(TreeError::InconsistentLeaves("leaf has no fences"))?;
-
-            let bound = |fence: Fence<KeyRef<'_>>| match fence {
-                Fence::Unbounded => Ok(None),
-                Fence::Key(key) if key.len() <= config.max_key_len => Ok(Some(key.to_vec())),
-                Fence::Key(_) => Err(TreeError::InconsistentLeaves(
-                    "fence exceeds the configured key length",
-                )),
-            };
-
-            let within_limits = page.iter().all(|record| {
-                record.key.len() <= config.max_key_len
-                    && record
-                        .state
-                        .value()
-                        .is_none_or(|value| value.len() <= config.max_value_len)
-            });
-
-            if !within_limits {
-                return Err(TreeError::InconsistentLeaves(
-                    "record exceeds the configured key or value length",
-                ));
-            }
-
-            leaves.push(LeafBounds {
-                id,
-                lower: bound(fences.lower)?,
-                upper: bound(fences.upper)?,
-            });
+            pages[id.index()] = Some(chosen.page_number);
+            leaves.push(chosen.bounds);
         }
 
         let leaves = tile(leaves)?;
         let inner = Inner::new(config.inner_capacity, ChildRef::Leaf(leaves[0].id));
         inner.set_root(build_inner(&inner, &leaves)?);
 
-        Ok(Self::assemble(
-            config,
-            inner,
-            LeafMap::for_config(store, pages, &config)?,
-        ))
+        let leaves = LeafMap::for_config(store, pages, &config)?;
+        // Keep every write sequence in the file unique.
+        leaves.start_write_seq(selection.max_seen);
+        Ok(Self::assemble(config, inner, leaves))
     }
+}
+
+/// The page that open keeps for one leaf.
+struct Chosen {
+    write_seq: u64,
+    page_number: PageNumber,
+    bounds: LeafBounds,
+}
+
+/// What a scan of every stored page selected.
+struct Selection {
+    /// The newest page of each leaf, by leaf ID.
+    chosen: HashMap<LeafId, Chosen>,
+    /// Pages to free: older copies of a leaf.
+    released: Vec<PageNumber>,
+    /// The largest write sequence in any page.
+    max_seen: u64,
+}
+
+/// Read every page and keep the newest page of each leaf. All-zero pages
+/// were allocated and never written, and are freed at once.
+fn select(store: &dyn PageStore, config: &TreeConfig) -> Result<Selection, TreeError> {
+    let page_count = store.page_count();
+    // Leaf IDs from disk are bounded before any table grows, so a damaged
+    // stamp cannot make open allocate a huge table. IDs can exceed the page
+    // count (a discarded split half uses an ID, and its page is reused), but
+    // not by more than a generous margin.
+    let max_leaf = page_count.saturating_mul(4).max(1 << 16);
+    let mut selection = Selection {
+        chosen: HashMap::new(),
+        released: Vec::new(),
+        max_seen: 0,
+    };
+    let mut bytes = vec![0; store.page_size()];
+    for raw in 0..page_count {
+        let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
+        store.read(page_number, &mut bytes)?;
+        if bytes.iter().all(|&byte| byte == 0) {
+            // A page allocated but never written. Return it to the store's
+            // free list; a backend that rescanned on open already has it.
+            match store.free(page_number) {
+                Ok(()) | Err(StoreError::FreedPage(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let (write_seq, _) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
+        selection.max_seen = selection.max_seen.max(write_seq);
+        let (id, bounds) = check_page(&bytes, page_number, config, max_leaf)?;
+        let candidate = Chosen {
+            write_seq,
+            page_number,
+            bounds,
+        };
+        match selection.chosen.entry(id) {
+            Slot::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            Slot::Occupied(mut entry) => {
+                let current = entry.get().write_seq;
+                if current == write_seq {
+                    return Err(TreeError::InconsistentLeaves(
+                        "two stored pages name the same leaf",
+                    ));
+                }
+                let older = if write_seq > current {
+                    entry.insert(candidate)
+                } else {
+                    candidate
+                };
+                selection.released.push(older.page_number);
+            }
+        }
+    }
+    Ok(selection)
+}
+
+/// Check one stored page: its checksum and structure (`CorruptPage`), its
+/// leaf stamp, fences, and limits. Returns its leaf and bounds.
+fn check_page(
+    bytes: &[u8],
+    page_number: PageNumber,
+    config: &TreeConfig,
+    max_leaf: u64,
+) -> Result<(LeafId, LeafBounds), TreeError> {
+    let corrupt = |reason| TreeError::CorruptPage {
+        page_number,
+        reason,
+    };
+    if !bf_tree_page::verify_stored_checksum(bytes) {
+        return Err(corrupt("checksum mismatch"));
+    }
+    let page = Page::validate(bytes).map_err(|error| match error {
+        PageError::Corrupt(reason) => corrupt(reason),
+        other => TreeError::Page(other),
+    })?;
+    let id = page
+        .leaf()
+        .ok_or(TreeError::InconsistentLeaves("a stored page names no leaf"))?;
+    if id.raw() >= max_leaf {
+        return Err(TreeError::InconsistentLeaves(
+            "a stored page names an implausibly large leaf ID",
+        ));
+    }
+
+    let fences = page
+        .fences()
+        .ok_or(TreeError::InconsistentLeaves("leaf has no fences"))?;
+    let bound = |fence: Fence<KeyRef<'_>>| match fence {
+        Fence::Unbounded => Ok(None),
+        Fence::Key(key) if key.len() <= config.max_key_len => Ok(Some(key.to_vec())),
+        Fence::Key(_) => Err(TreeError::InconsistentLeaves(
+            "fence exceeds the configured key length",
+        )),
+    };
+    let within_limits = page.iter().all(|record| {
+        record.key.len() <= config.max_key_len
+            && record
+                .state
+                .value()
+                .is_none_or(|value| value.len() <= config.max_value_len)
+    });
+    if !within_limits {
+        return Err(TreeError::InconsistentLeaves(
+            "record exceeds the configured key or value length",
+        ));
+    }
+    Ok((
+        id,
+        LeafBounds {
+            id,
+            lower: bound(fences.lower)?,
+            upper: bound(fences.upper)?,
+        },
+    ))
 }
 
 /// One leaf's identity and bounds; `None` is an unbounded fence.
