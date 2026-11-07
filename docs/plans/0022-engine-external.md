@@ -348,7 +348,7 @@ Resolved (review, 2026-11-07):
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: external mode and `apply`.
-- [ ] Diff 3: snapshot install.
+- [x] Diff 3: snapshot install.
 - [ ] Diff 4: leader/follower tests.
 - [ ] Diff 5: documentation.
 - [ ] Stack-wide verification.
@@ -365,6 +365,9 @@ Resolved (review, 2026-11-07):
   an owner needs no other crate.
 - **`apply` normalizes by key after the redelivery check.** A redelivered
   entry is skipped before its operations are examined.
+- **`Db` implements `Debug`.** `install_snapshot` returns `Result<Db, _>`,
+  and the tests (and callers) need `unwrap_err` on it; the output shows
+  the path, the mode, and the applied sequence.
 
 ## Agent notes
 
