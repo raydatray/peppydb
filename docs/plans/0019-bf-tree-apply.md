@@ -1,6 +1,6 @@
 # 0019: Apply, log hook, and snapshots
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Persistence](../design/bf-tree-persistence.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -295,9 +295,9 @@ pub fn write_snapshot(&self, out: &mut dyn Write) -> Result<State, TreeError> {
     self.leaves.store().superblock().encode(&state, &mut block)?;
     out.write_all(&block)?; // copy 0
     out.write_all(&block)?; // copy 1
-    for slot in chosen.slots_in_leaf_order() {
-        self.leaves.store().read(slot, &mut page)?;
-        out.write_all(&page)?; // dense: snapshot slot i
+    for page_number in chosen.pages_in_leaf_order() {
+        self.leaves.store().read(page_number, &mut page)?;
+        out.write_all(&page)?; // dense: snapshot page i
     }
     out.flush()?;
     Ok(state)
@@ -315,16 +315,18 @@ pub fn write_snapshot(&self, out: &mut dyn Write) -> Result<State, TreeError> {
   a later commit. The pin is taken under the `superseded` mutex, so a
   concurrent free step either finished draining before the pin or sees
   it. In the first case `state()` already reflects that commit, because
-  commit precedes the free step. Committed slots of `state` are therefore
+  commit precedes the free step. Committed pages of `state` are therefore
   never freed or reused during the copy.
-- **Concurrent writers** write only fresh slots. A read that races a write
-  into a reused slot sees a page that is above `W` or superseded, and
+- **Concurrent writers** write only fresh pages. A read that races a write
+  into a reused page sees a page that is above `W` or superseded, and
   selection drops it.
-- `select_committed` is side-effect free. Erasing and releasing slots
+- `select_committed` is side-effect free. Erasing and releasing pages
   remain `open`'s job.
 - The output is a store file: the 8 KiB superblock area, then one page per
   leaf. `FileStore::open` and `Tree::open` read it, and `applied_seq` says
-  where a log resumes.
+  where a log resumes. Pages are copied verbatim, so their `leaf` stamps
+  and CRCs (plan 0017) stay valid, and `Tree::open` of the snapshot
+  (including plan 0022's `install_snapshot`) verifies them.
 
 ## Decisions and trade-offs
 
@@ -446,13 +448,17 @@ Six diffs.
 
 ## Open questions
 
+None.
+
+Resolved (2026-11-06, review):
+
 1. **Should a latch conflict be an error or a panic?** It is a programming
-   error, but a panic in a library is harsh. Recommendation: an error
-   (`MixedSequencing`).
+   error, but a panic in a library is harsh. **Resolved (2026-11-06): an
+   error** (`MixedSequencing`); nothing changes before it is returned.
 2. **Should `apply` with `seq <= applied_seq` be a no-op instead of an
    error?** A no-op would make re-delivery silent. An error makes a caller
-   bug visible. Recommendation: an error. Plan 0022 can choose to skip
-   such entries explicitly before calling.
+   bug visible. **Resolved (2026-11-06): an error** (`SequenceOrder`). Plan
+   0022 can choose to skip such entries explicitly before calling.
 
 ## Verification strategy
 
@@ -468,7 +474,7 @@ Six diffs.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: apply and logged writes.
 - [ ] Diff 3: one sequence space.
 - [ ] Diff 4: pre-commit hook.
