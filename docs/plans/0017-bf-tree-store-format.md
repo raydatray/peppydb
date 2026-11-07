@@ -594,7 +594,7 @@ Resolved:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: `crc32c` crate.
-- [ ] Diff 3: leaf stamp and page checksum in `bf-tree-page`.
+- [x] Diff 3: leaf stamp and page checksum in `bf-tree-page`.
 - [ ] Diff 4: superblock codec.
 - [ ] Diff 5: committed state in both backends.
 - [ ] Diff 6: page-number addressing, leaf stamps, and checksums in the tree.

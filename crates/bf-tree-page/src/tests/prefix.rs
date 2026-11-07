@@ -61,6 +61,7 @@ pub(super) fn compressed_fixture<'s>(
     storage[4..6].copy_from_slice(&(gap as u16).to_le_bytes());
     storage[6..8].copy_from_slice(&(prefix_len as u16).to_le_bytes());
     storage[8..16].fill(0xff);
+    storage[24..28].fill(0xff); // no leaf stamp
     Page::mut_from_bytes(storage).unwrap()
 }
 

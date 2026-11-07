@@ -67,6 +67,7 @@ name = "bf-tree-page"
 version = "0.1.0"
 dependencies = [
  "bf-tree-node-id",
+ "crc32c",
  "thiserror",
  "zerocopy",
 ]

@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use zerocopy::little_endian::{U16, U64};
+use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::RecordKind;
@@ -11,6 +11,10 @@ pub(super) const PREVIEW_BYTES: usize = 2;
 
 /// Raw value for "no backing leaf"; equal to `LeafId`'s reserved raw value.
 pub(super) const NO_BACKING_LEAF: u64 = u64::MAX;
+/// Raw value of the 32-bit `leaf` field for "no leaf".
+pub(super) const NO_LEAF: u32 = u32::MAX;
+/// Byte range of the `crc` field, which the checksum takes as zero.
+pub(super) const CRC_RANGE: Range<usize> = 28..32;
 // Fence slot offsets that encode unbounded lower and upper fences.
 pub(super) const LOW_INFINITY: u16 = u16::MAX - 1;
 pub(super) const HIGH_INFINITY: u16 = u16::MAX;
@@ -46,8 +50,12 @@ pub(super) struct Header {
     pub(super) backing_leaf: U64,
     /// Log sequence number (LSN); inactive.
     pub(super) lsn: U64,
-    /// Snapshot version; inactive.
-    pub(super) snapshot_version: U64,
+    /// The `LeafId` a stored base page belongs to, or `NO_LEAF`. Stamped by
+    /// the tree when it writes the page to the store.
+    pub(super) leaf: U32,
+    /// CRC32C of the whole page with this field taken as zero. Sealed by the
+    /// tree when it writes the page to the store.
+    pub(super) crc: U32,
 }
 
 const _: () = assert!(size_of::<Header>() == HEADER_BYTES);
