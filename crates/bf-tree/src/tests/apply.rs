@@ -288,3 +288,112 @@ fn a_failed_entry_can_be_retried() {
     assert_eq!(tree.applied_seq(), seq);
     assert_eq!(tree.get(&failed), Ok(Some(value.to_vec())));
 }
+
+#[test]
+fn the_hook_sees_the_captured_sequence_before_the_commit() {
+    let tree = Tree::in_memory(small()).unwrap();
+    let log = RecordingLog::default();
+    for i in 0..200u32 {
+        tree.put_logged(&log, &i.to_be_bytes(), b"v").unwrap();
+    }
+    let before = tree.committed();
+    let mut seen = None;
+    let state = tree
+        .checkpoint_with(|point| {
+            // The commit has not happened yet.
+            assert_eq!(tree.committed(), before);
+            seen = Some(point);
+            Ok(())
+        })
+        .unwrap();
+    let point = seen.unwrap();
+    assert_eq!(point.applied_seq, 200);
+    assert!(point.captured_seq >= 200);
+    assert_eq!(state.applied_seq, 200);
+    assert_eq!(state.checkpoint_id, before.checkpoint_id + 1);
+}
+
+#[test]
+fn a_hook_error_commits_and_frees_nothing() {
+    let tree = Tree::in_memory(small()).unwrap();
+    let log = RecordingLog::default();
+    for i in 0..200u32 {
+        tree.put_logged(&log, &i.to_be_bytes(), b"v").unwrap();
+    }
+    let before = tree.committed();
+    let pages = tree.store().page_count();
+    assert_eq!(
+        tree.checkpoint_with(|_| Err(LogError::Other("wal down"))),
+        Err(TreeError::Log(LogError::Other("wal down")))
+    );
+    assert_eq!(tree.committed(), before);
+    assert!(!tree.store_failed(), "the store did not fail");
+    // Nothing was freed: the next writes grow the store.
+    assert!(tree.store().page_count() >= pages);
+    let state = tree.checkpoint().unwrap();
+    assert_eq!(state.applied_seq, 200);
+    let tree = Tree::open(tree.into_store()).unwrap();
+    assert_eq!(tree.iter().count(), 200);
+}
+
+/// With writers running, every effect a checkpoint commits has a sequence
+/// at or below the `captured_seq` its hook saw.
+#[test]
+fn captured_seq_covers_every_committed_effect() {
+    super::concurrent::with_watchdog(std::time::Duration::from_secs(60), || {
+        let config = TreeConfig {
+            circular_buffer_bytes: 2048,
+            ..small()
+        };
+        let tree = Tree::in_memory(config).unwrap();
+        let log = RecordingLog::default();
+        let stop = AtomicBool::new(false);
+        let captured = std::thread::scope(|scope| {
+            let (tree, log, stop) = (&tree, &log, &stop);
+            for w in 0..3u8 {
+                scope.spawn(move || {
+                    // Every write's value is unique: the writer and a count.
+                    let mut n = 0u32;
+                    while !stop.load(Ordering::Relaxed) {
+                        let i = n % 2000;
+                        let key = [w, (i >> 8) as u8, i as u8];
+                        let mut value = vec![w];
+                        value.extend(n.to_be_bytes());
+                        tree.put_logged(log, &key, &value).unwrap();
+                        n += 1;
+                    }
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let mut captured = 0;
+            tree.checkpoint_with(|point| {
+                captured = point.captured_seq;
+                Ok(())
+            })
+            .unwrap();
+            stop.store(true, Ordering::Relaxed);
+            captured
+        });
+        // The values each key held at or below `captured`, by sequence.
+        let records = log.records.lock().unwrap().clone();
+        let by_key: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>> =
+            records
+                .iter()
+                .fold(BTreeMap::new(), |mut map, (seq, key, value)| {
+                    map.entry(key.clone())
+                        .or_default()
+                        .push((*seq, value.clone().unwrap()));
+                    map
+                });
+        let reopened = Tree::open(tree.into_store()).unwrap();
+        for (key, value) in reopened.iter().map(Result::unwrap) {
+            let writes = &by_key[&key];
+            assert!(
+                writes
+                    .iter()
+                    .any(|(seq, written)| *seq <= captured && *written == value),
+                "key {key:?}: the committed value was written above {captured}"
+            );
+        }
+    });
+}

@@ -5,6 +5,17 @@ use super::{Tree, TreeError};
 use bf_tree_page::RecordState;
 use bf_tree_sync::atomic::Ordering;
 
+/// What a checkpoint is about to commit, given to its pre-commit hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitPoint {
+    /// `N`: every entry at or below this is in the image.
+    pub applied_seq: u64,
+    /// At least the sequence of every effect in the image, and at least
+    /// `applied_seq`. Effects above `N` may be present: the checkpoint is
+    /// fuzzy.
+    pub captured_seq: u64,
+}
+
 /// Where a tree's sequences come from, latched on first use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
