@@ -3,6 +3,7 @@ mod checkpoint;
 mod crash;
 mod external;
 mod open;
+mod replica;
 mod write;
 
 use crate::{Options, TreeConfig};
