@@ -17,7 +17,7 @@ const SECTOR: usize = 64;
 
 /// How the next commit fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommitFault {
+pub(super) enum CommitFault {
     /// The superblock copy never lands; the old state stays durable.
     BeforeCopy,
     /// The copy lands, but the call reports an error.
@@ -44,7 +44,7 @@ struct Disk {
 
 /// A handle to one simulated disk; clones share it.
 #[derive(Clone, Debug)]
-struct FaultStore {
+pub(super) struct FaultStore {
     disk: Arc<Mutex<Disk>>,
     superblock: Superblock,
 }
@@ -58,7 +58,7 @@ fn dead() -> StoreError {
 }
 
 impl FaultStore {
-    fn new(config: &TreeConfig) -> Self {
+    pub(super) fn new(config: &TreeConfig) -> Self {
         Self::from_durable(Superblock::from(config), Vec::new(), State::default())
     }
 
@@ -82,21 +82,21 @@ impl FaultStore {
     }
 
     /// Fail every store call after `calls` more.
-    fn die_after(&self, calls: u64) {
+    pub(super) fn die_after(&self, calls: u64) {
         self.disk.lock().unwrap().countdown = Some(calls);
     }
 
-    fn fail_next_commit(&self, fault: CommitFault) {
+    pub(super) fn fail_next_commit(&self, fault: CommitFault) {
         self.disk.lock().unwrap().commit_fault = Some(fault);
     }
 
-    fn durable_state(&self) -> State {
+    pub(super) fn durable_state(&self) -> State {
         self.disk.lock().unwrap().durable_state
     }
 
     /// The disk after a crash: the durable image, with each write since
     /// the last sync lost, landed, or torn at 64-byte sectors.
-    fn crash(&self, rng: &mut Rng) -> FaultStore {
+    pub(super) fn crash(&self, rng: &mut Rng) -> FaultStore {
         let disk = self.disk.lock().unwrap();
         let mut durable = disk.durable.clone();
         for (index, bytes) in &disk.pending {
@@ -242,10 +242,10 @@ impl PageStore for FaultStore {
 }
 
 /// A deterministic generator.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn below(&mut self, bound: u64) -> u64 {
+    pub(super) fn below(&mut self, bound: u64) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -313,7 +313,7 @@ fn contents(tree: &Tree) -> BTreeMap<Vec<u8>, Vec<u8>> {
 
 /// Open the crashed disk, possibly dying during the open itself (for
 /// example while it erases late pages); a death means another crash.
-fn recover(store: FaultStore, config: TreeConfig, rng: &mut Rng) -> (Tree, FaultStore) {
+pub(super) fn recover(store: FaultStore, config: TreeConfig, rng: &mut Rng) -> (Tree, FaultStore) {
     let mut store = store;
     loop {
         if rng.below(4) == 0 {

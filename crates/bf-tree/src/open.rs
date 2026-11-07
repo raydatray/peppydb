@@ -23,7 +23,8 @@ use bf_tree_sync::atomic::Ordering;
 
 impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and
-    /// [`Tree::checkpoint`], rebuilding the routing layer from leaf fences.
+    /// [`Tree::checkpoint`], or by [`Tree::write_snapshot`], rebuilding the
+    /// routing layer from leaf fences.
     ///
     /// The configuration comes from the store's superblock and the committed
     /// state from its newer intact copy. Every page is read once. All-zero

@@ -38,7 +38,8 @@ pub(super) struct LeafMap {
     /// its write-through drew (plan 0018).
     write_seq: AtomicU64,
     /// Held shared by every write-through for its whole duration; held
-    /// exclusively by a checkpoint to read `write_seq` with none in flight.
+    /// exclusively by a checkpoint to read `write_seq` (and the tree's
+    /// `last_seq`) with none in flight.
     gate: RwLock<()>,
     /// Pages that a later write of the same leaf replaced, each with the
     /// replacing write's sequence. Freed once a commit covers the sequence,

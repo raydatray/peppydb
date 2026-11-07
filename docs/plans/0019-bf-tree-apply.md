@@ -1,6 +1,6 @@
 # 0019: Apply, log hook, and snapshots
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Persistence](../design/bf-tree-persistence.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -479,8 +479,24 @@ Resolved (2026-11-06, review):
 - [x] Diff 3: one sequence space.
 - [x] Diff 4: pre-commit hook.
 - [x] Diff 5: snapshots.
-- [ ] Diff 6: lossy-log crash model, replica test, documents.
-- [ ] Stack-wide verification.
+- [x] Diff 6: lossy-log crash model, replica test, documents.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-07)
+
+Test paths are relative to `crates/bf-tree/src/`.
+
+| Check | Outcome |
+| --- | --- |
+| Apply semantics | `tests/apply.rs`: applied entries match the oracle (`applied_entries_match_the_oracle`, with gaps between sequences); an invalid operation rejects the whole entry unchanged (`an_invalid_op_rejects_the_whole_entry_unchanged`); an empty entry and a multi-op entry each advance the watermark once (`empty_and_multi_op_entries_advance_the_watermark_once`). |
+| Logged writes | `tests/apply.rs`: logged writes take the log's sequence (`logged_writes_take_the_log_sequence`); a failing `append` applies nothing and returns `TreeError::Log` (`a_failing_append_applies_nothing`); four threads writing one key end at the value of the highest sequence (`concurrent_logged_writes_to_one_key_end_at_the_highest_sequence`). |
+| Sequence rules | `tests/apply.rs`: internal and external sequences cannot be mixed in either order (`internal_and_external_sequences_cannot_be_mixed`); stale entries return `SequenceOrder` and change nothing (`stale_entries_are_rejected`); the latch resets on open and `put` continues from `N + 1` (`the_latch_resets_on_open_and_sequences_continue_from_the_commit`); an entry that failed on a store error is accepted again (`a_failed_entry_can_be_retried`). |
+| Hook | `tests/apply.rs`: the hook runs before the commit and sees `N` and a `captured_seq` at or above it (`the_hook_sees_the_captured_sequence_before_the_commit`); a hook error commits and frees nothing, does not set the store-failed flag, and a later checkpoint succeeds (`a_hook_error_commits_and_frees_nothing`); with three writers running, every committed value has a sequence at or below the `captured_seq` the hook saw (`captured_seq_covers_every_committed_effect`). Mutation: giving the hook only `N` (`captured_seq = applied`) fails that test in 10 of 10 runs. |
+| Snapshots | `tests/snapshot.rs`: a quiet snapshot equals the committed tree, is dense, and excludes uncommitted writes (`a_quiet_snapshot_equals_the_committed_tree`); five snapshots during a write storm with a checkpoint thread each open at the returned state, pass `check_invariants`, and equal the leader after replay above `N` (`a_snapshot_during_a_write_storm_is_a_consistent_replica`); a pin defers frees until a commit after it ends (`a_pin_defers_frees_until_a_commit_after_it_ends`); a failing output returns `SnapshotOutput` (`a_failing_output_reports_snapshot_output`). Mutation: removing the pin fails the storm test in 15 of 15 runs (a gap in the tiling: a commit freed a committed page and a writer reused it during the scan). With the pin, 30 of 30 release runs pass. |
+| Lossy-log crash model | `tests/logged.rs`: 24 seeds of 10 rounds with a 1 KiB circular buffer (`recovery_with_a_lossy_log_replays_to_the_durable_state`), and 12 seeds of 10 rounds with a 64 KiB circular buffer and full pages on (`recovery_with_a_lossy_log_and_a_large_buffer`). The runs include store deaths, commit faults after the superblock copy lands, and log sync failures. After every crash, open plus replay of the durable log equals the state of the durable log, so no batch is partial and no committed effect lacks a record. Mutation: a checkpoint without the hook fails the model at once ("committed past the durable log"). |
+| Replica | `tests/logged.rs`: a follower opens a snapshot file that `write_snapshot` wrote and `FileStore` opened, applies the log above its `N`, and equals the leader, which kept writing after the snapshot (`a_follower_catches_up_from_a_snapshot_and_the_log`). |
+| Release runs | The snapshot, apply, concurrent, contention, checkpoint, and crash suites passed 30 of 30 release runs. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (389 tests), and `go vet` and `go test` pass. Miri was not needed. |
 
 ## Discoveries and plan changes
 
@@ -495,6 +511,21 @@ Resolved (2026-11-06, review):
   With it, 30 of 30 release runs passed. The storm test stops its other
   threads through a drop guard, so a failing snapshot reports instead of
   hanging until the watchdog.
+- **The replica test partly duplicates the storm test.** Diff 5's storm
+  test already replays a recording log onto each snapshot and compares it
+  with the leader. Diff 6's replica test
+  (`a_follower_catches_up_from_a_snapshot_and_the_log`) keeps its own
+  value: it uses the lossy log, and its follower opens a file that
+  `write_snapshot` wrote directly, through `FileStore`. The storm test
+  copies snapshot bytes from memory into a file first.
+- **The hook is checked by two mutations.** Giving the hook only `N` fails
+  `captured_seq_covers_every_committed_effect` in 10 of 10 runs, and a
+  checkpoint without the hook fails the lossy-log model at once: a commit
+  records an `N` past the durable log.
+
+- **The hook-error test checks frees directly.** It now asserts that the
+  next allocation after a failed hook grows the store, so a free on the
+  error path fails it (shown by a mutation).
 
 ## Agent notes
 
