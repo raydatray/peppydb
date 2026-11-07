@@ -475,7 +475,7 @@ Resolved (2026-11-06, review):
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: apply and logged writes.
+- [x] Diff 2: apply and logged writes.
 - [ ] Diff 3: one sequence space.
 - [ ] Diff 4: pre-commit hook.
 - [ ] Diff 5: snapshots.
