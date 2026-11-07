@@ -1,3 +1,4 @@
+mod batch;
 mod open;
 mod write;
 
