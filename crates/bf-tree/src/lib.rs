@@ -61,7 +61,7 @@ mod read;
 mod scan;
 mod write;
 
-pub use apply::{Entry, Log, LogError, Op};
+pub use apply::{CommitPoint, Entry, Log, LogError, Op};
 use inner::Inner;
 #[cfg(test)]
 pub use invariants::InvariantError;
@@ -443,6 +443,23 @@ impl Tree {
     /// After a failed sync or commit, every later checkpoint returns
     /// [`TreeError::CheckpointFailed`] until the tree is reopened.
     pub fn checkpoint(&self) -> Result<State, TreeError> {
+        self.checkpoint_with(|_| Ok(()))
+    }
+
+    /// [`Tree::checkpoint`] with a hook that runs after the store sync and
+    /// before the commit, given what the checkpoint is about to commit.
+    ///
+    /// The checkpoint is fuzzy: pages can hold effects above the applied
+    /// watermark, whose log records may not be durable yet. A WAL's hook
+    /// syncs the log through [`CommitPoint::captured_seq`], so no committed
+    /// effect lacks a durable record. A hook error aborts the checkpoint:
+    /// nothing is committed or freed, the store-failed flag is not set, and
+    /// a later checkpoint retries. The hook holds the checkpoint mutex and
+    /// must not call `checkpoint`.
+    pub fn checkpoint_with(
+        &self,
+        before_commit: impl FnOnce(CommitPoint) -> Result<(), LogError>,
+    ) -> Result<State, TreeError> {
         let _one = self.checkpointing.lock();
         if self.store_failed() {
             return Err(TreeError::CheckpointFailed);
@@ -466,7 +483,7 @@ impl Tree {
                 Residency::Base => {}
             }
         }
-        self.commit_written(applied)
+        self.commit_written(applied, before_commit)
     }
 
     /// Every write with a sequence at or below this has been applied.
@@ -483,9 +500,23 @@ impl Tree {
     /// none in flight, sync, commit, then free the pages that writes at or
     /// below `W` replaced. Commits `applied` as the applied watermark. Holds
     /// `checkpointing`, or runs before the tree is shared.
-    fn commit_written(&self, applied: u64) -> Result<State, TreeError> {
-        let written = self.leaves.write_watermark();
+    fn commit_written(
+        &self,
+        applied: u64,
+        before_commit: impl FnOnce(CommitPoint) -> Result<(), LogError>,
+    ) -> Result<State, TreeError> {
+        // Every effect in a page at or below `W` entered `last_seq` before it
+        // was applied, and the gate waits for every write-through at or below
+        // `W`; so `last_seq` read under the gate covers every captured effect.
+        let (written, captured) = self
+            .leaves
+            .write_watermark_with(|| self.last_seq.load(Ordering::Acquire));
         self.durable(|| self.leaves.sync())?;
+        before_commit(CommitPoint {
+            applied_seq: applied,
+            captured_seq: captured.max(applied),
+        })
+        .map_err(TreeError::Log)?;
         let current = self.leaves.store().state();
         let next = State {
             checkpoint_id: current.checkpoint_id + 1,
@@ -554,7 +585,7 @@ impl Tree {
         );
         // Commit the empty tree, so that a store that is created and never
         // checkpointed reopens as an empty tree.
-        tree.commit_written(0)?;
+        tree.commit_written(0, |_| Ok(()))?;
         Ok(tree)
     }
 

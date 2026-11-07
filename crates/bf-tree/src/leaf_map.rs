@@ -578,9 +578,16 @@ impl LeafMap {
     /// The write watermark: the last sequence drawn, read with the gate
     /// held exclusively, so every write-through at or below it has finished
     /// its writes and recorded its superseded pages.
+    #[cfg(test)]
     pub(super) fn write_watermark(&self) -> u64 {
+        self.write_watermark_with(|| ()).0
+    }
+
+    /// [`LeafMap::write_watermark`], and `also` read under the same
+    /// exclusive gate.
+    pub(super) fn write_watermark_with<R>(&self, also: impl FnOnce() -> R) -> (u64, R) {
         let _none_in_flight = self.gate.write();
-        self.write_seq.load(Ordering::Acquire)
+        (self.write_seq.load(Ordering::Acquire), also())
     }
 
     /// Free pages that a durable write replaced. Called with no lock held.
