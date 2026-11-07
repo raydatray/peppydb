@@ -6,12 +6,10 @@ peppy_rust_library(
         "//crates/bf-tree-node-id:bf-tree-node-id",
         "//crates/bf-tree-page:bf-tree-page",
         "//crates/bf-tree-sync:bf-tree-sync",
+        "//third-party/rust:crc32c",
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],
-    test_deps = [
-        "//third-party/rust:crc32c",
-        "//third-party/rust:tempfile",
-    ],
+    test_deps = ["//third-party/rust:tempfile"],
     visibility = ["//crates/bf-tree:"],
 )
