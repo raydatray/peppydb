@@ -1,6 +1,6 @@
 # 0021: Engine `Db`
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md) (from plan 0020),
@@ -605,7 +605,7 @@ by plans 0019 and 0013.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: crate, open, recovery, reads.
 - [ ] Diff 3: durable writes.
 - [ ] Diff 4: write batches.
