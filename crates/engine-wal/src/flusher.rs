@@ -97,6 +97,8 @@ impl Wal {
     /// than both the highest replayed sequence and the tree's applied
     /// sequence. Run [`Wal::replay`] first. Starts the flusher thread.
     pub fn open(dir: &Path, options: WalOptions, next_seq: u64) -> Result<Wal, WalError> {
+        // Sequences start at 1.
+        let next_seq = next_seq.max(1);
         std::fs::create_dir_all(dir).map_err(io("create WAL directory"))?;
         // A header-only last segment holds nothing (a crash right after a
         // segment was created): replace it with one named `next_seq`.

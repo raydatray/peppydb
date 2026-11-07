@@ -1,6 +1,6 @@
 # 0020: Engine write-ahead log
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [build system](../design/build-system.md),
@@ -598,8 +598,28 @@ Resolved:
 - [x] Diff 3: replay and torn-tail repair.
 - [x] Diff 4: append and group commit.
 - [x] Diff 5: truncation and simulated crashes.
-- [ ] Diff 6: design document.
-- [ ] Stack-wide verification.
+- [x] Diff 6: design document.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-07)
+
+Test paths are relative to `crates/engine-wal/src/`. The
+[engine design](../design/engine.md#guarantees) maps each guarantee to its
+tests.
+
+| Check | Outcome |
+| --- | --- |
+| Format | `tests/record.rs`: every kind round-trips, including empty keys and values, an empty batch, and a 5000-byte value (`every_kind_round_trips`); every cut and every single-bit flip fails to decode (`every_cut_and_every_bit_flip_fails_to_decode`); `len` of 0, 8, `u32::MAX`, and `MAX_RECORD_BYTES + 1` fails, 64 zero bytes fail, and a nested batch, trailing payload bytes, and an unknown kind fail with a correct checksum (`bad_lengths_zeros_nesting_and_trailing_bytes_fail`); a header round-trips, and bad magic, a bad checksum, an unknown version, and a short header are rejected (`segment_headers_round_trip_and_reject_damage`); the CRC32C matches the RFC 3720 §B.4 value (`crc32c_matches_the_rfc_3720_check_value`). |
+| Torn tails | `tests/replay.rs`: replay from the start and from the middle (`replays_from_the_start_and_from_the_middle`); a torn tail at every offset of the last record is cut from the file and a second replay is clean (`a_torn_tail_at_every_offset_is_cut_and_synced`); zero and garbage tails are tails (`garbage_and_zeros_after_good_records_are_a_tail`). |
+| Corruption | `tests/replay.rs`: damage before intact records in the last segment is `Corrupt` (`damage_before_intact_records_of_the_last_segment_is_corrupt`); any damage in a sealed segment is `Corrupt` (`any_damage_in_a_sealed_segment_is_corrupt`); duplicated, decreasing, and skipping sequences are `Corrupt` (`duplicated_or_decreasing_sequences_are_corrupt`); a missing segment is `Gap` unless wholly below `from_seq` (`a_missing_segment_is_a_gap_unless_wholly_below_from_seq`); old segments are skipped after a header check, and a header/name mismatch is `Corrupt` (`old_segments_are_skipped_and_header_mismatches_are_corrupt`); a torn header deletes only the last segment (`a_torn_header_deletes_the_last_segment_only`); empty and absent directories replay nothing (`empty_and_absent_directories_replay_nothing`). |
+| Writer | `tests/writer.rs`: round trips with intervals of 0 and 10 ms (`appends_round_trip_through_close_and_replay`); `sync_to` returns well before a 1 s interval (`sync_to_skips_a_long_flush_interval`); rotation names segments by their first sequence (`segments_rotate_and_are_named_by_their_first_sequence`); an append after `close` is `Closed` (`appends_after_close_are_rejected`); an oversized batch takes no sequence and the largest fitting record is accepted (`an_oversized_batch_takes_no_sequence`); reopening continues the log and a header-only last segment is replaced (`reopening_continues_the_log`). |
+| Truncation | `tests/lifecycle.rs`: exactly the redundant sealed segments are deleted, never the last (`truncation_deletes_exactly_the_redundant_sealed_segments`); four concurrent calls leave exactly the needed segments (`concurrent_truncations_succeed`). |
+| Group commit | `tests/lifecycle.rs`: eight appenders of 400 records receive 3200 contiguous sequences with fewer syncs than records, and replay in sequence order (`eight_appenders_get_contiguous_sequences_and_share_syncs`). |
+| Crash | `tests/lifecycle.rs`: `abandon(0)` loses exactly the unconfirmed records (`abandon_loses_only_records_never_reported_durable`); `abandon` at every byte of a record leaves a tail that replay repairs (`abandon_at_every_byte_of_a_record_leaves_a_repairable_tail`). |
+| Failure | `tests/lifecycle.rs`: an injected sync failure makes waiters, appends, and `sync_to` return `Failed`, and `close` returns the original `Io` error once (`a_flusher_failure_is_sticky`); `appended_bytes` counts every record (`appended_bytes_count_every_record`). |
+| Release runs | The `engine-wal` tests passed 20 of 20 release runs. |
+| Visibility | Not run as a local experiment (`bin/peppydb` depending on `engine-wal`). The `BUCK` file sets `visibility = ["//crates/engine:"]`. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (19 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (418 tests), and `go vet` and `go test` pass. Miri was not needed: the crate has no `unsafe` code. |
 
 ## Discoveries and plan changes
 
@@ -619,6 +639,20 @@ Resolved:
   instead; the plan never promised exact counts under concurrency.
 - **`create` moved from `segment.rs` to `flusher.rs`.** Only the writer
   creates segments, so diff 3 had no use for it.
+- **Documentation review (diff 6).** Replay reads a skipped segment's file
+  whole and decodes only its header; "Skipping old segments" above says it
+  does not read its records. The forward scan tries every byte offset after
+  the tear, so its cost depends on the tail length. `open` does not check
+  `next_seq`. The [engine design](../design/engine.md#not-yet-guaranteed-and-limits)
+  records these as limits.
+- **Sequence 0 means the start.** The docs review found that
+  `Wal::open(.., 0)` underflowed `next_seq - 1` and that replay from 0
+  reported a gap. Both now treat 0 as 1 (`sequence_zero_means_the_start`).
+- **Replay reads skipped segments whole.** It skips their records but
+  still reads the file; and the forward scan after a bad record tries
+  every later offset, each bounded by the record length check. Both are
+  acceptable for the MVP and are noted for plan 0023's replay-rate
+  measurement.
 
 ## Agent notes
 
