@@ -1,8 +1,8 @@
 //! Reopening a tree from its stored leaves.
 //!
-//! Inner nodes are derived data. `Tree::open` reads every page, checks its
-//! checksum and structure, maps the leaf it names to its page number, then
-//! `tile` checks that the leaf fences partition the key space and
+//! Inner nodes are derived data. `Tree::open` reads every page and selects
+//! the committed image: the newest page of each leaf at or below the
+//! committed write watermark (plan 0018). Then `tile` checks that the leaf fences partition the key space and
 //! `build_inner` packs the separators into inner levels bottom-up. The last
 //! two are pure functions over fence lists, so they are tested without a
 //! store.
@@ -25,15 +25,17 @@ impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and
     /// [`Tree::checkpoint`], rebuilding the routing layer from leaf fences.
     ///
-    /// The configuration comes from the store's superblock. Every page is
-    /// read once: all-zero pages are free (allocated but never written) and
-    /// are returned to the store for reuse; every other page must pass its
-    /// checksum and [`Page::validate`] (else `CorruptPage`), name a leaf that
-    /// no other page names, carry fences, and respect the configured key and
-    /// value limits. The leaves must tile the key space, so a store with a
-    /// missing, duplicated, or torn leaf is rejected rather than opened. Leaf
-    /// IDs that no page names are holes and stay unused. Open is `O(pages)`
-    /// in I/O and memory.
+    /// The configuration comes from the store's superblock and the committed
+    /// state from its newer intact copy. Every page is read once. All-zero
+    /// pages are free. Pages written after the committed write watermark
+    /// are zeroed, synced, and freed, so they cannot return after a later
+    /// commit. Of the rest, each leaf's newest page is selected and older
+    /// copies are freed. A page that fails its checksum is released if a
+    /// crash can explain it (its header never landed, or names a leaf with a
+    /// newer page) and is otherwise `CorruptPage`. Selected pages must pass
+    /// [`Page::validate`], carry fences, respect the configured limits, and
+    /// tile the key space. Leaf IDs that no page names are holes. Open is
+    /// `O(pages)` in I/O and memory.
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         let config = TreeConfig::from(store.superblock());
         Self::open_with(config, store)

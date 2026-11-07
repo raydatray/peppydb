@@ -123,3 +123,22 @@ fn open_keeps_the_newest_copy_of_a_leaf_and_releases_older_ones() {
         "the older copy was released"
     );
 }
+
+#[test]
+fn a_leaf_written_through_n_times_holds_n_plus_one_pages_until_a_checkpoint() {
+    let tree = Tree::in_memory(config(256, 128, 8, 16)).unwrap();
+    tree.checkpoint().unwrap();
+    let id = leaf(0);
+    let pages = tree.store().page_count();
+    let mut bytes = tree.leaves.page_copy(id).unwrap();
+    for n in 1..=5u64 {
+        tree.leaves.overwrite(id, &mut bytes).unwrap();
+        assert_eq!(tree.store().page_count(), pages + n, "nothing reused yet");
+    }
+    tree.checkpoint().unwrap();
+    // The five replaced pages are free again: five allocations reuse them.
+    for _ in 0..5 {
+        assert!(tree.store().alloc().unwrap().raw() < pages + 5);
+    }
+    assert_eq!(tree.store().page_count(), pages + 5);
+}

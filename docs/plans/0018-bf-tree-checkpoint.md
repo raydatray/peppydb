@@ -1,6 +1,6 @@
 # 0018: Shadow paging, checkpoint, and recovery
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Persistence](../design/bf-tree-persistence.md)
 (created by plan 0017), [concurrency](../design/bf-tree-concurrency.md),
@@ -571,8 +571,25 @@ Resolved (2026-11-06, review):
 - [x] Diff 5: suspect classification.
 - [x] Diff 6: checkpoint and watermarks.
 - [x] Diff 7: fault store and crash model.
-- [ ] Diff 8: concurrent crash variant and documents.
-- [ ] Stack-wide verification.
+- [x] Diff 8: concurrent crash variant and documents.
+- [x] Stack-wide verification.
+
+## Verification outcomes (2026-11-07)
+
+| Check | Outcome |
+| --- | --- |
+| Shadow paging | `tests/shadow.rs`: a write-through moves the leaf to a fresh page, and the checkpoint frees the old page for reuse; supersessions wait for a checkpoint; both halves of a split share one sequence; after checkpoints and a reopen on `FileStore`, each leaf has one page and sequences continue above every page; open keeps the newest copy of a leaf and releases older ones. |
+| File growth | `tests/shadow.rs`: `n` write-throughs of one leaf hold `n + 1` pages until a checkpoint; after it, the `n` replaced pages are reused before the store grows. |
+| Commit and create | `tests/checkpoint.rs`: create commits an empty tree (checkpoint 1, `write_seq` 1) that reopens empty; a checkpoint commits `W`; a page written after the commit is erased (zeroed) on open; a crash between commit and free reopens cleanly, and the superseded pages are reused; a write-through that holds the gate holds back the commit. |
+| Store failures | `tests/checkpoint.rs`: a failed commit keeps the previous state; later checkpoints return `CheckpointFailed`, writes return `StoreFailed`, and reads continue; a reopen clears the flag; `AcceptWrites` keeps writes. |
+| Stale resurrection | `tests/checkpoint.rs`: the two-generation regression passes: a page that was never committed does not return after a later commit covers its sequence. |
+| Applied watermark | `tests/checkpoint.rs`: a checkpoint records every write that returned before it, and sequences continue after a reopen; three checkpoint threads beside two writers commit 60 consecutive ids, and the reopened tree holds all 1600 writes. |
+| Torn pages | `tests/torn.rs`: each of the 16 combinations of four 64-byte sectors of a late write landing, over a fresh page and over a reused page, reopens at the commit. With the suspect release rule disabled, the test fails. Damage to a committed page is `CorruptPage`; a sealed page that fails validation is `CorruptPage`. |
+| Crash model | `tests/crash.rs`: the `FaultStore` model passes 24 seeds of 12 rounds with a 1 KiB circular buffer, and 12 seeds of 10 rounds with a 64 KiB circular buffer and caching and full pages on. The runs include deaths during operations and during open, and commit faults before and after the superblock copy lands. Two mutations make it fail on its first seeds: keeping pages above `W` on open, and committing `N + 3`. |
+| Concurrent crash | `tests/crash.rs`: 4 writers and a checkpoint thread, with the store dying after 200 to 3200 calls, over 12 seeds. Each run crashed mid-run and lost 300 to 580 acknowledged writes. After open, every key satisfies the per-key fuzzy bound, and after replay from `N + 1` the tree equals the oracle. |
+| Plan 0015 hint race | Found and fixed in diff 6 (see the discoveries): 0 failures in 300 stress runs after the fix, against about 1 in 20 to 120 runs before it. |
+| Release runs | The concurrent, contention, checkpoint, buffered, and crash suites passed 20 of 20 release runs. |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (17 targets), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (369 tests), and `go vet` and `go test` pass. Miri was not needed: the stack does not change `crates/bf-tree-circular-buffer`. |
 
 ## Discoveries and plan changes
 
@@ -633,6 +650,27 @@ Resolved (2026-11-06, review):
   watermark three above what it covered, the model fails on its first
   seeds. The fault store also dies during open (in the erase), and the
   recovery loop crashes the disk again in that case.
+- **The documents record three gaps that the review in diff 8 found.**
+  None changes the protocol, and no test covers them. (1) `applied` is a
+  `fetch_max`, so while writes run, a write on another leaf with a lower
+  sequence can still be in flight; the "Why `N` is complete" argument
+  needs only that such a write holds its leaf lock, which the pass waits
+  for. (2) A free error after the commit returns the error although the
+  commit is durable; the drained pages stay allocated until the next
+  `open`. (3) `write_through` freed, but did not erase, a fresh page whose
+  write returned an error; if the bytes landed anyway, a later commit could
+  cover the page, and for a split's right half open would then fail its
+  tiling check. (3) is fixed: a failed page write now sets the
+  store-failed flag, so no later commit covers it, and open erases the
+  page (`a_failed_page_write_fails_later_checkpoints`). The
+  [persistence design](../design/bf-tree-persistence.md) records (1) under
+  "Sequences and watermarks" and (2) under "Not yet guaranteed".
+- **The selection table's "names no leaf" row differs from the code.**
+  The Approach table gives `CorruptPage` for an intact page that names no
+  leaf. The code keeps plan 0017's `InconsistentLeaves` for a missing
+  leaf, an implausible ID, missing fences, and out-of-limit records;
+  only `Page::validate` failures are `CorruptPage`. The persistence design
+  records the implemented behaviour.
 
 ## Agent notes
 

@@ -168,7 +168,7 @@ The block's events, all under the owner's X lock:
 | Overflow | `LeafMap::release_full` | Writes the page back if dirty, then frees the block. |
 | Eviction | `Tree::evict` | Writes the page back if dirty, or only frees it if clean, then retires the claim. |
 | Relocation | `Tree::relocate` | Copies the page to a fresh `Kind::Full` block at the tail and keeps `dirty`. |
-| `flush` | `LeafMap::write_back` | Writes a dirty page back and clears `dirty`. The block stays. |
+| Checkpoint pass | `LeafMap::write_back` | Writes a dirty page back and clears `dirty`. The block stays. |
 
 Hints (promotions and cache fills) allocate only when room exists without
 eviction. When they lack room, the reader releases its lock and the
@@ -251,7 +251,7 @@ evictions if measurements show a problem.
    `Base`. Then `evict` retires the claim. A clean full page is evicted
    with no store write.
 5. Otherwise `evict` calls `Tree::merge_leaf`, the same merge that writes
-   and `flush` use. A mini-page with no dirty record is freed without I/O. It loads the base page into thread-local scratch,
+   and the checkpoint pass use. A mini-page with no dirty record is freed without I/O. It loads the base page into thread-local scratch,
    merges in place or splits into a fresh right leaf, writes the result
    through, and frees the block last. A split's right guard drops before
    the owner's guard. Then `evict` retires the claim.

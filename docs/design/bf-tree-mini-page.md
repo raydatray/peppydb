@@ -258,20 +258,22 @@ scan forms iterate `LeafRef { base, mini }.range` for each leaf under S;
 the base page is the leaf's full page if it has one, and is loaded from
 the store otherwise.
 
-### Flush and close
+### Checkpoint and close
 
-`Tree::flush` walks leaf IDs `0..len`, with `len` read when it starts. It
-X-locks each live leaf by ID, calls `merge_leaf` if the leaf has a
-mini-page or writes back its full page if that page is dirty, releases the
-leaf, and then syncs the store. Every write that
-returned before `flush` began is in the store when `flush` returns. A
-record buffered into a leaf that `flush` already visited, or into a leaf
-created after it started, may stay buffered.
+`Tree::checkpoint` (plan 0018, formerly `flush`) reads the applied
+watermark, then walks leaf IDs from 0, reading the leaf count again on
+every step, so it also reaches a leaf that a split creates during the
+pass. It X-locks each live leaf by ID, calls `merge_leaf` if the leaf has a
+mini-page or writes back its full page if that page is dirty, and releases
+the leaf. It then syncs the store and commits. Every write that returned
+before `checkpoint` was called is in the commit. A record buffered into a
+leaf that the pass already visited may stay buffered
+([persistence](bf-tree-persistence.md#the-checkpoint-protocol)).
 
 Buffered records exist only in memory. Dropping a tree, or `into_store`,
 discards them and returns their blocks to the circular buffer, so the buffer
-never sees outstanding blocks at its own drop. Call `flush` first to keep
-the records.
+never sees outstanding blocks at its own drop. Call `checkpoint` first to
+keep the records.
 
 ### Diagnostics and checks
 

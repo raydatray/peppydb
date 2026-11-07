@@ -334,19 +334,25 @@ pub enum TreeError {
 /// leaf fences, in version-locked frames that readers never lock. Every
 /// operation takes `&self`.
 ///
-/// Lock order (plan 0016): a thread acquires waitable locks only in this
-/// order, so no cycle of waits can form.
+/// Lock order (plans 0016 and 0018): a thread acquires waitable locks only
+/// in this order, so no cycle of waits can form.
 ///
+/// 0. `checkpointing`, taken first and only by a checkpoint, which holds no
+///    other lock then.
 /// 1. Leaf locks: at most one reachable leaf, plus a split's fresh right
 ///    leaf, which no other thread can reach.
 /// 2. Frame write locks, bottom-up by level, taken only by
 ///    `Inner::install` while the thread holds the node whose split it
 ///    propagates. Fresh frames are never locked.
 /// 3. `root_grow`, only while holding the current root's lock.
-/// 4. Store locks: a store's page free list, which may in turn take the
+/// 4. The write-through gate: shared by each write-through, under its leaf
+///    locks; exclusive only in the checkpoint's watermark read, with no
+///    leaf or frame lock held.
+/// 5. Store locks: a store's page free list, which may in turn take the
 ///    locks below.
-/// 5. Innermost locks: the circular-buffer mutex, a memory store page's
-///    mutex, and table growth. Nothing is acquired while one is held.
+/// 6. Innermost locks: the circular-buffer mutex, the superseded-page
+///    list, a memory store page's mutex, and table growth. Nothing is
+///    acquired while one is held.
 ///
 /// Readers take no frame lock and no `root_grow`, and hold at most one leaf
 /// S lock. Scans release a leaf before locking the next; eviction and
@@ -391,8 +397,8 @@ impl Tree {
     /// Validate `config` and create an empty tree on an empty `store` whose
     /// superblock was built from the same configuration.
     ///
-    /// The first leaf is written and committed at once; [`Tree::checkpoint`] makes
-    /// it durable.
+    /// The first leaf is written and committed at once, so the store reopens
+    /// as an empty tree.
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         config.validate()?;
         if *store.superblock() != Superblock::from(&config) {
@@ -549,9 +555,11 @@ impl Tree {
         }
     }
 
-    /// Whether a sync or commit failed since the tree was opened.
+    /// Whether a page write, sync, or commit failed since the tree was
+    /// opened. Checkpoints then fail, and writes follow
+    /// [`TreeConfig::on_store_failure`], until the tree is reopened.
     pub fn store_failed(&self) -> bool {
-        self.store_failed.load(Ordering::Acquire)
+        self.store_failed.load(Ordering::Acquire) || self.leaves.write_failed()
     }
 
     /// Reject a write after a store failure, if the configuration says so.

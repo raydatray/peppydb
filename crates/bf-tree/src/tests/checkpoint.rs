@@ -20,6 +20,7 @@ fn key(i: u32) -> [u8; 4] {
 struct FailingSync {
     inner: MemStore,
     fail: Arc<AtomicBool>,
+    fail_writes: Arc<AtomicBool>,
 }
 
 fn io_error() -> StoreError {
@@ -47,6 +48,11 @@ impl PageStore for FailingSync {
         self.inner.read(page_number, buf)
     }
     fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
+        if self.fail_writes.load(Ordering::Relaxed) {
+            // The bytes land, but the call reports an error.
+            self.inner.write(page_number, buf)?;
+            return Err(io_error());
+        }
         self.inner.write(page_number, buf)
     }
     fn sync(&self) -> Result<(), StoreError> {
@@ -70,12 +76,23 @@ impl PageStore for FailingSync {
 }
 
 fn failing(config: TreeConfig) -> (Tree, Arc<AtomicBool>) {
+    let (tree, fail, _) = failing_both(config);
+    (tree, fail)
+}
+
+fn failing_both(config: TreeConfig) -> (Tree, Arc<AtomicBool>, Arc<AtomicBool>) {
     let fail = Arc::new(AtomicBool::new(false));
+    let fail_writes = Arc::new(AtomicBool::new(false));
     let store = FailingSync {
         inner: MemStore::new(Superblock::from(&config)).unwrap(),
         fail: fail.clone(),
+        fail_writes: fail_writes.clone(),
     };
-    (Tree::create(config, Box::new(store)).unwrap(), fail)
+    (
+        Tree::create(config, Box::new(store)).unwrap(),
+        fail,
+        fail_writes,
+    )
 }
 
 #[test]
@@ -332,4 +349,27 @@ fn concurrent_checkpoints_commit_consecutive_ids_beside_writers() {
         assert_eq!(tree.iter().count(), 1600);
         assert_eq!(tree.check_invariants(), Ok(()));
     });
+}
+
+/// A page write that reports an error may still have landed, under a
+/// sequence a later commit would cover; so it fails later checkpoints too.
+#[test]
+fn a_failed_page_write_fails_later_checkpoints() {
+    let (tree, _, fail_writes) = failing_both(small());
+    tree.put(&key(1), b"v").unwrap();
+    tree.checkpoint().unwrap();
+    let before = tree.committed();
+    fail_writes.store(true, Ordering::Relaxed);
+    tree.put(&key(2), b"w").unwrap(); // buffered: no page write yet
+    assert!(matches!(tree.checkpoint(), Err(TreeError::Store(_))));
+    fail_writes.store(false, Ordering::Relaxed);
+    assert!(tree.store_failed());
+    assert_eq!(tree.checkpoint(), Err(TreeError::CheckpointFailed));
+    assert_eq!(tree.put(&key(3), b"x"), Err(TreeError::StoreFailed));
+    assert_eq!(tree.committed(), before);
+    // The landed page is above the committed watermark, so open erases it.
+    let tree = Tree::open(tree.into_store()).unwrap();
+    assert_eq!(tree.get(&key(2)), Ok(None));
+    assert_eq!(tree.get(&key(1)), Ok(Some(b"v".to_vec())));
+    assert_eq!(tree.check_invariants(), Ok(()));
 }

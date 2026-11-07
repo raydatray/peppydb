@@ -64,7 +64,7 @@ stateDiagram-v2
     Base --> Full: promotion
     Mini --> Full: promotion merges first
     Mini --> Full: write-driven merge
-    Full --> Full: direct write, flush, relocation
+    Full --> Full: direct write, checkpoint write-back, relocation
     Full --> Base: eviction or overflow release
 ```
 
@@ -205,7 +205,7 @@ records are freed).
 
 A mini-page that holds no dirty record only repeats the base page.
 `Tree::merge_leaf` frees its block without reading or writing the base
-page, and leaves scratch untouched. Eviction and `flush` of a cache-only
+page, and leaves scratch untouched. Eviction and the checkpoint pass over a cache-only
 mini-page therefore write nothing, and cached records never reach the
 store (`cache_only_mini_pages_are_freed_by_flush_and_eviction_without_writes`).
 A caller that keeps the page as a full page calls `merge_keeping_page`,
@@ -271,7 +271,7 @@ leaf's full page. Otherwise the leaf becomes `Base` as before. On a split,
 the left half (the leaf being written) is kept, as upstream does. The
 pending record then goes into the half that owns the key: directly into
 the full page, or buffered. The write path never evicts for a promotion.
-Eviction and `flush` merges never keep a page, because eviction must not
+Eviction and checkpoint merges never keep a page, because eviction must not
 allocate from the circular buffer.
 
 **Direct writes.** `Tree::place` writes into a full page with `write_full`:
@@ -343,6 +343,15 @@ flowchart TD
 - **Retry.** The hint's own leaf is locked again with `try_write`. If the
   version is unchanged, the hint is applied once. If it lacks room again,
   it is dropped.
+- **A fill that turned into a promotion is never retried.** When a cache
+  fill finds the mini-page full, `cache_fill` promotes the page instead
+  and reports `Promoted`, whatever the promotion achieved. The promotion's
+  merge can split the leaf, so the key may no longer belong to it.
+  Deferring the fill would compare against the version taken after the
+  split and cache the key in the left half, which no longer owns it; scans
+  then returned that record past the leaf's upper fence until a merge
+  dropped it. Plan 0018's contention runs exposed this race in plan 0015's
+  code ([plan 0018, discoveries](../plans/0018-bf-tree-checkpoint.md#discoveries-and-plan-changes)).
 
 **Why.** A dirty mini-page holds buffered writes. Evicting it costs a merge
 and possibly a split. Spending that to make room for a clean record or a
@@ -361,7 +370,7 @@ Tests: `deferral_evicts_clean_full_pages_without_io` and
 `deferral_stops_at_a_dirty_mini_page_and_unclaims_it` (a later `evict_one`
 still evicts the dirty mini-page, so the claim was released).
 
-## Eviction, relocation, and flush of full pages
+## Eviction, relocation, and checkpoints of full pages
 
 - **Eviction.** `Tree::evict` has a `Full` arm: `release_full` writes the
   page back if dirty and frees the block, then the claim retires. On a
@@ -370,8 +379,9 @@ still evicts the dirty mini-page, so the claim was released).
 - **Relocation.** `Tree::relocate` copies an aging full page into a fresh
   `Kind::Full` block of the same size and keeps `dirty`
   (`relocation_copies_a_full_page_and_keeps_it_dirty`).
-- **`flush`.** After it merges each mini-page, `flush` writes back each
-  dirty full page and clears `dirty`, then syncs. The page stays `Full`
+- **`checkpoint`.** In its pass, `checkpoint` merges each mini-page and
+  writes back each dirty full page and clears `dirty`, then syncs and
+  commits. The page stays `Full`
   (`flush_writes_back_dirty_full_pages_and_reopen_agrees`).
 
 ## The policy generator
@@ -423,13 +433,13 @@ a roll never borrows the scratch.
 - **The budget is never exceeded.** Promotion, fills, and relocation
   allocate only when room exists without eviction. The models assert
   `circular_buffer_used() <= circular_buffer_bytes` after every step, and
-  the concurrent test asserts it in a looping `flush`.
+  the concurrent test asserts it in a looping `checkpoint`.
 - **Rate 0 allocates nothing on reads and scans.** With every rate and the
   second chance at 0, the model asserts that reads and scans leave
   `circular_buffer_used()` unchanged.
 - **Clean state never reaches the store.** Cached records and clean full
   pages are freed with no store write. Dirty full pages are written back
-  on eviction, overflow, and `flush`.
+  on eviction, overflow, and `checkpoint`.
 - **A hint never evicts a dirty mini-page and a scan never merges.**
   Promotion merges only the hinted leaf's own mini-page.
 - **Correctness never depends on a roll or a hint.** A dropped hint only

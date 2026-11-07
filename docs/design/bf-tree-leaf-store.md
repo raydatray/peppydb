@@ -21,6 +21,7 @@ flowchart LR
     Tree --> Map["LeafMap"]
     Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version"]
     Map --> PT["pages: Table&lt;AtomicU64&gt;, leaf to page number"]
+    Map --> SH["write_seq, gate, superseded: shadow paging"]
     Map --> CB["CircularBuffer: mini-page blocks"]
     Map --> C["SizeClasses"]
     Map --> PS["Box&lt;dyn PageStore&gt;"]
@@ -35,7 +36,9 @@ Inner nodes stay in memory and are rebuilt on open. Only leaves cross the
 store boundary. The [persistence design](bf-tree-persistence.md) records
 the durable format: the file layout, the checksummed superblock copies,
 page numbers, and the leaf stamp and checksum in every stored page
-([plan 0017](../plans/0017-bf-tree-store-format.md)). No base page stays in memory between operations: each
+([plan 0017](../plans/0017-bf-tree-store-format.md)), and shadow paging,
+checkpoints, and recovery
+([plan 0018](../plans/0018-bf-tree-checkpoint.md)). No base page stays in memory between operations: each
 access that needs one loads it into a thread-local scratch buffer. Writes
 buffer in mini-pages, which stay in memory until a merge writes them to the
 store.
@@ -75,15 +78,17 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
   its bytes. A write to a freed page and a second `free` are
   `FreedPage`; a page number at or beyond `page_count()` is `UnknownPage`.
   `page_count()` counts every page ever allocated, live or freed. The tree
-  calls `alloc` only in `write_through`, on a leaf's first write, and
-  `free` in two places only: `Tree::open` reclaims all-zero pages, and
-  `LeafMap::discard` zeroes and frees the page of a split's right half when
-  the split fails after writing it.
+  calls `alloc` only in `write_through`, once for every page it writes.
+  It calls `free` in `write_through` (a fresh page whose write failed), in
+  the checkpoint's free step (pages that a commit no longer references), in
+  `LeafMap::discard` (the zeroed page of a failed split's right half), and
+  in `Tree::open` (zero, superseded, suspect, and erased pages)
+  ([persistence](bf-tree-persistence.md#the-pagestore-contract)).
 - Writes are durable only after `sync` returns.
 - `state()` returns the last committed `State`, and `commit` replaces it
   durably and atomically through alternating superblock copies
-  ([persistence](bf-tree-persistence.md#commit)). The tree does not commit
-  yet; plan 0018's checkpoint is the first caller.
+  ([persistence](bf-tree-persistence.md#commit)). The tree commits from
+  `Tree::checkpoint` and once at creation.
 - The tree holds a `Box<dyn PageStore>`, so one `Tree` type serves every
   backend. The virtual call sits next to a page read and costs nothing
   measurable.
@@ -106,7 +111,7 @@ recognizes a page that was allocated but never written. `FileStore` does
 not persist its free list, and `FileStore::open` does not scan: on a 96 GiB
 file one probe per page cost three minutes. A reopened store treats every
 page as live, and `Tree::open`, which reads every page anyway, returns the
-all-zero ones with `free`.
+all-zero, superseded, and erased ones with `free`.
 
 ### The superblock
 
@@ -165,6 +170,12 @@ pub(super) struct LeafMap {
     pages: Table<AtomicU64>,
     /// The next leaf ID; holes are never reused.
     next: AtomicUsize,
+    /// Last write sequence drawn (plan 0018).
+    write_seq: AtomicU64,
+    /// Shared by every write-through; exclusive for the checkpoint's `W`.
+    gate: RwLock<()>,
+    /// Replaced pages, each with its replacing sequence.
+    superseded: Mutex<Vec<(PageNumber, u64)>>,
     circular_buffer: CircularBuffer,
     classes: SizeClasses,
 }
@@ -229,7 +240,8 @@ under S through atomics.)
   number; then it marks the entry freed. A failed step leaves the entry
   live with its page. A split that fails after `alloc` uses it. The zero
   write keeps a stamped but unreachable page from appearing as an extra
-  leaf at the next `open`, because `free` keeps bytes.
+  leaf at the next `open`: `free` keeps bytes, and the next commit covers
+  the page's write sequence, so selection alone would keep it.
 - `LeafEntry` holds `freed`, `block`, and `refs`
   ([plan 0013](../plans/0013-bf-tree-mini-tree.md)) and `version`
   ([plan 0014](../plans/0014-bf-tree-eviction.md)). `LeafWrite::take_mini`
@@ -241,9 +253,10 @@ under S through atomics.)
   pages; `take_full` and `set_full` bump `version` too
   ([caching policy](bf-tree-caching.md#residency)). A test requires
   `size_of::<RwLock<LeafEntry>>() <= 64`.
-- `ids()` yields `0..len()` at the time of the call; `write_if_live(id)`
-  X-locks a live leaf or returns `None`. `flush` walks leaves by ID with
-  them.
+- `len()` is the number of leaf IDs; `write_if_live(id)` X-locks a live
+  leaf or returns `None`. The checkpoint pass walks leaves by ID with them,
+  and reads `len()` again on every step, so it also reaches leaves that a
+  split creates during the pass.
 
 This is upstream's `PageTable` row of `RwLock<PageLocation>`: `block` plays
 the role of the `Mini` variant's circular-buffer pointer.
@@ -256,7 +269,8 @@ for a leaf that has none yet and for a hole. `page_of(id)` returns it as
 `LeafEntry`, so the entry lock stays within 64 bytes, and only base-page
 I/O and `open` read it. A thread writes `pages[id]` only under the leaf's X
 lock (`alloc`, `write_through`, `discard`) and reads it under S or X.
-`open` builds the table from the leaf stamp in each stored page
+`write_through` swaps in a fresh page number on every write. `open` builds
+the table from the pages it selects
 ([persistence](bf-tree-persistence.md#the-leaf-to-page-table)).
 
 ### Scratch
@@ -312,23 +326,32 @@ the checksum comes first.
 ### `write_through`: the one write path
 
 ```rust
-fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<(), TreeError>;
+fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<u64, TreeError>;
 ```
 
 `write_through` is the only function that writes a base page for a leaf.
-(`discard` also writes, but only a zero page on a failed split.) The caller
-must hold the X lock of every leaf in `pages` (a debug assertion checks it)
-and must pass the reachable leaf first. The other pages are written before
-the first one, so an error before the last write leaves the reachable
-leaf's stored page unchanged. It takes no tree-level lock. For each page it
-stamps the leaf ID into the header, seals the page checksum as the last
-header change, and writes the page to the leaf's page number. On a leaf's
-first write it allocates a page from the store and records it in the page
-table. Writes are in place: a leaf keeps its page number. A split passes
-both halves in one call, so that plan 0018 can give them one sequence
-number and one atomic switch; plan 0018 changes only the internals of
-`write_through` (fresh pages, a `write_seq` stamp) and the selection rule
-in `open`.
+(`discard` and `open` also write, but only zero pages.) The caller must
+hold the X lock of every leaf in `pages` (a debug assertion checks it) and
+must pass the reachable leaf first. It takes no tree-level lock, and it
+holds the write-through gate shared for the whole call. It draws one write
+sequence for the call and returns it. The other pages are written before
+the first one. For each page it:
+
+1. stamps the write sequence and the leaf ID into the header, and seals
+   the page checksum as the last change;
+2. allocates a fresh page number from the store and writes the page there
+   (if the write fails, it frees that page and returns the error);
+3. swaps the fresh page number into the page table;
+4. records the replaced page number, if any, with the sequence in the
+   superseded list.
+
+A committed page is therefore never overwritten. A replaced page is freed
+only after a commit covers the replacing sequence. A split passes both
+halves in one call, so both carry one sequence and a commit covers both or
+neither. An error before the last write leaves the reachable leaf's page
+table entry unchanged. The
+[persistence design](bf-tree-persistence.md#shadow-paging) records the
+rules and file growth.
 
 ## Tree lifecycle
 
@@ -338,8 +361,11 @@ impl Tree {
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError>;
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError>;
     pub fn open_with(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError>;
-    pub fn flush(&self) -> Result<(), TreeError>;               // merge every mini-page, then sync
-    pub fn into_store(self) -> Box<dyn PageStore>;              // close; buffered records are lost
+    pub fn checkpoint(&self) -> Result<State, TreeError>;       // merge, write back, sync, commit
+    pub fn applied_seq(&self) -> u64;                           // the applied watermark
+    pub fn committed(&self) -> State;                           // what a reopen selects
+    pub fn store_failed(&self) -> bool;                         // a sync or commit failed
+    pub fn into_store(self) -> Box<dyn PageStore>;              // close; uncommitted writes are lost
     pub fn leaf_count(&self) -> usize;                          // leaf IDs, live or holes
     pub fn buffered_leaves(&self) -> usize;                     // leaves holding a mini-page
     pub fn circular_buffer_used(&self) -> usize;                // used bytes, dead blocks included
@@ -348,20 +374,28 @@ impl Tree {
 ```
 
 `create` requires an empty store (`page_count() == 0`) with the default
-committed state whose superblock matches the configuration. It allocates the first unbounded leaf and writes it through at once.
-`flush` merges every buffered mini-page into its base page and then calls
-`store.sync()`. `Drop` neither merges nor syncs.
+committed state whose superblock matches the configuration. It allocates
+the first unbounded leaf, writes it through (write sequence 1), syncs, and
+commits checkpoint 1 ([persistence](bf-tree-persistence.md#create)).
+`checkpoint` replaces plan 0013's `flush`: it merges every buffered
+mini-page into its base page, writes back every dirty full page, syncs,
+and commits the applied and write watermarks as one atomic step
+([persistence](bf-tree-persistence.md#the-checkpoint-protocol)). `Drop`
+neither merges, syncs, nor commits.
 
 ### Open
 
 ```mermaid
 flowchart TD
-    S["configuration from superblock, validate"] --> V[read every page]
+    S["configuration and committed State from the superblock, validate"] --> V[read every page]
     V --> Z{all zeros?}
     Z -->|yes| F[free the page in the store]
-    Z -->|no| C["checksum, Page::validate"]
-    C --> L["leaf stamp: present, plausible, unclaimed"]
-    L --> P["fences present, keys and values within limits"]
+    Z -->|no| W{"write_seq above W?"}
+    W -->|yes| X["erase: zero, sync, free"]
+    W -->|no| C{checksum matches?}
+    C -->|no| SU["suspect: release, or CorruptPage"]
+    C -->|yes| L["Page::validate, leaf stamp, fences, limits"]
+    L --> P["keep the newest page per leaf, release older copies"]
     P --> T{fences tile the key space?}
     T -->|no| E[InconsistentLeaves]
     T -->|yes| B[bulk-build inner levels from lower fences]
@@ -370,16 +404,23 @@ flowchart TD
 
 1. The configuration comes from the superblock (`open`) or from the caller
    (`open_with`, whose layout settings must equal the superblock's). It must
-   pass `TreeConfig::validate`.
-2. Every page is read once. An all-zero page is free: a page allocated but
-   never written. `open` returns it to the store's free list, so the next
-   allocation reuses it. Every other page must pass its checksum and
-   `Page::validate` (else `CorruptPage { page_number, reason }`), name a
-   leaf that no other page names and that lies below a plausibility bound,
-   carry fences, and keep every fence, key, and value within the configured
-   limits (else `InconsistentLeaves(reason)`). The
-   [persistence design](bf-tree-persistence.md#open) records each check and
-   its order.
+   pass `TreeConfig::validate`. The committed `State` gives the applied
+   watermark `N` and the write watermark `W`.
+2. Every page is read once, and `open` selects the committed image. An
+   all-zero page is free: a page allocated but never written, or erased.
+   `open` returns it to the store's free list, so the next allocation
+   reuses it. A page whose header claims a write sequence above `W` was
+   written after the last commit: `open` erases it (zeroes it and syncs)
+   and then frees it. A page that fails its checksum is classified as torn
+   (released) or damaged (`CorruptPage { page_number, reason }`). Every
+   other page must pass `Page::validate` (else `CorruptPage`), name a
+   leaf below a plausibility bound, carry fences, and keep every fence,
+   key, and value within the configured limits (else
+   `InconsistentLeaves(reason)`). Of the pages of one leaf, the one with
+   the highest write sequence is kept and the others are released. The
+   [persistence design](bf-tree-persistence.md#open-select-the-committed-image)
+   records each step, its order, the selection table, and why erasure is
+   needed.
 3. Leaves are sorted by lower fence. There must be exactly one unbounded lower
    fence, exactly one unbounded upper fence, and `upper(i) == lower(i + 1)` for
    every adjacent pair. Any gap or overlap is `InconsistentLeaves`.
@@ -395,6 +436,8 @@ flowchart TD
    with the page number from the stamps, and an empty circular buffer. IDs
    that no page names are holes. No leaf has a mini-page, and no page is
    loaded until an operation needs it.
+6. The write-sequence counter continues above every sequence in the file,
+   and the applied watermark and the operation counter restart at `N`.
 
 Open is `O(pages)` in I/O and memory and is the complete recovery path:
 inner nodes are derived and nothing else is persisted. Bulk-built levels are
@@ -405,58 +448,47 @@ open on very large trees, keeping this rebuild as the repair path.
 
 ## Durability and consistency without a log
 
-A `put` or `remove` buffers its record in the leaf's mini-page and returns.
-The record lives only in memory until a merge writes it to the store: a
-merge when the mini-page is full at its largest class, an eviction when the
-circular buffer is full, or `flush`. A merge writes its pages with
-`write_through` at once. An eviction does not sync.
+A `put` or `remove` buffers its record in the leaf's mini-page, or writes
+it into the leaf's full page, and returns. The record reaches the store
+when a merge or write-back writes the leaf through: a merge when the
+mini-page is full at its largest class, an eviction when the circular
+buffer is full, or a checkpoint. A write-through goes to fresh pages at
+once and does not sync. Only a checkpoint makes writes durable, and only
+its commit changes what a reopen selects
+([persistence](bf-tree-persistence.md#the-checkpoint-protocol)).
 
-- **Drop loses buffered records.** Dropping the tree or calling
-  `into_store` loses every record that is still buffered. Merged records
-  are in the store, synced or not, and the store still opens as a valid
-  tree. Both return the blocks to the circular buffer, so its slab is
-  freed normally. Call `flush` first.
-- **`flush` merges, then syncs.** `flush` merges every buffered mini-page
-  into its base page, one leaf at a time, and then calls `store.sync()`.
-  Every write that returned before `flush` began is durable when `flush`
-  returns. Writers may run during `flush`; a record buffered into a leaf
-  that `flush` already visited may stay buffered. Merged writes that are not
-  yet synced survive a process stop on `FileStore`, because they are in the
-  operating system's page cache, but not necessarily an operating-system
-  crash or a power loss.
+- **Only committed writes survive a reopen.** Dropping the tree or calling
+  `into_store` loses every write after the last commit. Buffered records
+  are lost in memory, and pages written through after the commit are
+  erased by the next `open`, synced or not. Both return the blocks to the
+  circular buffer, so its slab is freed normally. Call `checkpoint` first.
+- **`checkpoint` commits atomically.** It merges every buffered mini-page
+  and writes back every dirty full page, one leaf at a time, then syncs and
+  commits the applied watermark `N` and the write watermark `W`. Every
+  write that returned before `checkpoint` was called is in the commit.
+  Writers may run during the checkpoint; the commit may also contain some
+  of their writes.
+- **Crashes return to the last commit.** A crash at any point, including
+  in the middle of a split, a checkpoint pass, a commit, or an erase on
+  open, reopens at the last durable commit. Each split writes both halves
+  with one write sequence, so a commit covers both or neither. A torn page
+  written after the commit is erased; a page that fails its checksum and
+  claims to be committed is `CorruptPage`
+  ([persistence](bf-tree-persistence.md#suspect-pages)).
 
-There is no per-operation atomicity across pages. A split writes two pages
-(the right half first, then the left) and then updates the parent in
-memory. A stop between the two page writes leaves a window:
+Within a running process, a split that fails at any point after `alloc`
+discards the fresh right leaf, and `discard` zeroes and frees its page if
+it was written: the next commit covers the page's write sequence, so a
+written but unreachable right page would overlap its left neighbour at the
+next `open`. A failed `install` still leaves the left leaf's page table
+entry pointing at the rewritten left half. Shadow paging keeps the
+previous committed page until the next commit, but that commit would
+select the left half without its right sibling, and the reopen would fail
+the tiling check. Under the admission rule a failed `install` is an
+internal bug.
 
-- **Stop before the right page is written.** If `write_through` already
-  allocated the right page, it is all zeros: a new page is zero, and in
-  this stack every page that the tree frees is zero. The store still holds
-  the pre-split leaf, so it is consistent, and `open` reclaims the page.
-- **Stop between the two writes.** The right page and the pre-split left
-  page overlap. `open` refuses the store with `InconsistentLeaves`. Without
-  a `sync` the device can also persist the left write and lose the right
-  one, which leaves a gap that `open` also refuses.
-- **Stop after both writes.** The pages tile the key space, and `open`
-  rebuilds the parent from their fences.
-
-The order in `write_through` keeps the reachable leaf intact when a write
-returns an error, but it cannot make two writes atomic. The user accepted
-this window until shadow paging in
-[plan 0018](../plans/0018-bf-tree-checkpoint.md) removes it.
-
-A torn page write leaves bytes that fail the page checksum, and the next
-`open` returns `CorruptPage`; with writes in place, no older copy exists
-to fall back to. Within a running process, a split that fails at any point
-after `alloc` discards the fresh right leaf, and `discard` zeroes and frees
-its page if it was written, because a written but unreachable right page
-would overlap its left neighbour at the next `open`. A failed
-`install` still leaves the left page rewritten; under the admission rule
-that is an internal bug, and shadow paging (plan 0018) removes the window.
-
-The write-ahead log and crash atomicity are separate components. The page
-header's `lsn` field stays inactive until plan 0018 renames it to
-`write_seq`; the `leaf` stamp and the `crc` checksum are active
+The write-ahead log is a separate component (plan 0020). The page header's
+`write_seq` stamp, `leaf` stamp, and `crc` checksum are active
 ([persistence](bf-tree-persistence.md#base-page-identity-and-the-page-checksum)).
 
 ## Baselines
@@ -515,9 +547,13 @@ cause was not investigated.
   base read and one or two writes.
 - **Flush.** The flush rows measure different work. Before 0012, `flush`
   wrote every dirty leaf and then synced. After 0012, the page writes
-  happened during the put phase, and `flush` only called `sync_data`. Now
-  `flush` merges every buffered leaf (8192 leaves in this run) and then
-  syncs.
+  happened during the put phase, and `flush` only called `sync_data`. From
+  0013 to 0015, `flush` merges every buffered leaf (8192 leaves in this run) and then
+  syncs. Since plan 0018 the benchmarks call `checkpoint` instead of
+  `flush`. They still print `flush:` (and `disk_baseline` prints
+  `flush (sync):`), but the line now measures a checkpoint: the pass, the
+  sync, the commit, and the free step. The checkpoint has not been
+  measured yet; the columns above predate it.
 - **Reads.** Before plan 0015, reads always loaded base pages. Plan 0015
   adds record, negative, and page caching; this uniform-random benchmark
   reads each key about once, so it shows little of that benefit. The in-memory get rate fell from 1.96 to 1.28 M ops/s after
@@ -592,9 +628,11 @@ the current design keeps no base page resident.
   [0013](../plans/0013-bf-tree-mini-tree.md) (mini-pages in entries,
   `open_with`, and flush merges),
   [0014](../plans/0014-bf-tree-eviction.md) (eviction, `version`, and
-  relocation), and [0017](../plans/0017-bf-tree-store-format.md) (page
+  relocation), [0017](../plans/0017-bf-tree-store-format.md) (page
   numbers, the page table, leaf stamps, page checksums, and the version 2
-  superblock, recorded in the [persistence design](bf-tree-persistence.md)).
+  superblock), and [0018](../plans/0018-bf-tree-checkpoint.md) (fresh-page
+  write-through, `checkpoint`, and open selection), recorded in the
+  [persistence design](bf-tree-persistence.md).
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`: `src/storage.rs`
   (`PageTable`, `PageLocation`), `src/utils/mapping_table.rs`, `src/fs/mod.rs`

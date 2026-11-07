@@ -56,7 +56,9 @@ flowchart TD
   ([persistence](bf-tree-persistence.md)). A leaf's mini-page, if any, is
   reached through its entry. An access that needs the base page loads it
   under the leaf's lock into a thread-local scratch buffer. A merge writes the result to the store at
-  once. `Tree::flush` merges every mini-page and then syncs the store.
+  once, to a fresh page number. `Tree::checkpoint` merges every mini-page,
+  syncs the store, and commits
+  ([persistence](bf-tree-persistence.md#the-checkpoint-protocol)).
 
 ## Routing and fences
 
@@ -205,14 +207,17 @@ merge works on a scratch copy, so an error before `write_through` leaves the
 store unchanged, and the mini-page stays in the entry. Under the admission
 rule a split error is unreachable.
 
-### Flush
+### Checkpoint
 
-`Tree::flush` walks the leaf IDs that exist when it starts. It X-locks one
-live leaf at a time by ID, calls `merge_leaf` if the leaf has a mini-page,
-and releases the leaf (the right guard of a split first). It then syncs the
-store. A split during `flush` needs no route, because `install` finds the
-parent by the separator. Writers may run meanwhile. Every write that
-returned before `flush` began is in the store when `flush` returns.
+`Tree::checkpoint` (plan 0018, formerly `flush`) walks leaf IDs from 0 and
+reads the leaf count again on every step, so it also reaches leaves that a
+split creates during the walk. It X-locks one live leaf at a time by ID,
+calls `merge_leaf` if the leaf has a mini-page or writes back a dirty full
+page, and releases the leaf (the right guard of a split first). It then
+syncs the store and commits. A split during the checkpoint needs no route,
+because `install` finds the parent by the separator. Writers may run
+meanwhile. Every write that returned before `checkpoint` was called is in
+the commit ([persistence](bf-tree-persistence.md#why-n-is-complete)).
 
 ## Admission rule
 
@@ -367,6 +372,8 @@ after every step.
   and the first admission rule), [0012](../plans/0012-bf-tree-shared-tree.md)
   (shared tree, owned reads, and per-leaf scans), and
   [0013](../plans/0013-bf-tree-mini-tree.md) (blind writes, merge splits,
-  the ladder admission rule, and flush merges), and
+  the ladder admission rule, and flush merges),
+  [0018](../plans/0018-bf-tree-checkpoint.md) (`flush` renamed to
+  `checkpoint`), and
   [0016](../plans/0016-bf-tree-concurrency.md) (frames, the root word, and
   concurrent propagation).
