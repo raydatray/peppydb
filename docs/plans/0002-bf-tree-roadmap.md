@@ -88,7 +88,7 @@ The milestones below are not individual commits or reserved plan numbers.
 | 6. Bounded circular buffer | Mapping and mini-page merge | Circular allocation, free lists, eviction, and copy-on-access with a fixed memory budget. [Completed plan 0010](0010-bf-tree-circular-buffer.md) delivers the circular buffer component, recorded in the [circular buffer design](../design/bf-tree-circular-buffer.md); it landed before plan 0011, ahead of the rest of milestone 5. [Completed plan 0014](0014-bf-tree-eviction.md) delivers eviction under the fixed budget (a writer releases its leaf lock, evicts the oldest blocks by merging them into their base pages, and retries) and the second chance (relocation of accessed aging blocks on writes, and through hints on reads and scans), recorded in the [circular buffer design](../design/bf-tree-circular-buffer.md#use-in-the-tree). Milestone complete. |
 | 7. Integrated caching and scans | 3–6 | Record and negative caching, complete ordered scans, and full-page promotion. [Completed plan 0015](0015-bf-tree-caching.md) delivers the caching policy: reads served by the base page cache records and absences or promote the page, scans promote untouched leaves, write-driven merges keep the merged page, full pages take writes directly and are written back only when dirty, and hints evict only full pages and clean mini-pages, recorded in the [caching design](../design/bf-tree-caching.md). Milestone complete. |
 | 8. Concurrency | Integrated operations and circular buffer | Optimistic inner-node traversal, leaf locks, and safe concurrent allocation/reclamation. Leaf locks and circular-buffer concurrency arrive earlier, in plans 0010 to 0014. [Completed plan 0016](0016-bf-tree-concurrency.md) delivers optimistic inner-node traversal: inner nodes in version-locked frames with immutable images, an atomic root word, lock-free validated descents, bottom-up frame locking with top-down publication, and the final lock order, recorded in the [concurrency design](../design/bf-tree-concurrency.md). Milestone complete except the Linux measurements and the container check (see plan 0016). |
-| 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. Agreed plans: [0017](0017-bf-tree-store-format.md) (store format), [0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, recovery), [0019](0019-bf-tree-apply.md) (apply, log hook, snapshots). Draft plans: [0020](0020-engine-wal.md) (WAL), [0021](0021-engine-db.md) (`Db`), [0022](0022-engine-external.md) (external-log mode), and [0023](0023-bf-tree-io-perf.md) (direct I/O and measurements). |
+| 9. Persistence and engine integration | Tree/storage operations; coordinate with 8 | WAL, checkpoints, recovery, and the application-facing embedded database contract. [Completed plan 0017](0017-bf-tree-store-format.md) delivers the durable store format: page numbers separate from leaf IDs, dual checksummed superblock copies with a committed state, a leaf stamp and a CRC32C in every stored page, and open that rebuilds the leaf-to-page table from the stamps, recorded in the [persistence design](../design/bf-tree-persistence.md). Agreed plans: [0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, recovery), [0019](0019-bf-tree-apply.md) (apply, log hook, snapshots). Draft plans: [0020](0020-engine-wal.md) (WAL), [0021](0021-engine-db.md) (`Db`), [0022](0022-engine-external.md) (external-log mode), and [0023](0023-bf-tree-io-perf.md) (direct I/O and measurements). |
 
 Some work can be developed independently: a single-leaf overlay does not need a
 complete tree, and the allocator can be tested before integrating eviction.
@@ -191,6 +191,7 @@ the completed concurrent, larger-than-memory engine.
 - [x] Implement and verify the eviction stack (plan 0014).
 - [x] Implement and verify the caching stack (plan 0015).
 - [x] Implement and verify the frame stack (plan 0016).
+- [x] Implement and verify the store-format stack (plan 0017).
 
 Add links to later stack plans as they are drafted. Mark a milestone complete
 only when its behavior and verification are delivered. The
@@ -235,10 +236,15 @@ take no inner-node lock, and structural changes lock parent frames
 bottom-up and publish top-down, recorded in the
 [concurrency design](../design/bf-tree-concurrency.md). Its Linux
 measurements, Linux soak, and container check are pending a working Docker
-engine, so milestone 8 is complete except for them. Next is
-[plan 0017](0017-bf-tree-store-format.md), the durable store format, which
-starts milestone 9. Plans 0017 to 0023 are drafts in build order and are
-agreed one at a time.
+engine, so milestone 8 is complete except for them.
+[Plan 0017](0017-bf-tree-store-format.md) is complete: stored pages are
+addressed by page number, name their leaf, and carry a checksum, and the
+store keeps a committed state in two checksummed superblock copies,
+recorded in the [persistence design](../design/bf-tree-persistence.md);
+writes are still in place. Next is
+[plan 0018](0018-bf-tree-checkpoint.md) (shadow paging, checkpoint, and
+recovery). Plans 0018 to 0023 are in build order and are agreed one at a
+time.
 
 ## Sources
 

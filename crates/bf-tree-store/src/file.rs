@@ -19,8 +19,8 @@ use bf_tree_sync::{Mutex, Table};
 ///
 /// All I/O is synchronous and positioned. `sync` calls `File::sync_data`, so
 /// a page is durable only after a `write` followed by a `sync`. Pages are
-/// written in place: a torn write leaves a partial page that stored-page
-/// validation rejects on the next open.
+/// written in place: a torn write leaves a partial page whose checksum the
+/// tree rejects on the next open.
 ///
 /// `open` does not scan for freed pages: on a large file that would cost one
 /// read per page. A reopened store treats every page as live until a caller

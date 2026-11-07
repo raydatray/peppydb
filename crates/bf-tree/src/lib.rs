@@ -310,9 +310,9 @@ pub enum TreeError {
 ///    `Inner::install` while the thread holds the node whose split it
 ///    propagates. Fresh frames are never locked.
 /// 3. `root_grow`, only while holding the current root's lock.
-/// 4. Store locks: a store's slot free list, which may in turn take the
+/// 4. Store locks: a store's page free list, which may in turn take the
 ///    locks below.
-/// 5. Innermost locks: the circular-buffer mutex, a store slot's page
+/// 5. Innermost locks: the circular-buffer mutex, a memory store page's
 ///    mutex, and table growth. Nothing is acquired while one is held.
 ///
 /// Readers take no frame lock and no `root_grow`, and hold at most one leaf
@@ -408,7 +408,7 @@ impl Tree {
         self.inner.len()
     }
 
-    /// Number of leaf slots in the store, live or freed.
+    /// Number of leaf IDs, live leaves and holes.
     pub fn leaf_count(&self) -> usize {
         self.leaves.len()
     }

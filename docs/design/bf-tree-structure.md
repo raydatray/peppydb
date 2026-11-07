@@ -50,10 +50,12 @@ flowchart TD
   [concurrency design](bf-tree-concurrency.md#frames) records the frame
   protocol ([plan 0016](../plans/0016-bf-tree-concurrency.md)).
 - Leaves live in a `PageStore` behind the `LeafMap`, described in
-  [leaf storage](bf-tree-leaf-store.md). A `LeafId` is a stable slot in the
-  store. A leaf's mini-page, if any, is reached through its entry. An access
-  that needs the base page loads it under the leaf's lock into a
-  thread-local scratch buffer. A merge writes the result to the store at
+  [leaf storage](bf-tree-leaf-store.md). A `LeafId` is a stable leaf
+  identity. The `LeafMap` maps it to the page number of the leaf's stored
+  page, and the page names its leaf in its header
+  ([persistence](bf-tree-persistence.md)). A leaf's mini-page, if any, is
+  reached through its entry. An access that needs the base page loads it
+  under the leaf's lock into a thread-local scratch buffer. A merge writes the result to the store at
   once. `Tree::flush` merges every mini-page and then syncs the store.
 
 ## Routing and fences
@@ -143,13 +145,15 @@ mini-page to the tail if it has aged into the second-chance region (see
 
 `split_leaf` runs while the caller holds X on the reachable left leaf:
 
-1. `LeafMap::alloc` allocates a store slot and returns the fresh right leaf
-   under X. No separator names it yet.
+1. `LeafMap::alloc` takes a fresh leaf ID from its atomic counter and
+   returns the right leaf under X. No separator names it yet, and it has no
+   stored page until step 3.
 2. The merge closure (`LeafMut::merge_split` over the base page and the
    mini-page) splits the merged contents: the left half stays in
    `scratch.page` and the right half goes to `scratch.right`.
 3. One `write_through([left, right])` call writes the right page first and
-   then the left page.
+   then the left page. It stamps and seals each page, and it allocates the
+   right leaf's page from the store.
 4. `install` finds the parent frame by a lock-free descent with the
    separator, write-locks it, and confirms that it still routes the
    separator to the left leaf. It inserts `separator -> right` into a draft
@@ -160,8 +164,9 @@ mini-page to the tail if it has aged into the second-chance region (see
 6. The right leaf's guard drops, and then the left leaf's guard drops.
 
 If the merge, a write, or the install fails after step 1,
-`LeafMap::discard` frees the fresh slot. A written but unreachable right
-page would overlap its left neighbour at the next `open`. `merge_leaf` then
+`LeafMap::discard` gives up the fresh leaf ID and, if the right page was
+written, zeroes and frees it. A written but unreachable right page would
+overlap its left neighbour at the next `open`. `merge_leaf` then
 puts the mini-page back into the left leaf's entry, so no buffered record
 is lost.
 
@@ -336,8 +341,9 @@ result is meaningful only at quiescence.
 3. Every record lies within its leaf's fences, and the leaf's search finds it.
 4. Every inner node has at least one separator, in strictly increasing order.
 5. Every allocated node is reachable exactly once, and every reference
-   resolves to an allocated node. Freed leaf slots, which a reopened store
-   can hold, are neither reachable nor referenced.
+   resolves to an allocated node. Holes (leaf IDs that name no leaf),
+   which a failed split or a reopened store can leave, are neither
+   reachable nor referenced.
 6. Every mini-page is a valid, unfenced page whose backing leaf is its
    leaf, whose capacity is a ladder class, and whose keys lie within the
    leaf's fences (`InvariantError::BadMiniPage`).

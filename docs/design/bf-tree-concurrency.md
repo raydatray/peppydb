@@ -81,7 +81,7 @@ struct Inner {
 | `root_grow` | `Mutex<()>` in `Inner` | replacement of the root word | `Inner::install`, only when the split node is the root |
 | Root word | `AtomicU64` (not a lock) | the root `ChildRef` | stored by root growth under `root_grow`, and by `open` and test fixtures before the tree is shared |
 | Circular-buffer mutex | `Mutex<State>` inside `CircularBuffer` | block metadata: head, tail, free lists, claims | `alloc`, `free`, `used`, `has_room`, `claim_victim`, `retire`, `unclaim` |
-| Store locks | backend mutexes | free lists, slot bytes (`MemStore`), slot flags | `PageStore` methods only |
+| Store locks | backend mutexes | free lists, page bytes (`MemStore`), freed flags, the committed state, commit serialization (`FileStore`) | `PageStore` methods only |
 | Table growth | `Mutex<()>` inside `Table<T>` | chunk initialization and `len` | `Table::grow_to` only, including `Frames::alloc` |
 
 The leaf lock is the paper's per-leaf reader-writer lock (§3.3). Every base
@@ -208,7 +208,7 @@ flowchart LR
     B --> C["3 frame write locks, bottom-up by level"]
     C --> D["4 root_grow"]
     D --> E["5 store free list"]
-    E --> F["6 Table growth, MemStore slot mutex, circular-buffer mutex"]
+    E --> F["6 Table growth, MemStore page mutex, circular-buffer mutex"]
 ```
 
 - Rank 1 is the leaf that routing named. An operation holds at most one.
@@ -222,13 +222,20 @@ flowchart LR
 - Rank 4 is `root_grow`. `install` takes it only while it holds the current
   root's lock: the root leaf's X lock, or the root frame's write lock.
 - Ranks 5 and 6 are innermost. `MemStore::alloc` and `FileStore::alloc`
-  hold the free-list mutex while they grow their slot table, and
-  `MemStore::free` holds it while it zeroes a slot under the slot mutex.
-  `MemStore::read` and `write` take only the slot mutex. `FileStore` reads
-  and writes take no lock. `LeafMap::alloc` takes the free list under leaf
-  locks only, before `install`. `Frames::alloc` takes table growth under
-  frame locks or `root_grow`. No holder of a rank 5 or 6 lock takes a leaf
-  lock, a frame lock, or `root_grow`.
+  hold the free-list mutex while they grow their page table (and
+  `FileStore::alloc` while it extends the file). `free` holds it while it
+  sets the page's freed flag; it does not change page bytes.
+  `MemStore::read` and `write` take only the page mutex. `FileStore` reads
+  and writes take no lock. `state` and `commit` take the store's state
+  mutex; `FileStore::commit` first takes its commit mutex and holds it
+  across the copy write and its sync, and the tree does not commit yet. The
+  tree reaches the free list only under leaf locks: `write_through`
+  allocates a leaf's first page, and `LeafMap::discard` frees a discarded
+  split half's page, never while `install` holds frame locks. `LeafMap::alloc` takes no store
+  lock: it advances an atomic leaf-ID counter and grows the leaf tables
+  (table growth) under the left leaf's X lock. `Frames::alloc` takes table
+  growth under frame locks or `root_grow`. No holder of a rank 5 or 6 lock
+  takes a leaf lock, a frame lock, or `root_grow`.
 - The circular-buffer mutex is innermost too. Allocation and free take it
   only under a leaf's X lock: `LeafMap::buffer` allocates and grows
   mini-pages, `Tree::relocate` allocates a copy and frees the old block,
@@ -506,8 +513,11 @@ has no cycle. The cases:
 1. **Routing** takes no lock. It loads the root word, frame versions, and
    images, and it holds at most one `arc-swap` guard at a time. A retry
    drops the leaf lock before it routes again.
-2. **A write** holds one reachable leaf. A split allocates a slot (ranks 5
-   and 6, released before `alloc` returns) and then X-locks the fresh leaf.
+2. **A write** holds one reachable leaf. A split allocates a leaf ID (an
+   atomic counter and table growth, rank 6, released before the entry is
+   locked) and then X-locks the fresh leaf. Its `write_through` allocates
+   the right half's page under both leaf locks (ranks 5 and 6, released
+   before `alloc` returns).
    No route names the fresh leaf. Only a thread that locks leaves by ID can
    contend for it, and such a thread must hold no other leaf lock, so it
    releases the lock without waiting. `check_invariants`, `flush`,
@@ -564,7 +574,7 @@ optional caching hint (`Hint::Cache` or `Hint::Promote`). The reader
 releases the S lock, then calls `Tree::maintain`:
 
 1. If there is nothing to do, return.
-2. `LeafMap::try_write(leaf)`, once. If the lock is busy or the slot is not
+2. `LeafMap::try_write(leaf)`, once. If the lock is busy or the leaf is not
    live, drop everything.
 3. If the version differs from the noted one, drop everything. The block
    or base page that the hint relied on may have changed.
@@ -680,8 +690,8 @@ contains no `unsafe` code.
 ### `Table<T>`
 
 `Table<T>` is an append-only, chunked collection that grows while other
-threads read it. It holds the leaf entries, the `MemStore` slots, the
-`FileStore` freed flags, and the inner frames.
+threads read it. It holds the leaf entries, the leaf-to-page table, the
+`MemStore` pages, the `FileStore` freed flags, and the inner frames.
 
 ```rust
 pub struct Table<T> {
@@ -702,10 +712,10 @@ impl<T: Default> Table<T> {
 - `grow_to` initializes every chunk below the new length with default
   entries and then publishes `len` with `Release`. A reader that sees an
   index below `len` therefore sees its initialized chunk.
-- Growth is `grow_to(id + 1)`, not a push. The page store chooses leaf IDs:
-  two concurrent splits can receive IDs 6 and 7 and reach the table in the
-  opposite order, and a reopened store reuses freed IDs. `Frames::alloc`
-  has the same pattern with its own counter. `grow_to` is correct in every
+- Growth is `grow_to(id + 1)`, not a push. `LeafMap::alloc` takes leaf IDs
+  from an atomic counter: two concurrent splits can receive IDs 6 and 7 and
+  reach the tables in the opposite order. `Frames::alloc` has the same
+  pattern with its own counter. `grow_to` is correct in every
   order. A new leaf entry is initialized through its own lock after
   growth; a new frame receives its image before its ID is returned.
 
@@ -714,33 +724,42 @@ impl<T: Default> Table<T> {
 ```rust
 pub trait PageStore: Send + Sync + std::fmt::Debug {
     fn page_size(&self) -> usize;
-    fn slots(&self) -> u64;
-    fn alloc(&self) -> Result<LeafId, StoreError>;
-    fn free(&self, id: LeafId) -> Result<(), StoreError>;
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError>;
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError>;
+    fn page_count(&self) -> u64;
+    fn alloc(&self) -> Result<PageNumber, StoreError>;
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError>;
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
     fn sync(&self) -> Result<(), StoreError>;
     fn superblock(&self) -> &Superblock;
+    fn state(&self) -> State;
+    fn commit(&self, state: &State) -> Result<(), StoreError>;
 }
 ```
 
 - Every method takes `&self`, and a store is shared between threads.
-- Concurrent `alloc` calls return distinct IDs. `alloc` and `free` are
-  serialized by the store's free-list mutex.
-- **The store does not order concurrent accesses to one slot.** The caller
+- Concurrent `alloc` calls return distinct page numbers. `alloc` and `free`
+  are serialized by the store's free-list mutex.
+- **The store does not order concurrent accesses to one page.** The caller
   must serialize them. The tree does so with the leaf lock: X for every
-  write, S or X for every read.
-- Accesses to distinct slots proceed in parallel. `MemStore` keeps its
-  slots in a `Table<MemSlot>`, where each slot has its own page mutex and a
+  write, S or X for every read. A page number belongs to one leaf at a
+  time, through the leaf-to-page table
+  ([persistence](bf-tree-persistence.md#the-leaf-to-page-table)).
+- Accesses to distinct pages proceed in parallel. `MemStore` keeps its
+  pages in a `Table<MemPage>`, where each page has its own byte mutex and a
   `freed` flag; it allocates the page box before it takes the free-list
   mutex. `FileStore` uses positioned I/O through `&File`, keeps its freed
-  flags in a `Table<AtomicBool>` whose length is the slot count, and takes
+  flags in a `Table<AtomicBool>` whose length is the page count, and takes
   no store-wide lock for reads and writes. Its `alloc` holds the free-list
   mutex while it extends the file.
+- Commits are serialized: `FileStore` holds a commit mutex across the copy
+  write and its sync, and keeps the state in a separate short-held mutex,
+  so `state()` never waits for a sync. A commit whose `checkpoint_id` does
+  not succeed the current one is `CommitOrder`, which catches two
+  concurrent committers.
 
 The tests check the contract on both backends: concurrent allocations
-return distinct IDs, and threads that write distinct slots read their own
-bytes back.
+return distinct page numbers, and threads that write distinct pages read
+their own bytes back.
 
 ## Verification
 
