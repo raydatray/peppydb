@@ -596,7 +596,7 @@ Resolved:
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: crate and record format.
 - [x] Diff 3: replay and torn-tail repair.
-- [ ] Diff 4: append and group commit.
+- [x] Diff 4: append and group commit.
 - [ ] Diff 5: truncation and simulated crashes.
 - [ ] Diff 6: design document.
 - [ ] Stack-wide verification.
