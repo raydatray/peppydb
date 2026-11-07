@@ -129,6 +129,8 @@ fn select(
         erased: Vec::new(),
         max_seen: 0,
     };
+    // Pages that fail their checksum, with their raw header claims.
+    let mut suspects = Vec::new();
     let mut bytes = vec![0; store.page_size()];
     for raw in 0..page_count {
         let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
@@ -147,6 +149,12 @@ fn select(
             // Written after the checkpoint; whatever it holds, a crash can
             // have torn it.
             selection.erased.push(page_number);
+            continue;
+        }
+        if !bf_tree_page::verify_stored_checksum(&bytes) {
+            // Decided after the scan, once every leaf's newest page is known.
+            let (_, leaf) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
+            suspects.push((page_number, write_seq, leaf));
             continue;
         }
         let (id, bounds) = check_page(&bytes, page_number, config, max_leaf)?;
@@ -175,11 +183,29 @@ fn select(
             }
         }
     }
+    // A page at or below the watermark that fails its checksum was synced
+    // before the commit, so a crash cannot have torn it, except where the
+    // body is a newer, torn write whose header sector did not land: a new
+    // page keeps a zero header, and a reused page keeps an older page's
+    // header, whose leaf then has a newer page. Anything else is damage.
+    for (page_number, write_seq, leaf) in suspects {
+        let superseded = leaf
+            .and_then(|id| selection.chosen.get(&id))
+            .is_some_and(|chosen| chosen.write_seq >= write_seq);
+        if write_seq == 0 || superseded {
+            selection.released.push(page_number);
+        } else {
+            return Err(TreeError::CorruptPage {
+                page_number,
+                reason: "checksum mismatch",
+            });
+        }
+    }
     Ok(selection)
 }
 
-/// Check one stored page: its checksum and structure (`CorruptPage`), its
-/// leaf stamp, fences, and limits. Returns its leaf and bounds.
+/// Check one stored page whose checksum passed: its structure
+/// (`CorruptPage`), its leaf stamp, fences, and limits. Returns its leaf and bounds.
 fn check_page(
     bytes: &[u8],
     page_number: PageNumber,
@@ -190,9 +216,8 @@ fn check_page(
         page_number,
         reason,
     };
-    if !bf_tree_page::verify_stored_checksum(bytes) {
-        return Err(corrupt("checksum mismatch"));
-    }
+    // The checksum passed, so a page that fails validation was written
+    // wrong, not torn.
     let page = Page::validate(bytes).map_err(|error| match error {
         PageError::Corrupt(reason) => corrupt(reason),
         other => TreeError::Page(other),

@@ -24,6 +24,7 @@ mod scan;
 mod second_chance;
 mod shadow;
 mod store;
+mod torn;
 mod write;
 
 /// Test trees get a 1 MiB circular buffer: valid for every test page size.
