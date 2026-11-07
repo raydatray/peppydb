@@ -71,9 +71,11 @@ impl Latencies {
 fn write_store(path: &PathBuf, config: TreeConfig, leaves: u64) -> u64 {
     let superblock = Superblock::from(&config);
     let mut file = BufWriter::with_capacity(16 << 20, File::create(path).unwrap());
+    let mut block = vec![0; bf_tree_store::COPY_BYTES];
+    superblock.encode(&Default::default(), &mut block).unwrap();
+    file.write_all(&block).unwrap();
+    file.write_all(&block).unwrap();
     let mut page = vec![0; config.leaf_capacity];
-    superblock.encode(&Default::default(), &mut page).unwrap();
-    file.write_all(&page).unwrap();
 
     let value = vec![0xab; VALUE_LEN];
     for leaf in 0..leaves {

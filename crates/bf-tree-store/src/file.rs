@@ -4,11 +4,19 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{ENCODED_BYTES, PageStore, State, StoreError, Superblock, check_buffer};
+use super::{
+    COPY_BYTES, PAGES_OFFSET, PageStore, State, StoreError, Superblock, check_buffer,
+    check_commit_order,
+};
 use bf_tree_node_id::LeafId;
 use bf_tree_sync::{Mutex, Table};
 
-/// A [`PageStore`] over one file: the superblock page followed by the slots.
+/// A [`PageStore`] over one file: two 4096-byte superblock copies, then the
+/// slots. Slot `i` lives at byte `PAGES_OFFSET + i * page_size`.
+///
+/// A commit writes copy `checkpoint_id % 2` and syncs. The previous commit
+/// is in the other copy, so a torn commit leaves it intact, and `open`
+/// selects the newer intact copy.
 ///
 /// All I/O is synchronous and positioned. `sync` calls `File::sync_data`, so
 /// a page is durable only after a `write` followed by a `sync`. Pages are
@@ -31,6 +39,11 @@ pub struct FileStore {
     /// Freed slot indices, reused last-in first-out. `alloc` holds it while
     /// it extends the file, which serializes growth.
     free: Mutex<Vec<u64>>,
+    /// Serializes commits; held across the copy write and its sync.
+    commit: Mutex<()>,
+    /// The last committed state; held only briefly, so `state()` never
+    /// waits for a commit's sync.
+    state: Mutex<State>,
 }
 
 impl FileStore {
@@ -38,8 +51,8 @@ impl FileStore {
     pub fn create(path: impl AsRef<Path>, superblock: Superblock) -> Result<Self, StoreError> {
         superblock.validate()?;
 
-        let mut page = vec![0; superblock.page_size];
-        superblock.encode(&State::default(), &mut page)?;
+        let mut block = vec![0; COPY_BYTES];
+        superblock.encode(&State::default(), &mut block)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -47,20 +60,18 @@ impl FileStore {
             .create_new(true)
             .open(path)
             .map_err(|error| io_error("create", error))?;
-        write_at(&file, 0, &page).map_err(|error| io_error("write superblock", error))?;
+        for copy in 0..2 {
+            write_at(&file, copy * COPY_BYTES as u64, &block)
+                .map_err(|error| io_error("write superblock", error))?;
+        }
         file.sync_all().map_err(|error| io_error("sync", error))?;
 
-        Ok(Self {
-            file,
-            superblock,
-            freed: Table::new(),
-            free: Mutex::new(Vec::new()),
-        })
+        Ok(Self::with(file, superblock, State::default(), Table::new()))
     }
 
-    /// Open an existing store file. The file length must be a whole number
-    /// of pages, at least one. The free list starts empty; see the type
-    /// documentation.
+    /// Open an existing store file: select the newer intact superblock copy,
+    /// and check that the file holds the superblock area and a whole number
+    /// of pages. The free list starts empty; see the type documentation.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let file = OpenOptions::new()
             .read(true)
@@ -68,32 +79,42 @@ impl FileStore {
             .open(path)
             .map_err(|error| io_error("open", error))?;
 
-        let mut header = [0; ENCODED_BYTES];
-        read_at(&file, 0, &mut header).map_err(|_| StoreError::InvalidSuperblock("too short"))?;
-        let (superblock, _) = Superblock::decode(&header)?;
-
-        let page_size = superblock.page_size as u64;
         let len = file
             .metadata()
             .map_err(|error| io_error("metadata", error))?
             .len();
-        if len < page_size || !len.is_multiple_of(page_size) {
+        if len < PAGES_OFFSET {
             return Err(StoreError::TruncatedFile);
         }
-        let slots = len / page_size - 1;
+        let mut copies = vec![0; 2 * COPY_BYTES];
+        read_at(&file, 0, &mut copies).map_err(|error| io_error("read superblock", error))?;
+        let (copy0, copy1) = copies.split_at(COPY_BYTES);
+        let (superblock, state) = Superblock::select(copy0, copy1)?;
+
+        let page_size = superblock.page_size as u64;
+        if !(len - PAGES_OFFSET).is_multiple_of(page_size) {
+            return Err(StoreError::TruncatedFile);
+        }
+        let slots = (len - PAGES_OFFSET) / page_size;
         let freed = Table::new();
         freed.grow_to(usize::try_from(slots).map_err(|_| StoreError::TruncatedFile)?);
 
-        Ok(Self {
+        Ok(Self::with(file, superblock, state, freed))
+    }
+
+    fn with(file: File, superblock: Superblock, state: State, freed: Table<AtomicBool>) -> Self {
+        Self {
             file,
             superblock,
             freed,
             free: Mutex::new(Vec::new()),
-        })
+            commit: Mutex::new(()),
+            state: Mutex::new(state),
+        }
     }
 
     fn offset(&self, index: u64) -> u64 {
-        (index + 1) * self.superblock.page_size as u64
+        PAGES_OFFSET + index * self.superblock.page_size as u64
     }
 
     /// The slot index and its freed flag.
@@ -176,6 +197,25 @@ impl PageStore for FileStore {
 
     fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    fn state(&self) -> State {
+        *self.state.lock()
+    }
+
+    fn commit(&self, state: &State) -> Result<(), StoreError> {
+        let _commit = self.commit.lock();
+        check_commit_order(&self.state(), state)?;
+        let mut block = vec![0; COPY_BYTES];
+        self.superblock.encode(state, &mut block)?;
+        let copy = state.checkpoint_id % 2;
+        write_at(&self.file, copy * COPY_BYTES as u64, &block)
+            .map_err(|error| io_error("commit", error))?;
+        self.file
+            .sync_data()
+            .map_err(|error| io_error("sync", error))?;
+        *self.state.lock() = *state;
+        Ok(())
     }
 }
 

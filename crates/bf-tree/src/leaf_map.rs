@@ -570,6 +570,12 @@ impl PageStore for ReleasedStore {
     fn superblock(&self) -> &bf_tree_store::Superblock {
         unreachable!("released store")
     }
+    fn state(&self) -> bf_tree_store::State {
+        unreachable!("released store")
+    }
+    fn commit(&self, _: &bf_tree_store::State) -> Result<(), bf_tree_store::StoreError> {
+        unreachable!("released store")
+    }
 }
 
 /// The largest legal page; scratch buffers are sliced to the tree's size.

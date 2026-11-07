@@ -214,6 +214,12 @@ impl PageStore for Counting {
     fn superblock(&self) -> &Superblock {
         self.inner.superblock()
     }
+    fn state(&self) -> State {
+        self.inner.state()
+    }
+    fn commit(&self, state: &State) -> Result<(), StoreError> {
+        self.inner.commit(state)
+    }
 }
 
 type Counter = Arc<AtomicUsize>;
@@ -469,4 +475,20 @@ fn memory_and_file_backends_store_identical_bytes() {
     assert_eq!(stored_pages(&file), copied_pages(&file));
     assert_eq!(collect(mem.iter()), collect(file.iter()));
     assert!(mem.height() >= 2);
+}
+
+#[test]
+fn create_rejects_a_store_with_a_committed_state() {
+    let config = config(256, 128, 8, 16);
+    let store = MemStore::new(Superblock::from(&config)).unwrap();
+    store
+        .commit(&State {
+            checkpoint_id: 1,
+            ..State::default()
+        })
+        .unwrap();
+    assert_eq!(
+        Tree::create(config, Box::new(store)).err(),
+        Some(TreeError::InvalidStore("store already holds pages"))
+    );
 }

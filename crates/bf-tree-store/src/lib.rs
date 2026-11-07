@@ -1,9 +1,11 @@
 //! Durable homes for leaf pages, addressed by [`LeafId`].
 //!
-//! A [`PageStore`] owns fixed-size page slots and a [`Superblock`] that
-//! records the page size and the tree configuration the pages were written
-//! under. Slot `id` lives at byte offset `(id + 1) * page_size`, after a
-//! one-page superblock, so a store is self-describing and needs no catalogue.
+//! A [`PageStore`] owns fixed-size page slots, a [`Superblock`] that records
+//! the page size and the tree configuration the pages were written under,
+//! and the committed [`State`]. In a file, two 4096-byte superblock copies
+//! come first and slot `id` lives at byte offset
+//! `PAGES_OFFSET + id * page_size`, so a store is self-describing and needs
+//! no catalogue.
 //! A freed slot is all zeros; a valid page is never all zeros because its
 //! header carries a nonzero capacity, so free slots are recoverable by
 //! whoever reads every slot, such as `Tree::open`.
@@ -38,7 +40,8 @@ mod superblock;
 
 pub use file::FileStore;
 pub use mem::MemStore;
-pub(crate) use superblock::ENCODED_BYTES;
+#[cfg(test)]
+use superblock::ENCODED_BYTES;
 pub use superblock::{COPY_BYTES, MAGIC, PAGES_OFFSET, State, Superblock, VERSION};
 
 /// A rejected store operation.
@@ -60,6 +63,8 @@ pub enum StoreError {
     TruncatedFile,
     #[error("neither superblock copy is intact")]
     NoSuperblock,
+    #[error("commit of checkpoint {got} does not follow checkpoint {current}")]
+    CommitOrder { current: u64, got: u64 },
     #[error("I/O error during {op}: {kind}{}", .code.map(|code| format!(" (os error {code})")).unwrap_or_default())]
     Io {
         op: &'static str,
@@ -101,6 +106,26 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
     fn sync(&self) -> Result<(), StoreError>;
 
     fn superblock(&self) -> &Superblock;
+
+    /// The last committed state.
+    fn state(&self) -> State;
+
+    /// Durably and atomically replace the committed state. The caller syncs
+    /// its page writes first. `state.checkpoint_id` must be one more than
+    /// the current one; otherwise the result is `CommitOrder`, which catches
+    /// two callers committing at once.
+    fn commit(&self, state: &State) -> Result<(), StoreError>;
+}
+
+/// Check that `next` succeeds `current`.
+fn check_commit_order(current: &State, next: &State) -> Result<(), StoreError> {
+    if current.checkpoint_id.checked_add(1) != Some(next.checkpoint_id) {
+        return Err(StoreError::CommitOrder {
+            current: current.checkpoint_id,
+            got: next.checkpoint_id,
+        });
+    }
+    Ok(())
 }
 
 /// Check that `buf` is exactly one page long.

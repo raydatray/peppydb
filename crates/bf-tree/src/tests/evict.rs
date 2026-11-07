@@ -153,6 +153,12 @@ impl PageStore for Failing {
     fn superblock(&self) -> &Superblock {
         self.inner.superblock()
     }
+    fn state(&self) -> State {
+        self.inner.state()
+    }
+    fn commit(&self, state: &State) -> Result<(), StoreError> {
+        self.inner.commit(state)
+    }
 }
 
 #[test]
