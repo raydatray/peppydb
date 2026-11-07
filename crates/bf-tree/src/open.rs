@@ -49,9 +49,19 @@ impl Tree {
         }
         config.validate()?;
 
-        let selection = select(store.as_ref(), &config)?;
+        let state = store.state();
+        let selection = select(store.as_ref(), &config, state.write_seq)?;
+        // Pages written after the committed checkpoint must not reappear
+        // after a later commit: zero them, sync, and only then release them.
+        if !selection.erased.is_empty() {
+            let zeros = vec![0; store.page_size()];
+            for page_number in &selection.erased {
+                store.write(*page_number, &zeros)?;
+            }
+            store.sync()?;
+        }
         // Older copies of a leaf are superseded: no commit needs them.
-        for page_number in &selection.released {
+        for page_number in selection.released.iter().chain(&selection.erased) {
             match store.free(*page_number) {
                 Ok(()) | Err(StoreError::FreedPage(_)) => {}
                 Err(error) => return Err(error.into()),
@@ -72,8 +82,9 @@ impl Tree {
         inner.set_root(build_inner(&inner, &leaves)?);
 
         let leaves = LeafMap::for_config(store, pages, &config)?;
-        // Keep every write sequence in the file unique.
-        leaves.start_write_seq(selection.max_seen);
+        // Keep every write sequence in the file unique, including erased
+        // ones whose zeroing may not have landed.
+        leaves.start_write_seq(selection.max_seen.max(state.write_seq));
         Ok(Self::assemble(config, inner, leaves))
     }
 }
@@ -91,13 +102,21 @@ struct Selection {
     chosen: HashMap<LeafId, Chosen>,
     /// Pages to free: older copies of a leaf.
     released: Vec<PageNumber>,
+    /// Pages written after the committed write watermark, to zero and free.
+    erased: Vec<PageNumber>,
     /// The largest write sequence in any page.
     max_seen: u64,
 }
 
-/// Read every page and keep the newest page of each leaf. All-zero pages
-/// were allocated and never written, and are freed at once.
-fn select(store: &dyn PageStore, config: &TreeConfig) -> Result<Selection, TreeError> {
+/// Read every page and keep the newest committed page of each leaf: the one
+/// with the highest write sequence at or below `written`, the committed
+/// write watermark. Pages above it are erased. All-zero pages were
+/// allocated and never written, and are freed at once.
+fn select(
+    store: &dyn PageStore,
+    config: &TreeConfig,
+    written: u64,
+) -> Result<Selection, TreeError> {
     let page_count = store.page_count();
     // Leaf IDs from disk are bounded before any table grows, so a damaged
     // stamp cannot make open allocate a huge table. IDs can exceed the page
@@ -107,6 +126,7 @@ fn select(store: &dyn PageStore, config: &TreeConfig) -> Result<Selection, TreeE
     let mut selection = Selection {
         chosen: HashMap::new(),
         released: Vec::new(),
+        erased: Vec::new(),
         max_seen: 0,
     };
     let mut bytes = vec![0; store.page_size()];
@@ -123,6 +143,12 @@ fn select(store: &dyn PageStore, config: &TreeConfig) -> Result<Selection, TreeE
         }
         let (write_seq, _) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
         selection.max_seen = selection.max_seen.max(write_seq);
+        if write_seq > written {
+            // Written after the checkpoint; whatever it holds, a crash can
+            // have torn it.
+            selection.erased.push(page_number);
+            continue;
+        }
         let (id, bounds) = check_page(&bytes, page_number, config, max_leaf)?;
         let candidate = Chosen {
             write_seq,
