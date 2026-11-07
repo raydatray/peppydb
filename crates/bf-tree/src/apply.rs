@@ -5,6 +5,17 @@ use super::{Tree, TreeError};
 use bf_tree_page::RecordState;
 use bf_tree_sync::atomic::Ordering;
 
+/// Where a tree's sequences come from, latched on first use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum Sequencing {
+    Unset = 0,
+    /// `put` and `remove`: the tree's own counter.
+    Internal = 1,
+    /// `apply` and the logged writes: a log.
+    External = 2,
+}
+
 /// One write. Payloads borrow from the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op<'a> {
@@ -122,16 +133,39 @@ impl Tree {
         Ok(seq)
     }
 
-    /// Accept an external sequence for an entry. Diff 3 adds the ordering
-    /// and sequencing rules.
+    /// Accept an entry's sequence: it must be above the applied watermark,
+    /// because re-applying an old entry after newer ones would overwrite
+    /// newer values. A failed entry is not marked applied, so a retry of it
+    /// is accepted.
     fn accept_external(&self, seq: u64) -> Result<(), TreeError> {
         self.claim_external()?;
+        let applied = self.applied.load(Ordering::Acquire);
+        if seq <= applied {
+            return Err(TreeError::SequenceOrder { seq, applied });
+        }
         self.last_seq.fetch_max(seq, Ordering::AcqRel);
         Ok(())
     }
 
-    /// Diff 3 latches the sequence source here.
     fn claim_external(&self) -> Result<(), TreeError> {
-        Ok(())
+        self.claim(Sequencing::External)
+    }
+
+    /// Latch the tree's sequence source on first use. Mixing sources in one
+    /// process is unsafe: if a log has applied up to 10 and `put` then takes
+    /// 11, a checkpoint can record 11 before the log's own entry 11 arrives,
+    /// and replay from 12 would skip it. The latch resets on open.
+    pub(super) fn claim(&self, wanted: Sequencing) -> Result<(), TreeError> {
+        let wanted = wanted as u8;
+        match self.sequencing.compare_exchange(
+            Sequencing::Unset as u8,
+            wanted,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(current) if current == wanted => Ok(()),
+            Err(_) => Err(TreeError::MixedSequencing),
+        }
     }
 }

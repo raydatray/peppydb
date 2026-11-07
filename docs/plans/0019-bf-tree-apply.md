@@ -476,7 +476,7 @@ Resolved (2026-11-06, review):
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: apply and logged writes.
-- [ ] Diff 3: one sequence space.
+- [x] Diff 3: one sequence space.
 - [ ] Diff 4: pre-commit hook.
 - [ ] Diff 5: snapshots.
 - [ ] Diff 6: lossy-log crash model, replica test, documents.

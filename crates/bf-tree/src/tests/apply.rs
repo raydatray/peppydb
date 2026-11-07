@@ -182,3 +182,109 @@ fn concurrent_logged_writes_to_one_key_end_at_the_highest_sequence() {
     assert_eq!(*last, highest.load(Ordering::Relaxed));
     assert_eq!(tree.get(b"k").unwrap(), *value);
 }
+
+#[test]
+fn internal_and_external_sequences_cannot_be_mixed() {
+    let tree = Tree::in_memory(small()).unwrap();
+    tree.apply(Entry {
+        seq: 1,
+        ops: &[put(b"a", b"1")],
+    })
+    .unwrap();
+    assert_eq!(tree.put(b"b", b"2"), Err(TreeError::MixedSequencing));
+    assert_eq!(tree.remove(b"a"), Err(TreeError::MixedSequencing));
+    assert_eq!(tree.get(b"b"), Ok(None), "nothing changed");
+    // Logged writes are external too.
+    let log = RecordingLog::starting_after(1);
+    assert_eq!(tree.put_logged(&log, b"c", b"3"), Ok(2));
+
+    let tree = Tree::in_memory(small()).unwrap();
+    tree.put(b"a", b"1").unwrap();
+    assert_eq!(
+        tree.apply(Entry { seq: 5, ops: &[] }),
+        Err(TreeError::MixedSequencing)
+    );
+    assert_eq!(
+        tree.put_logged(&RecordingLog::default(), b"b", b"2"),
+        Err(TreeError::MixedSequencing)
+    );
+}
+
+#[test]
+fn stale_entries_are_rejected() {
+    let tree = Tree::in_memory(small()).unwrap();
+    tree.apply(Entry {
+        seq: 10,
+        ops: &[put(b"a", b"new")],
+    })
+    .unwrap();
+    for seq in [3, 10] {
+        assert_eq!(
+            tree.apply(Entry {
+                seq,
+                ops: &[put(b"a", b"old")]
+            }),
+            Err(TreeError::SequenceOrder { seq, applied: 10 })
+        );
+    }
+    assert_eq!(tree.get(b"a"), Ok(Some(b"new".to_vec())));
+}
+
+#[test]
+fn the_latch_resets_on_open_and_sequences_continue_from_the_commit() {
+    let tree = Tree::in_memory(small()).unwrap();
+    tree.apply(Entry {
+        seq: 40,
+        ops: &[put(b"a", b"1")],
+    })
+    .unwrap();
+    assert_eq!(
+        tree.last_seq.load(Ordering::Acquire),
+        40,
+        "last_seq follows it"
+    );
+    tree.checkpoint().unwrap();
+    let tree = Tree::open(tree.into_store()).unwrap();
+    // A store applied externally may continue with internal sequences.
+    tree.put(b"b", b"2").unwrap();
+    assert_eq!(tree.applied_seq(), 41);
+    let state = tree.checkpoint().unwrap();
+    assert_eq!(state.applied_seq, 41);
+}
+
+#[test]
+fn a_failed_entry_can_be_retried() {
+    use std::sync::Arc;
+    // A store whose page writes fail: an entry fails while it applies.
+    let config = TreeConfig {
+        circular_buffer_bytes: 1024,
+        on_store_failure: StoreFailurePolicy::AcceptWrites,
+        ..small()
+    };
+    let fail = Arc::new(AtomicBool::new(false));
+    let store = super::evict::Failing::new(&config, fail.clone());
+    let tree = Tree::create(config, Box::new(store)).unwrap();
+    let mut seq = 0;
+    let value = [5u8; 16];
+    fail.store(true, Ordering::Relaxed);
+    let failed = loop {
+        seq += 1;
+        let key = (seq as u32).wrapping_mul(2_654_435_761).to_be_bytes();
+        let ops = [put(&key, &value)];
+        match tree.apply(Entry { seq, ops: &ops }) {
+            Ok(()) => assert!(seq < 5000, "no write failed"),
+            Err(TreeError::Store(_)) => break key,
+            Err(error) => panic!("{error:?}"),
+        }
+    };
+    assert_eq!(
+        tree.applied_seq(),
+        seq - 1,
+        "the failed entry is not applied"
+    );
+    fail.store(false, Ordering::Relaxed);
+    let ops = [put(&failed, &value)];
+    tree.apply(Entry { seq, ops: &ops }).unwrap();
+    assert_eq!(tree.applied_seq(), seq);
+    assert_eq!(tree.get(&failed), Ok(Some(value.to_vec())));
+}
