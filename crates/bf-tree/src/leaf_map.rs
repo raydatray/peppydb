@@ -41,8 +41,10 @@ pub(super) struct LeafMap {
     /// exclusively by a checkpoint to read `write_seq` with none in flight.
     gate: RwLock<()>,
     /// Pages that a later write of the same leaf replaced, each with the
-    /// replacing write's sequence. Freed once a commit covers the sequence.
-    superseded: Mutex<Vec<(PageNumber, u64)>>,
+    /// replacing write's sequence. Freed once a commit covers the sequence,
+    /// and no snapshot pins frees. The pin count lives under the same
+    /// mutex, so a free step either finished before a pin or sees it.
+    superseded: Mutex<Superseded>,
     /// A page write failed. Its bytes may have landed anyway, so no later
     /// commit may cover its sequence; see `Tree::store_failed`.
     write_failed: AtomicBool,
@@ -246,7 +248,7 @@ impl LeafMap {
             next: AtomicUsize::new(entries.len()),
             write_seq: AtomicU64::new(0),
             gate: RwLock::new(()),
-            superseded: Mutex::new(Vec::new()),
+            superseded: Mutex::new(Superseded::default()),
             write_failed: AtomicBool::new(false),
             entries,
             pages: table,
@@ -545,7 +547,7 @@ impl LeafMap {
                 .expect("a known leaf")
                 .swap(page_number.raw(), Ordering::AcqRel);
             if let Some(old) = PageNumber::new(old) {
-                self.superseded.lock().push((old, seq));
+                self.superseded.lock().pages.push((old, seq));
             }
         }
         Ok(seq)
@@ -559,20 +561,32 @@ impl LeafMap {
     /// Take every superseded page recorded so far.
     #[cfg(test)]
     pub(super) fn take_superseded(&self) -> Vec<(PageNumber, u64)> {
-        std::mem::take(&mut *self.superseded.lock())
+        std::mem::take(&mut self.superseded.lock().pages)
     }
 
     /// Take the superseded pages whose replacing write is at or below
     /// `written`; later ones stay until a commit covers them.
     pub(super) fn take_superseded_through(&self, written: u64) -> Vec<PageNumber> {
         let mut superseded = self.superseded.lock();
-        let (covered, later): (Vec<_>, Vec<_>) =
-            superseded.drain(..).partition(|&(_, seq)| seq <= written);
-        *superseded = later;
+        if superseded.pins > 0 {
+            // A snapshot is copying committed pages; a later commit frees.
+            return Vec::new();
+        }
+        let (covered, later): (Vec<_>, Vec<_>) = superseded
+            .pages
+            .drain(..)
+            .partition(|&(_, seq)| seq <= written);
+        superseded.pages = later;
         covered
             .into_iter()
             .map(|(page_number, _)| page_number)
             .collect()
+    }
+
+    /// Keep every superseded page until the returned pin drops.
+    pub(super) fn pin_frees(&self) -> FreePin<'_> {
+        self.superseded.lock().pins += 1;
+        FreePin { leaves: self }
     }
 
     /// The write watermark: the last sequence drawn, read with the gate
@@ -767,6 +781,24 @@ impl PageStore for ReleasedStore {
     }
     fn commit(&self, _: &bf_tree_store::State) -> Result<(), bf_tree_store::StoreError> {
         unreachable!("released store")
+    }
+}
+
+/// Superseded pages and the snapshots that pin them.
+#[derive(Debug, Default)]
+struct Superseded {
+    pages: Vec<(PageNumber, u64)>,
+    pins: usize,
+}
+
+/// While held, no superseded page is freed (see [`LeafMap::pin_frees`]).
+pub(super) struct FreePin<'m> {
+    leaves: &'m LeafMap,
+}
+
+impl Drop for FreePin<'_> {
+    fn drop(&mut self) {
+        self.leaves.superseded.lock().pins -= 1;
     }
 }
 

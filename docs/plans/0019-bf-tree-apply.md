@@ -478,13 +478,23 @@ Resolved (2026-11-06, review):
 - [x] Diff 2: apply and logged writes.
 - [x] Diff 3: one sequence space.
 - [x] Diff 4: pre-commit hook.
-- [ ] Diff 5: snapshots.
+- [x] Diff 5: snapshots.
 - [ ] Diff 6: lossy-log crash model, replica test, documents.
 - [ ] Stack-wide verification.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Selection became side-effect free by moving the zero-page frees.**
+  Plan 0018's `select` freed all-zero pages during the scan. It now only
+  reports them (with the pages to release and to erase), and `open` frees
+  them, so `write_snapshot` shares `select` without changing the store.
+  It is still named `select` and takes the committed write watermark.
+- **The pin is tested by a mutation.** Without it, a snapshot taken
+  beside writers and a checkpoint thread failed to tile in 15 of 15 runs:
+  a commit freed a committed page during the scan and a writer reused it.
+  With it, 30 of 30 release runs passed. The storm test stops its other
+  threads through a drop guard, so a failing snapshot reports instead of
+  hanging until the watchdog.
 
 ## Agent notes
 

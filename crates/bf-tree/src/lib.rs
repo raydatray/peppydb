@@ -59,6 +59,7 @@ mod open;
 mod policy;
 mod read;
 mod scan;
+mod snapshot;
 mod write;
 
 pub use apply::{CommitPoint, Entry, Log, LogError, Op};
@@ -330,6 +331,12 @@ pub enum TreeError {
     /// `remove` after `apply` or a logged write, or the reverse.
     #[error("internal and external sequences cannot be mixed in one process")]
     MixedSequencing,
+    /// Writing a snapshot's output failed. Kept apart from store errors.
+    #[error("snapshot output error: {kind}")]
+    SnapshotOutput {
+        kind: std::io::ErrorKind,
+        code: Option<i32>,
+    },
     /// An earlier sync or commit failed, so no checkpoint can be trusted
     /// until the tree is reopened.
     #[error("an earlier sync or commit failed; reopen the tree")]
