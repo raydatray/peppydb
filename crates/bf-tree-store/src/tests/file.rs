@@ -19,7 +19,10 @@ fn create_writes_a_superblock_page_and_refuses_to_clobber() {
     assert_eq!(fs::metadata(&path).unwrap().len(), PAGE as u64);
 
     let bytes = fs::read(&path).unwrap();
-    assert_eq!(Superblock::decode(&bytes), Ok(superblock(PAGE)));
+    assert_eq!(
+        Superblock::decode(&bytes),
+        Ok((superblock(PAGE), State::default()))
+    );
 
     assert!(matches!(
         FileStore::create(&path, superblock(PAGE)),
@@ -85,7 +88,9 @@ fn short_and_ragged_files_are_rejected() {
     );
 
     let mut page = vec![0; PAGE];
-    superblock(PAGE).encode(&mut page).unwrap();
+    superblock(PAGE)
+        .encode(&State::default(), &mut page)
+        .unwrap();
     let mut ragged = page.clone();
     ragged.extend_from_slice(&[0; PAGE / 2]);
     fs::write(&path, &ragged).unwrap();
@@ -105,7 +110,9 @@ fn short_and_ragged_files_are_rejected() {
 fn foreign_superblocks_are_rejected() {
     let (_dir, path) = temp_path();
     let mut page = vec![0; PAGE];
-    superblock(PAGE).encode(&mut page).unwrap();
+    superblock(PAGE)
+        .encode(&State::default(), &mut page)
+        .unwrap();
     page[0] = b'x';
     fs::write(&path, &page).unwrap();
     assert_eq!(

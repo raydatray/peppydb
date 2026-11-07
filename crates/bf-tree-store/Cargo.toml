@@ -10,11 +10,11 @@ publish = false
 bf-tree-node-id = { path = "../bf-tree-node-id" }
 bf-tree-page = { path = "../bf-tree-page" }
 bf-tree-sync = { path = "../bf-tree-sync" }
+crc32c.workspace = true
 thiserror.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
-crc32c.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -4,7 +4,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{ENCODED_BYTES, PageStore, StoreError, Superblock, check_buffer};
+use super::{ENCODED_BYTES, PageStore, State, StoreError, Superblock, check_buffer};
 use bf_tree_node_id::LeafId;
 use bf_tree_sync::{Mutex, Table};
 
@@ -39,7 +39,7 @@ impl FileStore {
         superblock.validate()?;
 
         let mut page = vec![0; superblock.page_size];
-        superblock.encode(&mut page)?;
+        superblock.encode(&State::default(), &mut page)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -70,7 +70,7 @@ impl FileStore {
 
         let mut header = [0; ENCODED_BYTES];
         read_at(&file, 0, &mut header).map_err(|_| StoreError::InvalidSuperblock("too short"))?;
-        let superblock = Superblock::decode(&header)?;
+        let (superblock, _) = Superblock::decode(&header)?;
 
         let page_size = superblock.page_size as u64;
         let len = file
