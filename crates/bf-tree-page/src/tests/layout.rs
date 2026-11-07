@@ -184,3 +184,43 @@ fn split_outputs_inherit_the_leaf_stamp_and_the_stale_checksum() {
     assert!(!split.right.verify_checksum(), "only the tree seals");
     assert!(!page.verify_checksum());
 }
+
+#[test]
+fn the_write_sequence_round_trips_and_survives_rebuilds() {
+    use bf_tree_node_id::LeafId;
+
+    let unbounded = Fences {
+        lower: Fence::Unbounded,
+        upper: Fence::Unbounded,
+    };
+    let mut left = vec![0; 128];
+    let page = Page::init_with_fences(&mut left, unbounded).unwrap();
+    assert_eq!(page.write_seq(), 0);
+    page.set_write_seq(41);
+    page.set_leaf(Some(LeafId::new(6).unwrap())).unwrap();
+    for key in [&b"a"[..], b"b", b"c"] {
+        page.try_insert(key, b"0123456789").unwrap();
+    }
+    page.try_upsert(b"a", RecordState::Insert(b"")).unwrap();
+    page.compact();
+    assert_eq!(page.write_seq(), 41, "compaction keeps it");
+    assert_eq!(&page.as_bytes()[16..24], &41u64.to_le_bytes());
+
+    let mut right = vec![0; 128];
+    let split = page
+        .merge_batch_split(&mut right, [live(b"d", b"0123456789")].into_iter())
+        .unwrap();
+    assert_eq!(split.right.write_seq(), 41, "split halves share it");
+    assert_eq!(page.write_seq(), 41);
+
+    page.seal();
+    assert_eq!(
+        crate::raw_header_stamps(page.as_bytes()),
+        Some((41, Some(LeafId::new(6).unwrap())))
+    );
+    assert_eq!(
+        crate::raw_header_stamps(&[0; 32]),
+        Some((0, Some(LeafId::new(0).unwrap())))
+    );
+    assert_eq!(crate::raw_header_stamps(&[0; 31]), None);
+}

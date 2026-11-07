@@ -565,7 +565,7 @@ Resolved (2026-11-06, review):
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: `write_seq` header field.
+- [x] Diff 2: `write_seq` header field.
 - [ ] Diff 3: fresh-page writes.
 - [ ] Diff 4: commit, erase, and create.
 - [ ] Diff 5: suspect classification.

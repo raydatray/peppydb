@@ -167,6 +167,17 @@ impl Page {
         Ok(())
     }
 
+    /// The write sequence of the write-through that stored this page, or 0
+    /// for a page never stored.
+    pub fn write_seq(&self) -> u64 {
+        self.header.write_seq.get()
+    }
+
+    /// Stamp the write sequence. Call before [`Page::seal`].
+    pub fn set_write_seq(&mut self, seq: u64) {
+        self.header.write_seq.set(seq);
+    }
+
     /// CRC32C of every byte of the page, with the `crc` field taken as zero.
     pub fn checksum(&self) -> u32 {
         checksum(self.as_bytes())
@@ -306,4 +317,16 @@ fn checksum(bytes: &[u8]) -> u32 {
     let crc = crc32c::crc32c(&bytes[..CRC_RANGE.start]);
     let crc = crc32c::crc32c_append(crc, &[0; 4]);
     crc32c::crc32c_append(crc, &bytes[CRC_RANGE.end..])
+}
+
+/// The write sequence and leaf stamp from the raw header of stored bytes that
+/// may be damaged, without any check: `(write_seq, leaf)`. `None` if `bytes`
+/// is shorter than a header. A zero header reads as `(0, Some(LeafId(0)))`.
+pub fn raw_header_stamps(bytes: &[u8]) -> Option<(u64, Option<LeafId>)> {
+    let (header, _) = Header::ref_from_prefix(bytes).ok()?;
+    let leaf = match header.leaf.get() {
+        NO_LEAF => None,
+        raw => LeafId::new(u64::from(raw)),
+    };
+    Some((header.write_seq.get(), leaf))
 }

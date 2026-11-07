@@ -114,7 +114,7 @@ impl Page {
         }
 
         page.header.backing_leaf.set(self.header.backing_leaf.get());
-        page.header.lsn.set(self.header.lsn.get());
+        page.header.write_seq.set(self.header.write_seq.get());
         page.header.leaf.set(self.header.leaf.get());
         page.header.crc.set(self.header.crc.get());
     }

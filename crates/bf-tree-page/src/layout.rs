@@ -48,8 +48,9 @@ pub(super) struct Header {
     pub(super) prefix_len: U16,
     /// The `LeafId` a mini-page overlays, or `NO_BACKING_LEAF`.
     pub(super) backing_leaf: U64,
-    /// Log sequence number (LSN); inactive.
-    pub(super) lsn: U64,
+    /// The write sequence of the tree write-through that stored this page;
+    /// zero in pages never stored (plan 0018).
+    pub(super) write_seq: U64,
     /// The `LeafId` a stored base page belongs to, or `NO_LEAF`. Stamped by
     /// the tree when it writes the page to the store.
     pub(super) leaf: U32,

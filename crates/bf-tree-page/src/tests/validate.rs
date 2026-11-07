@@ -169,7 +169,10 @@ fn corrupted_images_never_panic_and_accepted_images_are_safe() {
         }
     }
     assert!(rejected > 0);
-    assert!(accepted > 0, "benign flips (payload bytes, lsn) stay valid");
+    assert!(
+        accepted > 0,
+        "benign flips (payload bytes, write_seq) stay valid"
+    );
 }
 
 fn fenced_fixture() -> Vec<u8> {
