@@ -101,7 +101,7 @@ fn eviction_writes_back_dirty_full_pages_and_nothing_for_clean_ones() {
     // The record that triggered the merge went straight into the page, so
     // it starts dirty; a flush writes it back and keeps it.
     assert!(is_dirty(&tree, leaf0()));
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     io.take();
 
     // Clean: eviction writes nothing.
@@ -134,7 +134,7 @@ fn flush_writes_back_dirty_full_pages_and_reopen_agrees() {
     let tree = Tree::in_memory(config(512, 256, 8, 16)).unwrap();
     let n = promote_by_writes(&tree);
     tree.put(&[222], b"direct").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(!is_dirty(&tree, leaf0()), "flush cleaned the page");
     assert!(is_full(&tree, leaf0()), "and kept it");
     let reopened = Tree::open(tree.into_store()).unwrap();

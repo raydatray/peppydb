@@ -20,7 +20,7 @@ fn nearly_full() -> Tree {
     for i in 0..7 {
         tree.put(&key(i), &[1; 16]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!((tree.height(), tree.leaf_count()), (1, 1));
     assert_eq!(tree.buffered_leaves(), 0);
     tree
@@ -99,7 +99,7 @@ fn a_write_through_a_stale_route_lands_in_the_right_half() {
     assert_eq!(holds(&tree, stale.leaf, &target), (false, false));
 
     // The merge moves it to the right leaf's base page.
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(holds(&tree, right, &target), (false, true));
     assert_eq!(holds(&tree, stale.leaf, &target), (false, false));
     assert_eq!(tree.get(&target), Ok(Some(b"v".to_vec())));

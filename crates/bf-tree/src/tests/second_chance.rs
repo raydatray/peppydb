@@ -106,10 +106,10 @@ fn a_hot_leaf_survives_while_cold_leaves_are_evicted() {
     for i in 0..300u16 {
         tree.put(&(i * 211).to_be_bytes(), &[1; 8]).unwrap();
         if i % 30 == 29 {
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
         }
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let hot_key = 0u16.to_be_bytes();
     tree.put(&hot_key, b"hot").unwrap();
     let hot = tree.find_leaf(&hot_key);

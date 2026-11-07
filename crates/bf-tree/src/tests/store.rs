@@ -39,7 +39,7 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
         tree.put(&i.to_be_bytes(), b"v").unwrap();
     }
     // Merge every buffered record, so that the store holds every page.
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let leaves = tree.leaf_count();
     assert!(leaves > 2);
     let stored = tree.leaves.page_table().into_iter().flatten().count();
@@ -67,7 +67,7 @@ fn a_fresh_map_over_the_store_serves_every_leaf() {
     tree.put(&key, b"w").unwrap();
     assert_eq!(stored_pages(&tree), before);
     assert_eq!(tree.get(&key), Ok(Some(b"w".to_vec())));
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let after = stored_pages(&tree);
     let changed = (0..leaves).filter(|&i| before[i] != after[i]).count();
     assert_eq!(changed, 1);
@@ -138,7 +138,7 @@ fn a_split_loads_the_left_leaf_from_the_store() {
     for i in 0..7u32 {
         tree.put(&i.to_be_bytes(), &[1; 16]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Map the store of the nearly full leaf afresh, then force a split.
     let pages = tree.leaves.page_table();
     let store = tree.leaves.into_store();
@@ -152,7 +152,7 @@ fn a_split_loads_the_left_leaf_from_the_store() {
     tree.put(&8u32.to_be_bytes(), &[1; 16]).unwrap();
     assert_eq!(tree.height(), 1, "both puts are buffered");
     // The merge loads the base page from the store and does not fit it.
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(tree.height(), 2);
     assert_eq!(tree.leaf_count(), 2);
     assert_eq!(stored_pages(&tree), copied_pages(&tree));
@@ -355,7 +355,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
     assert!(merges > 1);
     let leaves = tree.leaf_count();
     io.take();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let (reads, written) = io.take();
     assert_eq!(reads, merges, "one read per merge");
     let new = tree.leaf_count() - leaves;
@@ -373,7 +373,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
 
     // A flush with nothing buffered only syncs.
     io.take();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(io.take(), (0, vec![]));
     assert_eq!(io.syncs(), 3);
 
@@ -398,7 +398,7 @@ fn blind_writes_touch_the_store_only_through_merges() {
     assert_eq!(tree.get(&key4), Ok(Some(b"v".to_vec())));
     assert_eq!(io.take(), (1, vec![]), "get the mini-page misses");
 
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(io.take(), (1, vec![owner]), "one merge");
     assert_eq!(io.syncs(), 4);
     assert_eq!(tree.get(&key3), Ok(None));
@@ -438,7 +438,7 @@ fn only_flushed_writes_survive_closing_the_tree() {
 
     // After a flush, every write survives.
     write_all(&tree);
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.height() >= 2);
     let leaves = tree.leaf_count();
     let expected = collect(tree.iter());
@@ -477,10 +477,10 @@ fn memory_and_file_backends_store_identical_bytes() {
                 tree.remove(&(i / 2).to_be_bytes()).unwrap();
             }
             if i % 97 == 0 {
-                tree.flush().unwrap();
+                tree.checkpoint().unwrap();
             }
         }
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
         assert_eq!(tree.check_invariants(), Ok(()));
     }
 
@@ -536,7 +536,7 @@ fn reopen_rebuilds_the_page_table_from_the_stamps() {
         tree.put(&key, &[i as u8; 12]).unwrap();
         oracle.insert(key.to_vec(), vec![i as u8; 12]);
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaf_count() > 10);
     assert_stamped(&tree);
     let before = tree.leaves.page_table();

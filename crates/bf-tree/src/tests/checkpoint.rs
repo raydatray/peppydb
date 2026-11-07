@@ -99,7 +99,7 @@ fn flush_commits_the_write_watermark() {
     for i in 0..100 {
         tree.put(&key(i), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let state = tree.store().state();
     assert_eq!(state.checkpoint_id, 2);
     assert_eq!(state.write_seq, tree.leaves.write_seq());
@@ -110,7 +110,7 @@ fn flush_commits_the_write_watermark() {
 fn a_page_written_after_the_commit_is_erased_on_open() {
     let tree = Tree::in_memory(small()).unwrap();
     tree.put(&key(1), b"committed").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Write the leaf through again without a commit: a crash after the page
     // landed.
     tree.put(&key(1), b"uncommitted").unwrap();
@@ -171,7 +171,7 @@ fn a_write_through_in_flight_holds_back_the_commit() {
         let checkpoint = std::thread::scope(|scope| {
             let gate = tree.leaves.hold_gate();
             let handle = scope.spawn(|| {
-                tree.flush().unwrap();
+                tree.checkpoint().unwrap();
                 done.store(true, Ordering::Release);
             });
             std::thread::sleep(Duration::from_millis(50));
@@ -188,18 +188,18 @@ fn a_write_through_in_flight_holds_back_the_commit() {
 fn a_failed_commit_keeps_the_previous_state_and_fails_later_checkpoints() {
     let (tree, fail) = failing(small());
     tree.put(&key(1), b"v").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let before = tree.store().state();
 
     fail.store(true, Ordering::Relaxed);
     tree.put(&key(2), b"w").unwrap();
-    assert!(matches!(tree.flush(), Err(TreeError::Store(_))));
+    assert!(matches!(tree.checkpoint(), Err(TreeError::Store(_))));
     assert_eq!(tree.store().state(), before);
     assert!(tree.store_failed());
 
     // The device recovers, but nothing later can be trusted.
     fail.store(false, Ordering::Relaxed);
-    assert_eq!(tree.flush(), Err(TreeError::CheckpointFailed));
+    assert_eq!(tree.checkpoint(), Err(TreeError::CheckpointFailed));
     assert_eq!(tree.put(&key(3), b"x"), Err(TreeError::StoreFailed));
     assert_eq!(tree.remove(&key(1)), Err(TreeError::StoreFailed));
     assert_eq!(tree.get(&key(1)), Ok(Some(b"v".to_vec())), "reads continue");
@@ -210,7 +210,7 @@ fn a_failed_commit_keeps_the_previous_state_and_fails_later_checkpoints() {
     assert_eq!(tree.get(&key(1)), Ok(Some(b"v".to_vec())));
     assert_eq!(tree.get(&key(2)), Ok(None));
     tree.put(&key(3), b"x").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
 }
 
 #[test]
@@ -220,11 +220,11 @@ fn accept_writes_keeps_writes_after_a_failure() {
         ..small()
     });
     fail.store(true, Ordering::Relaxed);
-    assert!(tree.flush().is_err());
+    assert!(tree.checkpoint().is_err());
     fail.store(false, Ordering::Relaxed);
     tree.put(&key(1), b"v").unwrap();
     assert_eq!(tree.get(&key(1)), Ok(Some(b"v".to_vec())));
-    assert_eq!(tree.flush(), Err(TreeError::CheckpointFailed));
+    assert_eq!(tree.checkpoint(), Err(TreeError::CheckpointFailed));
 }
 
 /// Plan 0018's erase argument: a page written after a checkpoint must not
@@ -238,7 +238,7 @@ fn an_uncommitted_page_does_not_return_after_a_later_commit() {
         tree.put(&key(i), &[1; 16]).unwrap();
         i += 1;
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let low = tree.find_leaf(&key(0));
     let high = tree.find_leaf(&key(i - 1));
     assert_ne!(low, high);
@@ -253,10 +253,83 @@ fn an_uncommitted_page_does_not_return_after_a_later_commit() {
     // Write only M, commit, crash, open: L stays at its committed state.
     for _ in 0..4 {
         tree.put(&key(i - 1), b"m").unwrap();
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
     }
     let tree = Tree::open(tree.into_store()).unwrap();
     assert_eq!(tree.get(&key(0)), Ok(Some(vec![1; 16])));
     assert_eq!(tree.get(&key(i - 1)), Ok(Some(b"m".to_vec())));
     assert_eq!(tree.check_invariants(), Ok(()));
+}
+
+#[test]
+fn a_checkpoint_records_every_write_that_returned_before_it() {
+    let tree = Tree::in_memory(small()).unwrap();
+    assert_eq!(tree.applied_seq(), 0);
+    for i in 0..50 {
+        tree.put(&key(i), b"v").unwrap();
+    }
+    tree.remove(&key(3)).unwrap();
+    assert_eq!(tree.applied_seq(), 51);
+    let state = tree.checkpoint().unwrap();
+    assert_eq!(state.applied_seq, 51);
+    assert_eq!(tree.committed(), state);
+
+    // Sequences continue from the committed watermark after a reopen.
+    let tree = Tree::open(tree.into_store()).unwrap();
+    assert_eq!(tree.applied_seq(), 51);
+    tree.put(&key(100), b"w").unwrap();
+    assert_eq!(tree.applied_seq(), 52);
+    assert_eq!(tree.get(&key(3)), Ok(None));
+}
+
+#[test]
+fn concurrent_checkpoints_commit_consecutive_ids_beside_writers() {
+    super::concurrent::with_watchdog(Duration::from_secs(60), || {
+        let tree = Tree::in_memory(TreeConfig {
+            circular_buffer_bytes: 2048,
+            ..small()
+        })
+        .unwrap();
+        let ids = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..2u32)
+                .map(|w| {
+                    let tree = &tree;
+                    scope.spawn(move || {
+                        for i in 0..800 {
+                            tree.put(&key(w * 10_000 + i), &[w as u8; 8]).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            let checkpointers: Vec<_> = (0..3)
+                .map(|_| {
+                    let tree = &tree;
+                    scope.spawn(move || {
+                        (0..20)
+                            .map(|_| {
+                                let before = tree.applied_seq();
+                                let state = tree.checkpoint().unwrap();
+                                assert!(state.applied_seq >= before);
+                                state.checkpoint_id
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            writers.into_iter().for_each(|w| w.join().unwrap());
+            let mut ids: Vec<_> = checkpointers
+                .into_iter()
+                .flat_map(|c| c.join().unwrap())
+                .collect();
+            ids.sort_unstable();
+            ids
+        });
+        // Create committed 1; the 60 checkpoints are 2..=61, each once.
+        assert_eq!(ids, (2..=61).collect::<Vec<_>>());
+        let state = tree.checkpoint().unwrap();
+        assert_eq!(state.applied_seq, 1600);
+        let tree = Tree::open(tree.into_store()).unwrap();
+        assert_eq!(tree.iter().count(), 1600);
+        assert_eq!(tree.check_invariants(), Ok(()));
+    });
 }

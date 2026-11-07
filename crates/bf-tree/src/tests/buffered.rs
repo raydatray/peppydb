@@ -23,7 +23,7 @@ fn writes_and_a_concurrent_flush_keep_every_pre_flush_write() {
         let flusher = scope.spawn(|| {
             let mut flushes = 0;
             while !stop.load(Ordering::Relaxed) {
-                tree.flush().unwrap();
+                tree.checkpoint().unwrap();
                 flushes += 1;
             }
             flushes
@@ -57,7 +57,7 @@ fn writes_and_a_concurrent_flush_keep_every_pre_flush_write() {
         expected
     });
 
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert_eq!(tree.buffered_leaves(), 0);
     assert_eq!(tree.check_invariants(), Ok(()));
     drop(tree);

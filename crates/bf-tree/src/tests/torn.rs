@@ -22,7 +22,7 @@ fn committed() -> (Tree, [u8; 4]) {
     for i in 0..200 {
         tree.put(&key(i), b"old").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     assert!(tree.leaf_count() > 2);
     let probe = (0..200)
         .map(key)

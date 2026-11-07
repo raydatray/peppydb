@@ -4,7 +4,7 @@
 //! as one unbounded leaf; the first leaf split creates the first inner node.
 //! Every leaf is at the same depth and has its own reader-writer lock. Writes
 //! buffer blindly into the leaf's in-memory mini-page, which merges into the
-//! base page in the store when full or on `flush`.
+//! base page in the store when full or on a checkpoint.
 //!
 //! ```
 //! use bf_tree::{Tree, TreeConfig};
@@ -36,7 +36,7 @@ use bf_tree_mini_page::SizeClasses;
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::{Fence, Fences, Page};
 use bf_tree_sync::Mutex;
-use bf_tree_sync::atomic::{AtomicBool, Ordering};
+use bf_tree_sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // Types from the internal crates that appear in this crate's public API, so
 // that callers need no other dependency. Other items stay internal.
@@ -361,6 +361,11 @@ pub struct Tree {
     store_failed: AtomicBool,
     /// One checkpoint at a time.
     checkpointing: Mutex<()>,
+    /// Every write with a sequence at or below this has been applied.
+    /// Advanced with `fetch_max` after the leaf lock is released.
+    applied: AtomicU64,
+    /// The highest sequence assigned; `put` and `remove` draw from it.
+    last_seq: AtomicU64,
 }
 
 // Compile-time check: a tree and its scans can be shared between threads.
@@ -386,7 +391,7 @@ impl Tree {
     /// Validate `config` and create an empty tree on an empty `store` whose
     /// superblock was built from the same configuration.
     ///
-    /// The first leaf is written to the store at once; [`Tree::flush`] makes
+    /// The first leaf is written and committed at once; [`Tree::checkpoint`] makes
     /// it durable.
     pub fn create(config: TreeConfig, store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         config.validate()?;
@@ -402,22 +407,31 @@ impl Tree {
         Self::with_store(config, store)
     }
 
-    /// Merge every buffered mini-page into its base page and make every
-    /// completed write durable.
+    /// Make every write applied before this call durable as one atomic
+    /// commit, and return the committed [`State`].
     ///
-    /// Every write that returned before `flush` began is in the store when
-    /// it returns. `flush` locks one leaf at a time, so writers may run
-    /// meanwhile; a record buffered into a leaf that `flush` already visited
-    /// may stay buffered. Dropping a tree, or [`Tree::into_store`], loses
-    /// buffered records, so call `flush` first. A process stop between the
-    /// two page writes of a split can leave overlapping fences, which
-    /// [`Tree::open`] rejects (until shadow paging, plan 0018).
-    pub fn flush(&self) -> Result<(), TreeError> {
+    /// The checkpoint reads the applied watermark `N`, merges every buffered
+    /// mini-page and writes back every dirty full page, one leaf at a time,
+    /// then reads the write watermark `W`, syncs, and commits both. Writers
+    /// keep running: a write that returned before the call has a sequence at
+    /// most `N` and is in the commit; later writes may be in it too. A
+    /// reopen selects exactly the committed image. Must not be called with a
+    /// leaf lock held, for example from a scan visitor.
+    ///
+    /// After a failed sync or commit, every later checkpoint returns
+    /// [`TreeError::CheckpointFailed`] until the tree is reopened.
+    pub fn checkpoint(&self) -> Result<State, TreeError> {
         let _one = self.checkpointing.lock();
         if self.store_failed() {
             return Err(TreeError::CheckpointFailed);
         }
-        for id in self.leaves.ids() {
+        let applied = self.applied.load(Ordering::Acquire);
+        // The bound is re-read on every step: a split during the pass can
+        // add a leaf that holds a record at or below `applied`.
+        let mut index = 0;
+        while index < self.leaves.len() {
+            let id = LeafId::from_index(index);
+            index += 1;
             let Some(mut leaf) = self.leaves.write_if_live(id) else {
                 continue;
             };
@@ -430,25 +444,37 @@ impl Tree {
                 Residency::Base => {}
             }
         }
-        self.commit_written()
+        self.commit_written(applied)
+    }
+
+    /// Every write with a sequence at or below this has been applied.
+    pub fn applied_seq(&self) -> u64 {
+        self.applied.load(Ordering::Acquire)
+    }
+
+    /// The last committed state: what a reopen would select.
+    pub fn committed(&self) -> State {
+        self.leaves.store().state()
     }
 
     /// Commit every write-through so far: read the write watermark `W` with
     /// none in flight, sync, commit, then free the pages that writes at or
-    /// below `W` replaced. Holds `checkpointing`.
-    fn commit_written(&self) -> Result<(), TreeError> {
+    /// below `W` replaced. Commits `applied` as the applied watermark. Holds
+    /// `checkpointing`, or runs before the tree is shared.
+    fn commit_written(&self, applied: u64) -> Result<State, TreeError> {
         let written = self.leaves.write_watermark();
         self.durable(|| self.leaves.sync())?;
         let current = self.leaves.store().state();
         let next = State {
             checkpoint_id: current.checkpoint_id + 1,
+            applied_seq: applied,
             write_seq: written,
-            ..current
         };
         self.durable(|| Ok(self.leaves.store().commit(&next)?))?;
         // The committed image names no page a covered write replaced.
         let covered = self.leaves.take_superseded_through(written);
-        self.leaves.free_pages(covered)
+        self.leaves.free_pages(covered)?;
+        Ok(next)
     }
 
     /// Number of leaves holding a mini-page: an O(leaves) diagnostic.
@@ -478,7 +504,7 @@ impl Tree {
     }
 
     /// Close the tree and return its store, for example to reopen it with
-    /// [`Tree::open`]. Buffered records are lost; call [`Tree::flush`] first
+    /// [`Tree::open`]. Uncommitted writes are lost; call [`Tree::checkpoint`] first
     /// to keep them and make them durable.
     pub fn into_store(self) -> Box<dyn PageStore> {
         self.leaves.into_store()
@@ -506,7 +532,7 @@ impl Tree {
         );
         // Commit the empty tree, so that a store that is created and never
         // checkpointed reopens as an empty tree.
-        tree.commit_written()?;
+        tree.commit_written(0)?;
         Ok(tree)
     }
 
@@ -518,6 +544,8 @@ impl Tree {
             policy: Policy::new(config.policy_seed),
             store_failed: AtomicBool::new(false),
             checkpointing: Mutex::new(()),
+            applied: AtomicU64::new(0),
+            last_seq: AtomicU64::new(0),
         }
     }
 

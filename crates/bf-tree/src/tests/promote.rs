@@ -40,7 +40,7 @@ fn a_promoting_read_keeps_the_page_and_the_next_read_loads_nothing() {
     for i in 0..10 {
         tree.put(&key(i), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let leaf = leaf_of(&tree, &key(3));
     assert_eq!(residency(&tree, leaf), "base");
     io.take();
@@ -81,7 +81,7 @@ fn a_mini_page_whose_merge_overflows_splits_and_keeps_the_left_half() {
     let fits = |n: u32| {
         let tree = Tree::in_memory(config).unwrap();
         (0..n).for_each(|i| tree.put(&key(i * 2), &[1; 16]).unwrap());
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
         tree.leaf_count() == 1
     };
     let most = (1..200).take_while(|&n| fits(n)).last().unwrap();
@@ -92,7 +92,7 @@ fn a_mini_page_whose_merge_overflows_splits_and_keeps_the_left_half() {
         tree.put(&key(i * 2), &[1; 16]).unwrap();
         oracle.insert(key(i * 2).to_vec(), vec![1; 16]);
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Buffer new keys: their merge no longer fits one page.
     for i in 0..3 {
         tree.put(&key(i * 2 + 1), &[2; 16]).unwrap();
@@ -124,7 +124,7 @@ fn deferral_evicts_clean_full_pages_without_io() {
     for i in 0..400 {
         tree.put(&key(i), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     // Evict whatever the writes left in the buffer.
     while tree.evict_one() == Ok(crate::evict::Eviction::Evicted) {}
     let leaves: Vec<_> = (0..400)
@@ -159,7 +159,7 @@ fn deferral_stops_at_a_dirty_mini_page_and_unclaims_it() {
     for i in 0..400 {
         tree.put(&key(i), b"v").unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     while tree.evict_one() == Ok(crate::evict::Eviction::Evicted) {}
     // The oldest block: a dirty mini-page.
     tree.put(&key(0), b"dirty").unwrap();
@@ -188,7 +188,7 @@ fn deferral_stops_at_a_dirty_mini_page_and_unclaims_it() {
 fn a_stale_promotion_is_skipped() {
     let tree = Tree::in_memory(config(512, 256, 8, 16)).unwrap();
     tree.put(&key(1), b"v").unwrap();
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let leaf = leaf_of(&tree, &key(1));
     let noted = tree
         .note(&tree.leaves.read(leaf).unwrap())
@@ -244,7 +244,7 @@ fn flushed(config: TreeConfig) -> (Tree, super::store::Io) {
     for i in 0..300 {
         tree.put(&key(i), &[1; 8]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     while tree.evict_one() == Ok(crate::evict::Eviction::Evicted) {}
     io.take();
     (tree, io)

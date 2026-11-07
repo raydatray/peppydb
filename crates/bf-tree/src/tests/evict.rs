@@ -39,7 +39,7 @@ fn thousands_of_writes_fit_a_two_page_buffer() {
     let all: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(all, oracle.clone().into_iter().collect::<Vec<_>>());
 
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     let reopened = Tree::open(tree.into_store()).unwrap();
     let all: Vec<_> = reopened.iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(all, oracle.into_iter().collect::<Vec<_>>());
@@ -76,7 +76,7 @@ fn an_eviction_whose_merge_does_not_fit_splits_the_leaf() {
     for i in 0..8u8 {
         tree.put(&[b'k', i * 2], &[1; 12]).unwrap();
     }
-    tree.flush().unwrap();
+    tree.checkpoint().unwrap();
     for i in 0..4u8 {
         tree.put(&[b'k', i * 2 + 1], &[2; 12]).unwrap();
     }

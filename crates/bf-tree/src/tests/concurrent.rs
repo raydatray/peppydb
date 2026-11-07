@@ -261,7 +261,7 @@ fn threads_on_a_file_store_survive_flush_and_reopen() {
         let store = FileStore::create(&path, Superblock::from(&config)).unwrap();
         let tree = Tree::create(config, Box::new(store)).unwrap();
         let tree = run(tree, 4, 4, 1000);
-        tree.flush().unwrap();
+        tree.checkpoint().unwrap();
         let expected: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
         drop(tree);
 
@@ -326,7 +326,7 @@ fn threads_agree_under_constant_eviction() {
             let oracle = std::thread::scope(|scope| {
                 let flusher = scope.spawn(|| {
                     while !stop.load(Ordering::Relaxed) {
-                        tree.flush().unwrap();
+                        tree.checkpoint().unwrap();
                         assert!(tree.circular_buffer_used() <= bytes);
                     }
                 });
@@ -339,7 +339,7 @@ fn threads_agree_under_constant_eviction() {
             // Only now is the tree quiescent: a flush merge may split a leaf.
             check_quiescent(&tree, oracle);
             assert!(tree.height() >= 3);
-            tree.flush().unwrap();
+            tree.checkpoint().unwrap();
             let expected: Vec<_> = tree.iter().collect::<Result<_, _>>().unwrap();
             let reopened = Tree::open(tree.into_store()).unwrap();
             let actual: Vec<_> = reopened.iter().collect::<Result<_, _>>().unwrap();

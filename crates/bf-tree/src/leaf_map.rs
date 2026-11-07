@@ -278,7 +278,7 @@ impl LeafMap {
     }
 
     /// Give up the map and return its store. Buffered mini-pages are lost;
-    /// flush first to keep them.
+    /// checkpoint first to keep them.
     pub(super) fn into_store(mut self) -> Box<dyn PageStore> {
         self.release_blocks();
         let placeholder: Box<dyn PageStore> = Box::new(ReleasedStore);
@@ -297,12 +297,6 @@ impl LeafMap {
                 self.circular_buffer.free(block);
             }
         }
-    }
-
-    /// The live leaves' IDs as of now; a by-ID walk such as `flush` uses
-    /// them.
-    pub(super) fn ids(&self) -> impl Iterator<Item = LeafId> + use<> {
-        (0..self.entries.len()).map(LeafId::from_index)
     }
 
     /// Buffer one record in `leaf`'s mini-page, creating or growing it. With
