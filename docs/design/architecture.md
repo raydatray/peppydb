@@ -19,6 +19,13 @@ with variable-length separators and typed child references. The
 [leaf storage](bf-tree-leaf-store.md) gives leaves a durable home behind a
 page-store boundary.
 
+The tree stays log-agnostic: it persists no log. For the engine
+(plans 0020 to 0022), it exposes `Tree::apply`, `put_logged`, and
+`remove_logged` for sequenced writes, `checkpoint_with` for a pre-commit
+hook that syncs the log, and `write_snapshot` for a copy that a follower
+can install. The [persistence design](bf-tree-persistence.md#logs-and-sequenced-writes)
+records the contract.
+
 ## Code layout
 
 The repository is one [Buck2](build-system.md) build for Rust and Go.

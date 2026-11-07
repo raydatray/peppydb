@@ -328,8 +328,11 @@ fn a_hook_error_commits_and_frees_nothing() {
     );
     assert_eq!(tree.committed(), before);
     assert!(!tree.store_failed(), "the store did not fail");
-    // Nothing was freed: the next writes grow the store.
-    assert!(tree.store().page_count() >= pages);
+    // Nothing was freed: no commit happened since create freed nothing, so
+    // the next page grows the store.
+    let now = tree.store().page_count();
+    assert!(now > pages, "the pass wrote fresh pages");
+    assert_eq!(tree.store().alloc().unwrap().raw(), now);
     let state = tree.checkpoint().unwrap();
     assert_eq!(state.applied_seq, 200);
     let tree = Tree::open(tree.into_store()).unwrap();

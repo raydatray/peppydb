@@ -19,6 +19,11 @@ version-locked frames: the paper's optimistic latch coupling (§3.4).
 shadow paging and checkpoints: the checkpointing mutex, the write-through
 gate, and the superseded-page mutex
 ([persistence](bf-tree-persistence.md#the-checkpoint-protocol)).
+[Plan 0019](../plans/0019-bf-tree-apply.md) added no lock: a sequencing
+latch (an atomic), a snapshot pin count under the superseded-page mutex,
+a log call under the leaf lock, and a pre-commit hook under the
+checkpointing mutex
+([persistence](bf-tree-persistence.md#logs-and-sequenced-writes)).
 
 Related documents: [tree structure](bf-tree-structure.md) (writes, splits,
 scans), [inner nodes](bf-tree-inner-nodes.md) (the node format that frames
@@ -49,11 +54,11 @@ flowchart LR
     Inner --> F["Frames: a Table of Frame, never freed"]
     F --> Fr["Frame: version AtomicU64 + ArcSwapOption of Image"]
     Inner --> RG["root_grow: Mutex"]
-    Tree --> CK["checkpointing: Mutex, applied and last_seq: AtomicU64"]
+    Tree --> CK["checkpointing: Mutex, applied and last_seq: AtomicU64, sequencing: AtomicU8"]
     Tree --> Map["LeafMap"]
     Map --> E["Table&lt;RwLock&lt;LeafEntry&gt;&gt;: freed, block, refs, version, dirty"]
     Map --> GT["gate: RwLock, write_seq: AtomicU64"]
-    Map --> SS["superseded: Mutex of page numbers"]
+    Map --> SS["superseded: Mutex of page numbers and snapshot pins"]
     Map --> CB["CircularBuffer: Mutex&lt;State&gt; + slab"]
     Map --> PS["Box&lt;dyn PageStore&gt;: Send + Sync, &amp;self"]
     Tree -. per thread .-> S["thread-local Scratch: page, right"]
@@ -74,6 +79,8 @@ pub struct Tree {
     /// The applied watermark and the operation-sequence counter.
     applied: AtomicU64,
     last_seq: AtomicU64,
+    /// The latched sequence source: unset, internal, or external (plan 0019).
+    sequencing: AtomicU8,
 }
 
 /// The routing layer (crates/bf-tree/src/inner.rs).
@@ -91,9 +98,10 @@ struct Inner {
 | Lock | Type | Protects | Taken by |
 | --- | --- | --- | --- |
 | Leaf lock | `RwLock<LeafEntry>`, one per `LeafId` | the entry (`freed`, `block`, `refs`, `version`, `dirty`), the mini-page or full-page bytes in its block, and the leaf's base page in the store | reads and scans (S), writes, merges, splits, and relocation (X), the checkpoint pass and eviction (X, by ID), `maintain`, the deferred retry, and `evict_if_clean` (X, by ID, `try_write` only) |
-| Checkpointing mutex | `Mutex<()>` in `Tree` | one checkpoint at a time: the next checkpoint id and the free step | `Tree::checkpoint`, for the whole call; `create` commits before the tree is shared, without it |
-| Write-through gate | `RwLock<()>` in `LeafMap` | the write watermark: no write-through is in flight while it is held exclusively | `LeafMap::write_through` (S, for the whole call); `LeafMap::write_watermark` in the checkpoint (X, for one load) |
-| `superseded` mutex | `Mutex<Vec<(PageNumber, u64)>>` in `LeafMap` | the list of replaced pages and their replacing sequences | `write_through` (push), `take_superseded_through` (drain); the pages are freed after it is released |
+| Checkpointing mutex | `Mutex<()>` in `Tree` | one checkpoint at a time: the next checkpoint id, the pre-commit hook, and the free step | `Tree::checkpoint_with` (which `checkpoint` calls), for the whole call; `create` commits before the tree is shared, without it |
+| Write-through gate | `RwLock<()>` in `LeafMap` | the write watermark: no write-through is in flight while it is held exclusively | `LeafMap::write_through` (S, for the whole call); `LeafMap::write_watermark_with` in the checkpoint (X, for two loads: `W` and `last_seq`) |
+| `superseded` mutex | `Mutex<Superseded>` in `LeafMap`: `pages: Vec<(PageNumber, u64)>` and `pins: usize` | the list of replaced pages and their replacing sequences, and the count of snapshot pins | `write_through` (push), `take_superseded_through` (drain, or nothing while `pins > 0`), `pin_frees` (increment), and `FreePin::drop` (decrement); the pages are freed after it is released |
+| Sequencing latch | `AtomicU8` in `Tree` (not a lock) | the sequence source: unset, internal, or external | `Tree::claim`, one compare-and-swap at the start of every write, before any leaf lock; `open` starts it unset |
 | Frame version lock | `AtomicU64` in each `Frame` | the frame's image: only the holder publishes a new one | `Inner::install`, through `Inner::confirm` and `FrameRef::write`; readers only load the version |
 | `root_grow` | `Mutex<()>` in `Inner` | replacement of the root word | `Inner::install`, only when the split node is the root |
 | Root word | `AtomicU64` (not a lock) | the root `ChildRef` | stored by root growth under `root_grow`, and by `open` and test fixtures before the tree is shared |
@@ -235,7 +243,11 @@ flowchart LR
   checkpoint takes leaf locks one at a time in the pass, then the gate
   exclusively, then the store's locks for `sync`, `commit`, and `free`. No
   other thread takes it, so no thread waits for it while it holds another
-  lock.
+  lock. The pre-commit hook of `checkpoint_with` runs after the `sync` and
+  before the `commit`, under this mutex and with no other tree lock: no
+  leaf lock, no frame lock, and not the gate. The hook may wait for the
+  log (for example, a WAL fsync); writers keep running meanwhile. It must
+  not call `checkpoint`, which would wait for this mutex.
 - Rank 1 is the leaf that routing named. An operation holds at most one.
 - Rank 2 is the right half of a split. It is freshly allocated and no
   separator names it yet.
@@ -252,8 +264,9 @@ flowchart LR
   `install`. Under the shared gate it takes only rank 6 and 7 locks
   (`alloc`, `write`, a `free` of a failed page, and the `superseded` push),
   and it waits for nothing else. The checkpoint takes the gate exclusively
-  in `write_watermark`, holding only the checkpointing mutex, with no leaf
-  or frame lock, and releases it after one atomic load.
+  in `write_watermark_with`, holding only the checkpointing mutex, with no
+  leaf or frame lock, and releases it after two atomic loads: `W` and
+  `last_seq` (plan 0019's captured sequence).
 - Ranks 6 and 7 are innermost. `MemStore::alloc` and `FileStore::alloc`
   hold the free-list mutex while they grow their page table (and
   `FileStore::alloc` while it extends the file). `free` holds it while it
@@ -275,7 +288,17 @@ flowchart LR
 - The `superseded` mutex is innermost. `write_through` pushes under it
   while it holds the gate shared, and `take_superseded_through` drains it
   under the checkpointing mutex. Its holder calls nothing: the checkpoint
-  frees the drained pages after it releases the mutex.
+  frees the drained pages after it releases the mutex. The free pin of
+  plan 0019 lives under the same mutex: `write_snapshot` takes it through
+  `pin_frees` with no other lock held, and `FreePin::drop` releases it.
+  While `pins > 0`, `take_superseded_through` drains nothing. Because the
+  pin count and the drain share one mutex, a free step either finished
+  draining before the pin was taken, or sees the pin.
+- `Log::append` (plan 0019) runs inside a write's sequence closure, under
+  the reachable leaf's X lock, after route validation. The log's own locks
+  therefore rank above every tree lock that a write can hold: the `Log`
+  contract forbids calls into the tree and waits for durability, so the
+  log waits for no tree lock.
 - The circular-buffer mutex is innermost too. Allocation and free take it
   only under a leaf's X lock: `LeafMap::buffer` allocates and grows
   mini-pages, `Tree::relocate` allocates a copy and frees the old block,
@@ -295,10 +318,11 @@ lock. Scans release a leaf before they lock the next. Eviction and
 `make_room` run with no leaf lock. Plans 0014 and 0015 added no rank.
 Eviction, `maintain`, and the deferred path take a leaf lock by ID while
 they hold no other leaf lock, exactly as the checkpoint pass does. Plan
-0018 added ranks 0 and 5 and the `superseded` mutex. The `Tree` doc
-comment in `crates/bf-tree/src/lib.rs` states the order of plan 0016 in
-five groups (leaves, frames, `root_grow`, store locks, innermost); it does
-not yet name the checkpointing mutex, the gate, or the `superseded` mutex.
+0018 added ranks 0 and 5 and the `superseded` mutex. Plan 0019 added no
+rank. The `Tree` doc comment in `crates/bf-tree/src/lib.rs` states the
+same order in seven groups (0 to 6): it merges this document's ranks 1 and
+2 into one group and names the checkpointing mutex, the gate, and the
+superseded-page list.
 
 **`checkpoint` must not be called with a leaf lock held.** The pass locks
 every live leaf in turn. A caller that holds a leaf lock, for example a
@@ -578,7 +602,7 @@ has no cycle. The cases:
    are write-throughs in flight; they wait only for rank 6 and 7 locks,
    whose holders wait for nothing, so they finish and release the gate.
    std's `RwLock` may block new shared requests behind the waiting
-   exclusive request. Those write-throughs then wait for one atomic load,
+   exclusive request. Those write-throughs then wait for two atomic loads,
    and no cycle forms, because the checkpoint holds no lock that a
    write-through needs.
 5. **Eviction** runs only when the evicting thread holds no leaf lock: a

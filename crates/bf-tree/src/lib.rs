@@ -503,10 +503,12 @@ impl Tree {
         self.leaves.store().state()
     }
 
-    /// Commit every write-through so far: read the write watermark `W` with
-    /// none in flight, sync, commit, then free the pages that writes at or
-    /// below `W` replaced. Commits `applied` as the applied watermark. Holds
-    /// `checkpointing`, or runs before the tree is shared.
+    /// Commit every write-through so far: read the write watermark `W` and
+    /// the captured sequence with none in flight, sync, run the pre-commit
+    /// hook, commit, then free the pages that writes at or below `W`
+    /// replaced, unless a snapshot pins them. Commits `applied` as the
+    /// applied watermark. Holds `checkpointing`, or runs before the tree is
+    /// shared.
     fn commit_written(
         &self,
         applied: u64,

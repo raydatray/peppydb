@@ -5,12 +5,19 @@ It covers the file layout, the checksummed superblock and its committed
 state, page numbers and how they differ from leaf IDs, the identity stamp,
 write sequence, and checksum in every stored page, shadow paging, the
 checkpoint protocol, and how `Tree::open` selects the committed image after
-a crash. It also records what is guaranteed today, with the test that backs
-each guarantee, and what is not guaranteed yet.
+a crash. It then covers how a log sequences writes: the `Log` contract,
+`Tree::apply` and the logged writes, the one sequence space, the
+checkpoint's pre-commit hook, and snapshots of the committed image. It also
+records what is guaranteed today, with the test that backs each guarantee,
+and what is not guaranteed yet.
 
 [Plan 0017](../plans/0017-bf-tree-store-format.md) built the store format.
 [Plan 0018](../plans/0018-bf-tree-checkpoint.md) built shadow paging,
 checkpoints, and recovery on that format without changing its layout.
+[Plan 0019](../plans/0019-bf-tree-apply.md) added sequenced writes, the
+pre-commit hook, and snapshots, again without changing the layout. The tree
+stays log-agnostic: it persists no log, and it defines the contract that any
+log meets.
 Related documents:
 [leaf storage](bf-tree-leaf-store.md) (the `LeafMap`, `load_base`,
 `write_through`, and the tree lifecycle),
@@ -23,9 +30,11 @@ The code is in `crates/bf-tree-store/src/` (`lib.rs`: `PageNumber`,
 `mem.rs`: the backends), `crates/bf-tree-page/src/` (`layout.rs`: the
 header; `lib.rs`: stamp, sequence, and checksum accessors), and
 `crates/bf-tree/src/` (`leaf_map.rs`: the page table, `load_base`,
-`write_through`, the superseded list, and the gate; `lib.rs`:
-`Tree::checkpoint` and the commit step; `write.rs`: the sequence closure;
-`open.rs`: selection and erasure).
+`write_through`, the superseded list, the free pin, and the gate; `lib.rs`:
+`Tree::checkpoint`, `checkpoint_with`, the commit step, and `TreeError`;
+`write.rs`: the sequence closure; `apply.rs`: `Op`, `Entry`, `Log`,
+`LogError`, `CommitPoint`, `apply`, the logged writes, and the sequencing
+latch; `snapshot.rs`: `write_snapshot`; `open.rs`: selection and erasure).
 
 ## Terms
 
@@ -39,9 +48,22 @@ header; `lib.rs`: stamp, sequence, and checksum accessors), and
 - **Write sequence (`write_seq`):** the number that one `write_through`
   call draws and stamps into every page it writes. A later write-through
   draws a higher number.
-- **Operation sequence:** the number that a `put` or `remove` draws. It
-  orders writes to records. It is separate from the write sequence, which
-  orders page versions.
+- **Operation sequence:** the number that a write to a record carries:
+  drawn by `put` or `remove`, assigned by a `Log`, or given by an `Entry`.
+  It orders writes to records. It is separate from the write sequence,
+  which orders page versions.
+- **Entry:** one sequenced unit from a log (a WAL record or a replicated
+  log entry): a sequence and zero or more operations.
+- **Sequence source:** where a tree's operation sequences come from.
+  *Internal*: the tree's own counter (`put`, `remove`). *External*: a log
+  (`apply`, `put_logged`, `remove_logged`).
+- **Captured sequence `A`:** `last_seq` read under the exclusive gate in a
+  checkpoint. It is at least the sequence of every effect that the
+  checkpoint's image holds.
+- **Snapshot:** a store file that holds a copy of one committed image,
+  written by `Tree::write_snapshot`.
+- **Free pin:** a count, under the `superseded` mutex, that stops the
+  checkpoint's free step while a snapshot copies committed pages.
 - **Seal:** compute the page's CRC32C and store it in the `crc` header
   field.
 - **CRC32C:** the 32-bit cyclic redundancy check with the Castagnoli
@@ -172,8 +194,9 @@ in the other copy, and a torn commit leaves it intact. `MemStore::commit`
 checks the order and replaces its state under one mutex.
 
 The caller must sync its page writes before it commits. The tree commits in
-two places only, both through `Tree::commit_written`: `Tree::checkpoint`
-and the end of tree creation (see [Create](#create)).
+two places only, both through `Tree::commit_written`:
+`Tree::checkpoint_with` (which `Tree::checkpoint` calls) and the end of
+tree creation (see [Create](#create)).
 
 ### Store creation
 
@@ -385,8 +408,9 @@ pub(super) struct LeafMap {
     write_seq: AtomicU64,
     /// Shared by every write-through; exclusive for the watermark read.
     gate: RwLock<()>,
-    /// Pages that a later write replaced, with the replacing sequence.
-    superseded: Mutex<Vec<(PageNumber, u64)>>,
+    /// Pages that a later write replaced, with the replacing sequence, and
+    /// the count of snapshot pins (plan 0019).
+    superseded: Mutex<Superseded>, // { pages: Vec<(PageNumber, u64)>, pins: usize }
     // circular_buffer and classes
 }
 ```
@@ -505,7 +529,7 @@ The tree keeps three counters:
 | Counter | Where | Drawn or advanced by | Committed as |
 | --- | --- | --- | --- |
 | `write_seq` | `LeafMap` | each `write_through` call, under the gate | `W` (`State::write_seq`) |
-| `last_seq` | `Tree` | each `put` or `remove`, in the sequence closure | not committed |
+| `last_seq` | `Tree` | each `put` or `remove` (`fetch_add`), and each external sequence (`fetch_max`), before the effect; see [One sequence space](#one-sequence-space) | not committed; given to the pre-commit hook as `captured_seq` |
 | `applied` | `Tree` | `fetch_max` with the write's sequence after the leaf lock is released | `N` (`State::applied_seq`) |
 
 The common write path takes a sequence closure:
@@ -548,9 +572,9 @@ fn write_internal(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeE
   selects.
 - **After open.** `applied` and `last_seq` start at the committed `N`. New
   writes draw `N + 1` and later. A write that was above `N` and lost in a
-  crash therefore has its sequence reused by a later write. Replay from a
-  log gives replayed writes new sequences. Plan 0019 adds external
-  sequences and one sequence space across both.
+  crash therefore has its sequence reused by a later write under internal
+  sequencing. With a log, replay through `apply` keeps each entry's own
+  sequence ([Logs and sequenced writes](#logs-and-sequenced-writes)).
 - **Two sequence spaces.** Write sequences order page versions, and
   operation sequences order record writes. They are independent: one
   write-through can carry many records, and a record can be written through
@@ -562,7 +586,16 @@ fn write_internal(&self, key: &[u8], state: RecordState<'_>) -> Result<(), TreeE
 /// Make every write applied before this call durable as one atomic commit,
 /// and return the committed `State`. Writers keep running. Must not be
 /// called with a leaf lock held, for example from a scan visitor.
-pub fn checkpoint(&self) -> Result<State, TreeError>;
+pub fn checkpoint(&self) -> Result<State, TreeError> {
+    self.checkpoint_with(|_| Ok(()))
+}
+
+/// `checkpoint` with a hook that runs after the store sync and before the
+/// commit (plan 0019; see "The pre-commit hook").
+pub fn checkpoint_with(
+    &self,
+    before_commit: impl FnOnce(CommitPoint) -> Result<(), LogError>,
+) -> Result<State, TreeError>;
 ```
 
 `Tree::checkpoint` replaces plan 0013's `flush`. The name changed because
@@ -584,15 +617,16 @@ sequenceDiagram
         K->>T: release the split's right half, then the leaf
     end
     K->>G: acquire exclusive
-    K->>G: W = write_seq
+    K->>G: W = write_seq, A = last_seq
     K->>G: release
     K->>S: sync
+    K->>K: call before_commit with N and the larger of A and N
     K->>S: commit State with id + 1, N, W
-    K->>T: take superseded entries with sequence at or below W
+    K->>T: take superseded entries with sequence at or below W, unless pinned
     K->>S: free those pages
 ```
 
-The code is `Tree::checkpoint` and `Tree::commit_written` in
+The code is `Tree::checkpoint_with` and `Tree::commit_written` in
 `crates/bf-tree/src/lib.rs`:
 
 1. Lock the `checkpointing` mutex for the whole call. Two checkpoints would
@@ -606,12 +640,18 @@ The code is `Tree::checkpoint` and `Tree::commit_written` in
    before the leaf's guard. A leaf with a full page writes it back if it
    is dirty. Other leaves need nothing. The pass holds one leaf lock at a
    time, plus a split's fresh right half.
-5. **`commit_written(N)`.** Read `W` with the gate held exclusively
-   (`LeafMap::write_watermark`). Sync the store. Commit
+5. **`commit_written(N, hook)`.** Read `W` and the captured sequence `A`
+   (`last_seq`) with the gate held exclusively
+   (`LeafMap::write_watermark_with`). Sync the store. Call the hook with
+   `CommitPoint { applied_seq: N, captured_seq: max(A, N) }`; a hook error
+   returns `TreeError::Log` here
+   ([The pre-commit hook](#the-pre-commit-hook)). Commit
    `State { checkpoint_id: current + 1, applied_seq: N, write_seq: W }`.
 6. Drain the superseded entries whose sequence is at or below `W`
    (`take_superseded_through`) under the `superseded` mutex, release the
-   mutex, and free those pages.
+   mutex, and free those pages. While a snapshot holds a free pin, the
+   drain takes nothing, and a later commit frees the entries
+   ([Snapshots](#snapshots)).
 7. Return the committed `State`.
 
 A checkpoint always commits, even when nothing changed. Each call therefore
@@ -689,7 +729,9 @@ superseded. A free error does not set the store-failed flag.
   from a scan visitor would wait for the leaf that its own caller holds.
 - The checkpoint takes the gate exclusively while it holds only the
   checkpointing mutex: no leaf lock and no frame lock. The exclusive hold
-  covers one atomic load.
+  covers two atomic loads (`W` and `A`).
+- The pre-commit hook runs under the checkpointing mutex alone. Writers
+  keep running while it waits for the log.
 - The [concurrency design](bf-tree-concurrency.md#lock-order) gives the
   ranks of the checkpointing mutex, the gate, and the `superseded` mutex.
 
@@ -760,13 +802,17 @@ empty tree, not as a store with no committed page.
 configuration from it (`Tree::open_with` requires a matching one) and reads
 the committed `State`: `N` and `W`. `select(store, config, W)` in
 `crates/bf-tree/src/open.rs` then reads pages `0..page_count()` once, in
-page-number order.
+page-number order. `select` has no side effects: it returns the chosen
+page of each leaf and lists the zero, released, and erased pages, and
+`open` acts on the lists after the scan. `write_snapshot` shares `select`
+without changing the store ([Snapshots](#snapshots)). Plan 0018's `select`
+freed zero pages during the scan; plan 0019 moved those frees into `open`.
 
 ```mermaid
 flowchart TD
     A["State from the selected superblock copy: N, W"] --> B[read the next page]
     B --> Z{all zeros?}
-    Z -->|yes| F0["free at once"]
+    Z -->|yes| F0["zero list"]
     Z -->|no| H["read the raw header: write_seq, leaf. max_seen = max of write_seq"]
     H --> W1{"write_seq above W?"}
     W1 -->|yes| X[erase list]
@@ -782,7 +828,8 @@ flowchart TD
     SR -->|yes| RL[release]
     SR -->|no| E3["CorruptPage: checksum mismatch"]
     X --> ER["write zeros to each, sync once"]
-    ER --> FR["free released and erased pages"]
+    ER --> FR["free zero, released, and erased pages"]
+    F0 --> FR
     C1 --> TL["tile, bulk-build inner levels, holes"]
     C2 --> TL
     TL --> RS["write_seq counter = max of max_seen and W. applied = last_seq = N"]
@@ -793,9 +840,9 @@ flowchart TD
 For each page, in this order:
 
 1. **All zeros.** The page was allocated and never written, or it was
-   erased or discarded. `open` frees it at once, so the next allocation
-   reuses it. This test comes first: an all-zero page fails the checksum,
-   and its header reads as leaf 0.
+   erased or discarded. It goes on the zero list, and `open` frees it after
+   the scan, so the next allocation reuses it. This test comes first: an
+   all-zero page fails the checksum, and its header reads as leaf 0.
 2. **Raw header.** `open` reads `write_seq` and `leaf` from the raw header
    with `raw_header_stamps`, before any check, and raises `max_seen` to
    `write_seq`. A page that fails its checksum still contributes to
@@ -834,7 +881,7 @@ The scan returns early with the first error that steps 5 and 6 find.
    released or makes `open` fail with `CorruptPage`.
 2. **Erase.** If the erase list is not empty, `open` writes a zero page
    into each listed page number and then syncs once.
-3. **Release.** `open` frees every released and erased page. A
+3. **Release.** `open` frees every zero, released, and erased page. A
    `FreedPage` reply is accepted, because a `MemStore` that was reopened in
    the same process still knows its free list.
 4. **Rebuild.** The candidates form the page table. The tiling check and
@@ -942,6 +989,413 @@ claimed `write_seq` or `leaf` so that a surviving page outranks the
 damaged one. Detecting this needs a second, independent record of each
 committed page, such as a persisted page map or fence list.
 
+## Logs and sequenced writes
+
+The tree persists no log. A checkpoint makes the image durable, and a log
+that the caller owns makes the writes after it durable. The engine
+(plans [0020](../plans/0020-engine-wal.md) to
+[0022](../plans/0022-engine-external.md)) supplies the log: its own
+write-ahead log (WAL) in standalone mode, or a replicated log in external
+mode. The tree defines the contract, in `crates/bf-tree/src/apply.rs`:
+
+```rust
+/// One write. Payloads borrow from the caller.
+pub enum Op<'a> {
+    Put { key: &'a [u8], value: &'a [u8] },
+    Delete { key: &'a [u8] },
+}
+
+/// One sequenced unit: a WAL record or a replicated log entry. `ops` may be
+/// empty (for example, a replicated no-op entry); it still advances the
+/// applied watermark.
+pub struct Entry<'a> {
+    pub seq: u64,
+    pub ops: &'a [Op<'a>],
+}
+
+/// Assigns sequences to writes as the tree applies them.
+pub trait Log: Send + Sync {
+    fn append(&self, op: Op<'_>) -> Result<u64, LogError>;
+}
+
+/// A log failure, distinct from store failures. `Copy`, like `TreeError`.
+pub enum LogError {
+    Closed,
+    Io { op: &'static str, kind: std::io::ErrorKind, code: Option<i32> },
+    Other(&'static str),
+}
+
+impl Tree {
+    pub fn check_op(&self, op: &Op<'_>) -> Result<(), TreeError>;
+    pub fn apply(&self, entry: Entry<'_>) -> Result<(), TreeError>;
+    pub fn put_logged(&self, log: &dyn Log, key: &[u8], value: &[u8]) -> Result<u64, TreeError>;
+    pub fn remove_logged(&self, log: &dyn Log, key: &[u8]) -> Result<u64, TreeError>;
+}
+```
+
+```mermaid
+flowchart LR
+    subgraph standalone["standalone (plan 0021)"]
+        P["Db::put"] --> PL["put_logged(wal)"]
+        B["Db::write batch"] --> AB["wal.append_batch"] --> AP1["apply"]
+    end
+    subgraph external["external (plan 0022)"]
+        R["replicated entry"] --> AP2["apply"]
+    end
+    PL --> T["tree"]
+    AP1 --> T
+    AP2 --> T
+    T --> C["checkpoint_with(hook)"]
+    T --> S["write_snapshot"]
+```
+
+### The `Log` contract
+
+- `append` runs inside the write's sequence closure: with the owning
+  leaf's X lock held and the route validated, before the record is
+  applied. The sequence it returns is therefore fixed under the leaf lock,
+  and for each key, log order equals apply order.
+- `append` must return strictly increasing sequences in real time across
+  all callers. The [`N` argument](#why-n-is-complete) needs every sequence
+  at or below `N` to have been assigned before `N` was read; with this
+  rule, a lower sequence was assigned earlier, while its writer held its
+  leaf lock, so the checkpoint pass waits for that writer.
+- `append` must not wait for durability, and must not call into the tree.
+  It runs under a leaf lock; durability is the pre-commit hook's job.
+- If the tree retries a write, for example after making room in the
+  circular buffer, it calls `append` again for the same operation. The log
+  then holds an earlier record that no applied write used. Replaying both
+  records in order is harmless: the later record writes the same value.
+- An `append` error aborts the write under the lock, before anything is
+  applied, and returns `TreeError::Log`.
+
+`LogError` is kept apart from `StoreError`. A WAL disk failure reported as
+a store I/O error would look like damage to the tree file, and the engine
+could not tell which file to blame. `TreeError::Log` carries errors from
+`Log::append` and from the pre-commit hook. Plans 0020 and 0021 map
+`WalError` into `LogError`.
+
+### `apply`
+
+```rust
+pub fn apply(&self, entry: Entry<'_>) -> Result<(), TreeError> {
+    entry.ops.iter().try_for_each(|op| self.check_op(op))?;
+    self.accept_external(entry.seq)?; // latch and order; raises last_seq
+    for op in entry.ops {
+        self.write(op.key(), op.state(), &mut || Ok(entry.seq))?;
+    }
+    self.applied.fetch_max(entry.seq, Ordering::Release); // once per entry
+    Ok(())
+}
+```
+
+- **Check everything first.** `check_op` applies the key and value rules
+  of `put` and `remove`. `apply` checks every operation before it writes
+  one, so an invalid operation rejects the whole entry unchanged. `check_op`
+  is public, so a log owner can reject an operation before it logs it.
+- **Entry-granular watermark.** Every operation of an entry carries the
+  entry's sequence, and `applied` advances once, after the last operation
+  returns. A checkpoint therefore never records an `N` in the middle of an
+  entry, and a replicated applied index never falls inside one. An empty
+  entry still advances `applied`.
+- **One caller at a time.** Entries must come from one thread, in
+  increasing sequence order. With two concurrent appliers, entry 11 could
+  advance `applied` to 11 while entry 10 has not yet locked its leaf, and
+  a checkpoint could then record `N = 11` without entry 10. Parallel apply
+  would need caller-provided per-key order and a contiguous-prefix
+  watermark; it is deferred.
+- **Partial apply on a store error.** A store error after the first
+  operation can leave the entry partly applied. Its sequence is not marked
+  applied, so the same entry is accepted again. If the error was a failed
+  page write, the store-failed flag is set
+  ([Store failures](#store-failures)), so under the default
+  `StoreFailurePolicy::RejectWrites` the retry returns `StoreFailed`, and
+  only `AcceptWrites` lets it proceed in the same process. Otherwise the
+  caller reopens and replays. Replay rewrites the whole entry in order, so the partial effects
+  do no harm.
+
+### Logged writes
+
+```rust
+fn write_logged(&self, log: &dyn Log, op: Op<'_>) -> Result<u64, TreeError> {
+    self.check_op(&op)?;
+    self.claim_external()?;
+    let seq = self.write(op.key(), op.state(), &mut || {
+        let seq = log.append(op).map_err(TreeError::Log)?;
+        self.last_seq.fetch_max(seq, Ordering::AcqRel); // before the effect
+        Ok(seq)
+    })?;
+    self.applied.fetch_max(seq, Ordering::Release); // after the leaf lock
+    Ok(seq)
+}
+```
+
+`put_logged` and `remove_logged` call `write_logged` and return the log's
+sequence. In every path, a sequence enters `last_seq` before its effect is
+applied: `apply` raises it in `accept_external` before the first
+operation, and a logged write raises it inside the closure before the
+record is placed. The [captured sequence](#why-captured_seq-covers-the-image)
+depends on this order.
+
+### Logical logging
+
+Entries carry operations, and replay routes them through the tree like new
+writes. The paper describes physiological logging: each record names a
+page and an operation (§5.7). Upstream's replay re-executes inserts and
+ignores the page offset (`src/snapshot.rs`, `new_from_snapshot`). Leaves
+split and move between a write and its replay, and logical replay does not
+have to reconcile that. Shadow paging makes logical replay safe: the base
+that replay starts from is always a consistent committed tree.
+
+## One sequence space
+
+`last_seq` is the only operation-sequence counter. Internal and external
+sequences share it:
+
+| Path | Sequence source | Latch claim | Effect on `last_seq` |
+| --- | --- | --- | --- |
+| `put`, `remove` | internal: `last_seq.fetch_add(1) + 1` | `Internal` | advances by one |
+| `put_logged`, `remove_logged` | `Log::append` | `External` | `fetch_max(seq)`, under the leaf lock |
+| `apply` | `entry.seq` | `External` | `fetch_max(seq)`, before the first operation |
+| `open` | the committed `N` | resets to `Unset` | `applied = last_seq = N` |
+
+### The sequencing latch
+
+Mixing the two sources in one process is unsafe. Suppose an external log
+has applied up to 10, and then `put` takes 11. If the log's own entry 11
+arrives later, a checkpoint may already have recorded `N >= 11`, and
+replay from `N + 1` would skip entry 11. The tree therefore latches its
+source on first use:
+
+```rust
+enum Sequencing { Unset, Internal, External } // an AtomicU8 in the tree
+
+fn claim(&self, wanted: Sequencing) -> Result<(), TreeError> {
+    match self.sequencing.compare_exchange(Unset, wanted, AcqRel, Acquire) {
+        Ok(_) => Ok(()),
+        Err(current) if current == wanted => Ok(()),
+        Err(_) => Err(TreeError::MixedSequencing),
+    }
+}
+```
+
+- `put` and `remove` claim `Internal` (`write_internal` in `write.rs`).
+  `apply`, `put_logged`, and `remove_logged` claim `External`. A
+  conflicting call returns `TreeError::MixedSequencing` before it changes
+  anything.
+- Every engine mode uses one source. Standalone recovery replays through
+  `apply` and then writes through `put_logged`; both are external.
+- The latch costs one compare-and-swap per write and turns a silent replay
+  gap into an error. Documenting mixing as a caller error, with
+  `fetch_max` alone, would be simpler but would fail silently.
+- The latch resets on open. A store written with internal sequences can
+  continue under a log that starts at `N + 1`, and a store applied from a
+  log can continue with `put`. This is a deliberate choice by the caller,
+  not an accident within one process.
+
+### Stale entries
+
+`apply` rejects `seq <= applied_seq()` with
+`TreeError::SequenceOrder { seq, applied }`, and changes nothing.
+Re-applying an old entry after newer ones would overwrite newer values.
+Replay is idempotent only when it continues through every later entry in
+order, and that is the only replay that recovery performs: from `N + 1`.
+A caller that re-delivers entries (plan 0022) can skip them explicitly
+before it calls `apply`.
+
+## The pre-commit hook
+
+```rust
+/// What a checkpoint is about to commit, given to its pre-commit hook.
+pub struct CommitPoint {
+    /// `N`: every entry at or below this is in the image.
+    pub applied_seq: u64,
+    /// At least the sequence of every effect in the image, and at least
+    /// `applied_seq`. Effects above `N` may be present: the checkpoint is
+    /// fuzzy.
+    pub captured_seq: u64,
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant K as checkpoint_with
+    participant G as gate
+    participant S as store
+    participant H as hook, for example wal.sync_to
+    K->>K: N = applied, then the pass over every leaf
+    K->>G: acquire exclusive
+    K->>K: W = write_seq, A = last_seq
+    K->>G: release
+    K->>S: sync
+    K->>H: before_commit with N and the larger of A and N
+    H-->>K: Ok, or LogError to abort with no commit and no frees
+    K->>S: commit with id + 1, N, W
+    K->>K: free superseded pages at or below W unless pinned
+```
+
+### Why the hook is needed
+
+The checkpoint is fuzzy ([Why `N` is complete](#why-n-is-complete)). Pages
+written before the gate can hold effects with sequences above `N`, and in
+standalone mode their WAL records may not be durable yet. Without the
+hook, a crash after the commit can leave a committed effect with no durable
+record:
+
+- If the effect is one operation of a batch, the batch is partial. Replay
+  cannot restore the rest, because the record is gone.
+- A single write becomes visible without its record, and a replica fed
+  from the log diverges.
+
+The hook applies the write-ahead rule (a log record is durable before the
+data it describes) at checkpoint granularity. A WAL's hook syncs the log
+through `captured_seq`, and only then does the commit make the image
+durable. Plan 0021's hook is `|point| wal.sync_to(point.captured_seq)`. In
+external mode the replicated log is already durable, so the hook does
+nothing.
+
+### Why `captured_seq` covers the image
+
+`N` is too small: the image can hold effects above it. The checkpoint
+passes `A`, `last_seq` read under the exclusive gate:
+
+1. Every effect in a page with `write_seq <= W` was applied before that
+   page's write-through drew its sequence.
+2. The effect's sequence entered `last_seq` (by `fetch_add` or
+   `fetch_max`) before the effect was applied
+   ([Logged writes](#logged-writes)).
+3. The gate waits for every write-through at or below `W`
+   ([Why `W` is complete](#why-w-is-complete)), and `A` is read under the
+   same exclusive hold as `W`.
+
+So `A` is at least the sequence of every effect in the image. `A` may also
+include sequences that were assigned but not yet applied. Syncing the log
+through them costs a little and is harmless. The code passes
+`max(A, N)`, so `captured_seq >= applied_seq` holds by construction.
+Passing both values lets the engine sync exactly what is needed and log
+both.
+
+### Placement and errors
+
+- The hook runs after the store `sync` and before the `commit`. This is the
+  simplest order that keeps the write-ahead rule. Running the hook
+  concurrently with the store sync would overlap two fsyncs; plan 0023 may
+  measure that.
+- The hook holds the checkpointing mutex and no tree lock. Writers keep
+  running. It must not call `checkpoint`, which would wait for the mutex.
+- A hook error returns `TreeError::Log` and aborts the checkpoint before
+  the commit. Nothing is committed and nothing is freed: the superseded
+  entries stay in the list for a later commit. `committed()` keeps the
+  previous state. The store-failed flag is not set, because the store did
+  not fail, so a later checkpoint retries. The synced pages above the old
+  `W` stay uncommitted; the next checkpoint's `W` covers them.
+
+## Snapshots
+
+```rust
+pub fn write_snapshot(&self, out: &mut dyn Write) -> Result<State, TreeError> {
+    let _pin = self.leaves.pin_frees(); // under the `superseded` mutex
+    let store = self.leaves.store();
+    let state = store.state(); // read once
+    let selection = select(store, &self.config, state.write_seq)?; // no side effects
+    let chosen: BTreeMap<_, _> = /* chosen pages by leaf index */;
+    tile(/* the chosen bounds */)?; // the output must open
+    store.superblock().encode(&state, &mut block)?;
+    out.write_all(&block)?; // copy 0
+    out.write_all(&block)?; // copy 1
+    for chosen in chosen.values() {
+        store.read(chosen.page_number, &mut page)?;
+        out.write_all(&page)?; // dense: snapshot page i
+    }
+    out.flush()?;
+    Ok(state)
+}
+```
+
+`Tree::write_snapshot` writes a consistent copy of the committed image to
+any `std::io::Write`, while writers and checkpoints keep running, and
+returns the committed `State` that the copy holds. A follower installs it
+by opening it (plan 0022).
+
+### Format
+
+The output is a store file:
+
+- The 8 KiB superblock area: the same 4096-byte copy twice, encoded by
+  `Superblock::encode` from the tree's configuration and `state`. Both
+  copies carry `state.checkpoint_id`, so selection takes copy 0 on the
+  tie, as for a new store.
+- Then the committed page of each leaf, in leaf-ID order, at dense page
+  numbers `0..k`. Holes take no page.
+
+`FileStore::open` and `Tree::open` read the file. The opened tree's
+`committed()` is the returned state, and its `applied_seq` says where a log
+resumes: at `N + 1`. Pages are copied verbatim, so their leaf stamps,
+write sequences, and CRCs ([plan 0017](../plans/0017-bf-tree-store-format.md))
+stay valid, and open verifies them as it verifies any store. Every page's
+`write_seq` is at or below the copied `W`, so open keeps every page. Only
+page numbers change, and open rebuilds the leaf-to-page table from the
+stamps.
+
+### The state is read once
+
+Selection and the output superblock must use the same `State`. If they
+read it separately, a commit in between could pair them wrongly:
+
+- A superblock with `W_old` and pages selected under `W_new > W_old`:
+  opening the snapshot would treat those pages as written after the
+  checkpoint and erase them, so leaves would go missing.
+- A superblock with the newer `N` and pages selected under the older `W`:
+  the superblock would claim an `N` that the pages do not reflect, and
+  replay from `N + 1` would skip entries.
+
+### The free pin
+
+`pin_frees` increments the pin count under the `superseded` mutex, and the
+returned `FreePin` decrements it when it drops. While any pin is held,
+`take_superseded_through` drains nothing, so the free step keeps every
+covered entry for a later commit. The pin is taken before `state()` is
+read:
+
+- A free step that drained before the pin was taken ran after its commit,
+  so `state()` already reflects that commit, and that commit references
+  none of the pages it frees.
+- A free step that drains after the pin sees it and frees nothing.
+
+The committed pages of `state` are therefore never freed, and so never
+reused by a writer, during the copy. Without the pin, a commit can free a
+committed page during the scan and a writer can reuse it; the snapshot
+then fails to tile. A pin defers frees and therefore grows the file while
+it is held, by the pages that writers replace.
+
+### Concurrent writers and checkpoints
+
+Writers write only fresh pages: new pages, or pages freed before the pin.
+None of them is in the committed image of `state`. A read that races a
+write into such a page sees a page whose `write_seq` is above `W`, which
+selection ignores, or a page whose header still names an older,
+superseded page of some leaf, which the suspect rule releases
+([Suspect pages](#suspect-pages)). `select` reads `page_count()` once, so
+pages allocated during the scan are not read. A checkpoint that commits
+during the copy changes neither `state` nor the chosen pages.
+
+### Selection without side effects
+
+`select` reports the pages to free and erase and changes nothing, so
+`write_snapshot` can run it on a live store. Erasing and releasing pages
+remain `open`'s job. A snapshot of a damaged store fails with the same
+`CorruptPage` or `InconsistentLeaves` error that `open` would return.
+
+### Errors and cost
+
+- An error from `out` is `TreeError::SnapshotOutput { kind, code }`,
+  distinct from store errors for the same reason as `LogError`. Store
+  errors during the scan or the copy remain `TreeError::Store`.
+- `write_snapshot` calls `out.flush()`, not a sync. Making a snapshot file
+  durable is the caller's job.
+- The cost is one read of every store page (selection), then one more read
+  of each chosen page. Memory is proportional to the leaf count.
+
 ## Guarantees and their tests
 
 Test paths are relative to each crate's `src/`. Tree tests are in
@@ -1006,17 +1460,70 @@ runs.
 The model, concurrent, contention, and buffered suites run every write
 through shadow paging and every `flush` call site as `checkpoint`.
 
+### Logs, the hook, and snapshots (plan 0019)
+
+| Guarantee | Tests |
+| --- | --- |
+| Entries applied through `apply`, with gaps between sequences, equal an oracle, and `applied_seq` follows each entry | `tests/apply.rs`: `applied_entries_match_the_oracle` |
+| An invalid operation rejects the whole entry unchanged, and `applied_seq` does not move | `tests/apply.rs`: `an_invalid_op_rejects_the_whole_entry_unchanged` |
+| An empty entry and a multi-op entry each advance the watermark once; later operations in an entry win | `tests/apply.rs`: `empty_and_multi_op_entries_advance_the_watermark_once` |
+| Logged writes take the log's sequence and advance `applied_seq` to it | `tests/apply.rs`: `logged_writes_take_the_log_sequence` |
+| A failing `append` applies nothing and returns `TreeError::Log` | `tests/apply.rs`: `a_failing_append_applies_nothing` |
+| The log sequence is fixed under the leaf lock: concurrent logged writes to one key end at the value of the highest sequence | `tests/apply.rs`: `concurrent_logged_writes_to_one_key_end_at_the_highest_sequence` (4 threads) |
+| Internal and external sequences cannot be mixed in one process, in either order, and a rejected write changes nothing | `tests/apply.rs`: `internal_and_external_sequences_cannot_be_mixed` |
+| An entry at or below `applied_seq` returns `SequenceOrder` and changes nothing | `tests/apply.rs`: `stale_entries_are_rejected` |
+| `last_seq` follows the highest external sequence; the latch resets on open, and internal sequences continue from the committed `N` | `tests/apply.rs`: `the_latch_resets_on_open_and_sequences_continue_from_the_commit` |
+| An entry that fails on a store error is not marked applied and is accepted again | `tests/apply.rs`: `a_failed_entry_can_be_retried` (`AcceptWrites`) |
+| The hook runs before the commit and sees `N` and a `captured_seq` at or above it | `tests/apply.rs`: `the_hook_sees_the_captured_sequence_before_the_commit` |
+| A hook error returns `TreeError::Log`, commits and frees nothing, does not set the store-failed flag, and a later checkpoint succeeds | `tests/apply.rs`: `a_hook_error_commits_and_frees_nothing` |
+| With writers running, every committed value has a sequence at or below the `captured_seq` that the hook saw | `tests/apply.rs`: `captured_seq_covers_every_committed_effect` (3 writers) |
+| A quiet snapshot is dense, excludes uncommitted writes, and opens at the committed state | `tests/snapshot.rs`: `a_quiet_snapshot_equals_the_committed_tree` |
+| A snapshot taken during a write storm with a checkpoint thread opens at the returned state, passes `check_invariants`, and equals the leader after replay above its `N` | `tests/snapshot.rs`: `a_snapshot_during_a_write_storm_is_a_consistent_replica` (3 writers, 5 snapshots) |
+| A pin defers frees until a commit after the pin ends | `tests/snapshot.rs`: `a_pin_defers_frees_until_a_commit_after_it_ends` |
+| A failing output returns `SnapshotOutput` | `tests/snapshot.rs`: `a_failing_output_reports_snapshot_output` |
+| With a log that loses unsynced records, after any injected crash, open plus replay of the durable log equals the state of the durable log: no batch is partial, no committed effect lacks a durable record, and `N` never passes the durable log | `tests/logged.rs`: `recovery_with_a_lossy_log_replays_to_the_durable_state` (1 KiB buffer), `recovery_with_a_lossy_log_and_a_large_buffer` (64 KiB buffer, full pages) |
+| A follower that opens a snapshot file through `FileStore` and applies the log above its `N` equals the leader | `tests/logged.rs`: `a_follower_catches_up_from_a_snapshot_and_the_log` |
+
+The lossy log (`LossyLog` in `tests/logged.rs`) keeps a durable prefix and
+a volatile tail of records. The hook's `sync_to` moves the prefix forward,
+and a crash keeps the prefix plus a random prefix of the tail. The model
+mixes batches (`apply` of up to four operations after logging them),
+`put_logged`, `remove_logged`, and `checkpoint_with`, on plan 0018's fault
+store, with store deaths, commit faults after the superblock copy lands,
+and log sync failures. Three mutations made the tests fail: giving the
+hook only `N` (`captured_seq_covers_every_committed_effect`), removing the
+free pin (the storm snapshot test), and checkpointing without the hook (the
+lossy-log model, at once). Plan 0019 records the seeds, rounds, and
+repeated runs.
+
 ## Not yet guaranteed
 
 - **Writes after the last commit are lost on a crash or a close.** `open`
   selects the committed image and erases every later page, so merged and
   evicted writes after the last checkpoint are lost too, not only buffered
-  ones. The tree has no log yet. The write-ahead log is plan 0020, and
-  plan 0019 adds `apply` and the log hook.
+  ones. The tree persists no log; a caller's log, replayed through `apply`
+  from `N + 1`, restores them. The engine's write-ahead log is
+  [plan 0020](../plans/0020-engine-wal.md).
 - **The committed image is fuzzy.** It contains every operation at or
   below `N` and possibly some above `N`, per key. Only replay above `N`
   from a log gives an exact state. Without a log, a reopened tree holds,
   for each key, the value after some operation in `[N, last]`.
+- **The tree trusts the log's contract.** It does not check that `append`
+  returns strictly increasing sequences in real time, that `apply` has one
+  caller at a time, or that the hook made the log durable through
+  `captured_seq`. A log that breaks these rules can make a checkpoint
+  record an `N` that replay cannot complete.
+- **A failed entry can stay partly applied.** A store error inside `apply`
+  leaves earlier operations of the entry in place until a retry or a
+  reopen and replay. Readers can see them meanwhile.
+- **Entries are not isolated from readers.** A reader can see some
+  operations of an entry before `apply` returns. Transactions are out of
+  scope.
+- **A snapshot pin defers frees.** While `write_snapshot` runs, no
+  superseded page is freed, so the file grows by the pages that writers
+  replace during the copy.
+- **A snapshot is not synced.** `write_snapshot` flushes its output but
+  does not sync it.
 - **Header corruption can roll a leaf back silently.** See
   [Known limit](#known-limit-the-header-of-a-failed-page-is-trusted).
 - **Header atomicity is assumed, not checked.** See
@@ -1035,8 +1542,6 @@ through shadow paging and every `flush` call site as `checkpoint`.
   for faster open is deferred.
 - **Leaves are never reclaimed.** An empty leaf keeps its fences and its
   page.
-- **No snapshot pins pages.** Plan 0019 adds a snapshot pin that the free
-  step checks.
 
 ## The CRC32C source
 
@@ -1054,18 +1559,20 @@ rejected (plan 0017, resolved question 2).
 
 ## Extension points
 
-- **Plan 0019 (apply, log hook, snapshots)** adds `apply`, `put_logged`,
-  `remove_logged`, the `Log` trait, and one sequence space across internal
-  and external sequences. It uses the same `write` closure, `applied`, and
-  `last_seq`. It adds a pre-commit hook between `sync` and `commit`
-  (`checkpoint_with`), and a snapshot pin that the free step checks under
-  the `superseded` mutex. `select` takes the `W` to select against as a
-  parameter, so a snapshot can pass the state it read once. Snapshot files
-  use `Superblock::encode` and dense page numbers; pages are copied
-  verbatim, so their stamps and checksums stay valid. The plan must not
-  change the protocol, `write_through`, or the selection rule.
-- **Plan 0021** calls `checkpoint_with` from a policy thread. The
-  checkpointing mutex makes concurrent calls safe without stalling writers.
+- **Plan 0020 (WAL)** adds nothing tree-side. Its `append` must return
+  sequences that are strictly increasing in real time, and its
+  `sync_to(seq)` serves the pre-commit hook.
+- **Plan 0021 (`Db`)** wraps the WAL in a `Log` adapter and uses
+  `put_logged`, `remove_logged`, `apply` for batches and replay,
+  `checkpoint_with(|p| wal.sync_to(p.captured_seq))` from a policy thread,
+  `wal.truncate_below(state.applied_seq)`, and `write_snapshot`. The
+  checkpointing mutex makes concurrent calls safe without stalling
+  writers. It must not need new tree hooks.
+- **Plan 0022 (external mode)** calls `apply` from the replicated log and
+  installs `write_snapshot` output by opening it.
+- **Parallel apply (deferred)** would need caller-provided per-key order
+  and a contiguous-prefix applied watermark instead of `fetch_max`. The
+  `Entry` and `Log` types would not change.
 - **Plan 0023 (direct I/O and measurements)** adds an I/O mode to
   `FileStore`, and measures checkpoint cost against dirty leaves and open
   cost against the page count. The 4096-byte copies, full-copy writes, and
@@ -1085,10 +1592,18 @@ rejected (plan 0017, resolved question 2).
 - [Plan 0018](../plans/0018-bf-tree-checkpoint.md): shadow paging, the
   checkpoint protocol, recovery, its verification outcomes, and its
   discoveries.
+- [Plan 0019](../plans/0019-bf-tree-apply.md): the log contract, the
+  sequence rules, the pre-commit hook, snapshots, its verification
+  outcomes, and its discoveries.
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.3 (base pages and the
   mapping table) and §5.7 (logging, snapshots, and recovery). peppydb's
   checkpoint is fuzzy and does not pause writers, unlike the paper's online
-  snapshot.
+  snapshot. peppydb logs logically, unlike the paper's physiological
+  records ([Logical logging](#logical-logging)).
+- Upstream's WAL and replay:
+  [`src/wal/`](https://github.com/microsoft/bf-tree/tree/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/wal)
+  (`mod.rs`, `append_and_wait`; `operations.rs`, the record shape) and
+  `src/snapshot.rs` (`new_from_snapshot` replays logically).
 - [Microsoft implementation](../references.md#microsoft-bf-tree-implementation),
   revision `f442e6172bf7e5483ff320d8e3ac16a70e31bbd6`:
   [`src/fs/mod.rs`](https://github.com/microsoft/bf-tree/blob/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/fs/mod.rs)

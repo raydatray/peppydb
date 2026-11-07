@@ -15,6 +15,7 @@ mod disk;
 mod evict;
 mod frames;
 mod full;
+mod logged;
 mod model;
 mod open;
 mod overlay;
