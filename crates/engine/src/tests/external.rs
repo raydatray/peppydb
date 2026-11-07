@@ -129,9 +129,16 @@ fn a_reopen_resumes_at_the_committed_sequence() {
     let db = Db::open(dir.path(), external()).unwrap();
     assert_eq!(db.applied_seq(), 30);
     assert_eq!(contents(&db).len(), 30);
-    // The owner redelivers from 31.
+    // The owner redelivers what it retained, from a little below the
+    // commit: entries at or below 30 are skipped.
     for seq in 25..=50u64 {
-        db.apply(seq, &[put(&seq.to_be_bytes(), b"v")]).unwrap();
+        let applied = db.apply(seq, &[put(&seq.to_be_bytes(), b"v")]).unwrap();
+        let expected = if seq <= 30 {
+            Applied::AlreadyApplied
+        } else {
+            Applied::Applied
+        };
+        assert_eq!(applied, expected, "seq {seq}");
     }
     assert_eq!(contents(&db).len(), 50);
     db.close().unwrap();

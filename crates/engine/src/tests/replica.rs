@@ -217,6 +217,7 @@ fn the_stream_helper_reads_the_whole_log() {
     leader.put(b"a", b"1").unwrap();
     leader.put(b"b", b"2").unwrap();
     let entries = stream(&leader);
-    assert_eq!(entries.iter().map(|e| e.0).collect::<Vec<_>>(), [1, 2]);
+    let seqs: Vec<_> = entries.iter().map(|e| e.0).collect();
+    assert_eq!(seqs, [1, 2]);
     assert_eq!(state_at(&entries, 2), contents(&leader));
 }
