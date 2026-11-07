@@ -45,6 +45,12 @@ fn file() -> Box<dyn PageStore> {
         fn superblock(&self) -> &Superblock {
             self.store.superblock()
         }
+        fn state(&self) -> State {
+            self.store.state()
+        }
+        fn commit(&self, state: &State) -> Result<(), StoreError> {
+            self.store.commit(state)
+        }
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -228,5 +234,33 @@ fn threads_write_distinct_slots_and_read_them_back() {
                 });
             }
         });
+    });
+}
+
+#[test]
+fn commits_must_follow_the_current_checkpoint() {
+    for_each_backend(|store| {
+        assert_eq!(store.state(), State::default());
+        let first = State {
+            checkpoint_id: 1,
+            applied_seq: 7,
+            write_seq: 9,
+        };
+        store.commit(&first).unwrap();
+        assert_eq!(store.state(), first);
+        for id in [0, 1, 3] {
+            let wrong = State {
+                checkpoint_id: id,
+                ..first
+            };
+            assert_eq!(
+                store.commit(&wrong),
+                Err(StoreError::CommitOrder {
+                    current: 1,
+                    got: id
+                })
+            );
+        }
+        assert_eq!(store.state(), first, "a rejected commit changes nothing");
     });
 }

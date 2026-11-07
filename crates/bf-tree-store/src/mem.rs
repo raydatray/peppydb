@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{PageStore, StoreError, Superblock, check_buffer};
+use super::{PageStore, State, StoreError, Superblock, check_buffer, check_commit_order};
 use bf_tree_node_id::LeafId;
 use bf_tree_sync::{Mutex, Table};
 
@@ -14,6 +14,7 @@ pub struct MemStore {
     slots: Table<MemSlot>,
     /// Freed slot indices, reused last-in first-out. Also serializes growth.
     free: Mutex<Vec<usize>>,
+    state: Mutex<State>,
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +33,7 @@ impl MemStore {
             superblock,
             slots: Table::new(),
             free: Mutex::new(Vec::new()),
+            state: Mutex::new(State::default()),
         })
     }
 
@@ -111,5 +113,16 @@ impl PageStore for MemStore {
 
     fn superblock(&self) -> &Superblock {
         &self.superblock
+    }
+
+    fn state(&self) -> State {
+        *self.state.lock()
+    }
+
+    fn commit(&self, state: &State) -> Result<(), StoreError> {
+        let mut current = self.state.lock();
+        check_commit_order(&current, state)?;
+        *current = *state;
+        Ok(())
     }
 }

@@ -41,7 +41,7 @@ use bf_tree_page::{Fence, Fences, Page};
 pub use bf_tree_inner::InnerError;
 pub use bf_tree_node_id::LeafId;
 pub use bf_tree_page::PageError;
-pub use bf_tree_store::{FileStore, MemStore, PageStore, StoreError, Superblock};
+pub use bf_tree_store::{FileStore, MemStore, PageStore, State, StoreError, Superblock};
 
 mod evict;
 mod frames;
@@ -346,7 +346,7 @@ impl Tree {
                 "store superblock differs from the configuration",
             ));
         }
-        if store.slots() != 0 {
+        if store.slots() != 0 || store.state() != State::default() {
             return Err(TreeError::InvalidStore("store already holds pages"));
         }
 
