@@ -1,6 +1,6 @@
 # 0018: Shadow paging, checkpoint, and recovery
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Persistence](../design/bf-tree-persistence.md)
 (created by plan 0017), [concurrency](../design/bf-tree-concurrency.md),
@@ -24,7 +24,7 @@ but whose right half did not. Nothing records which writes the store
 reflects. This stack makes the store crash-atomic and makes the
 checkpoint record what it contains:
 
-- **Shadow paging:** Every page write goes to a fresh slot and carries a
+- **Shadow paging:** Every page write goes to a fresh page and carries a
   global write sequence. A committed page is never overwritten.
 - **Checkpoint:** The superblock commit is the only step that changes what
   a reopen selects. It records the applied watermark `N` and the write
@@ -33,8 +33,8 @@ checkpoint record what it contains:
   were written after `W`, so that they cannot reappear after a later
   commit.
 
-- **In scope:** rename `lsn` to `write_seq`; fresh-slot `write_through`
-  under a write-through gate; the superseded-slot list; `Tree::checkpoint`
+- **In scope:** rename `lsn` to `write_seq`; fresh-page `write_through`
+  under a write-through gate; the superseded-page list; `Tree::checkpoint`
   (renamed from `flush`) with `N`, `W`, commit, and freeing; the `seq`
   closure on the internal write path, with `applied` and `last_seq`
   watermarks; `create` commits an initial checkpoint; `open` selection,
@@ -44,7 +44,8 @@ checkpoint record what it contains:
 - **Out of scope:** `Tree::apply`, the `Log` trait, the pre-commit hook,
   one sequence space across internal and external sequences, and snapshots
   (plan 0019); the WAL (plan 0020); direct I/O and measurements (plan
-  0023); page checksums, a persisted fence list, and leaf reclamation.
+  0023); a persisted fence list and leaf reclamation. (Plan 0017 adds the
+  page checksum; this stack uses it to classify pages.)
 - **Done when:** checkpoints run while writers and evictions run; after
   every injected crash `open` succeeds, reports the last committed `N`, and
   replaying the oracle's entries above `N` yields the oracle's final state;
@@ -71,25 +72,25 @@ writers (§5.7). This stack deliberately departs from that.
 
 | Bytes | Field | Before | After |
 | --- | --- | --- | --- |
-| `8..16` | `backing_leaf` | leaf stamp (plan 0017, option A) | unchanged |
+| `8..16` | `backing_leaf` | the leaf a mini-page overlays; none for base pages | unchanged |
 | `16..24` | `lsn` | inactive | `write_seq`: the write-through operation that wrote this page; both halves of a split share one value; zero in mini-pages |
-| `24..32` | `snapshot_version` | inactive | still inactive; reserved for a page checksum |
+| `24..32` | `leaf` (U32) + `crc` (U32) | leaf stamp and page CRC32C (plan 0017) | unchanged; `crc` also covers `write_seq` |
 
-### Write-through to fresh slots
+### Write-through to fresh pages
 
 ```rust
 pub(crate) struct LeafMap {
     // ... fields from plans 0012-0017
-    slots: Table<AtomicU64>,
+    pages: Table<AtomicU64>,
     /// Last write sequence drawn. A page's `write_seq` is the value its
     /// write-through drew.
     write_seq: AtomicU64,
     /// Held shared by every write-through for its whole duration; held
     /// exclusively by a checkpoint to read `write_seq` with none in flight.
     gate: RwLock<()>,
-    /// Slots that a later write of the same leaf replaced, each with the
-    /// replacing write's sequence.
-    superseded: Mutex<Vec<(Slot, u64)>>,
+    /// Page numbers that a later write of the same leaf replaced, each
+    /// with the replacing write's sequence.
+    superseded: Mutex<Vec<(PageNumber, u64)>>,
 }
 
 pub(crate) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<u64, TreeError> {
@@ -97,12 +98,13 @@ pub(crate) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<
     let seq = self.write_seq.fetch_add(1, Ordering::AcqRel) + 1;
     for (leaf, bytes) in pages.iter_mut() {
         let page = Page::mut_from_bytes(bytes)?;
-        page.set_backing_leaf(Some(*leaf));
         page.set_write_seq(seq);
-        let slot = self.store.alloc()?;
-        self.store.write(slot, bytes)?;
-        let old = self.slots[leaf.index()].swap(slot.raw(), Ordering::AcqRel);
-        if let Some(old) = Slot::new(old) {
+        page.set_leaf(Some(*leaf))?;
+        page.seal(); // last: the CRC covers write_seq and leaf
+        let page_number = self.store.alloc()?;
+        self.store.write(page_number, bytes)?;
+        let old = self.pages[leaf.index()].swap(page_number.raw(), Ordering::AcqRel);
+        if let Some(old) = PageNumber::new(old) {
             self.superseded.lock().push((old, seq));
         }
     }
@@ -112,13 +114,13 @@ pub(crate) fn write_through(&self, pages: &mut [(LeafId, &mut [u8])]) -> Result<
 
 - A split passes both halves in one call, so both share one `seq`. A crash
   commits both halves or neither, and tiling holds.
-- A superseded slot is not freed at once, even if no commit ever selected
+- A superseded page is not freed at once, even if no commit ever selected
   it. A checkpoint that has read its `W` but not yet committed may have
-  selected that slot. The first commit whose `W` covers the replacing
+  selected that page. The first commit whose `W` covers the replacing
   write frees it.
 - **File growth:** Between checkpoints, a leaf written through `n` times
-  holds `n + 1` slots. Checkpoint frequency bounds file growth. Freed
-  slots are reused before the file grows, and the file never shrinks.
+  holds `n + 1` pages. Checkpoint frequency bounds file growth. Freed
+  pages are reused before the file grows, and the file never shrinks.
 
 ### Sequences and watermarks
 
@@ -185,7 +187,7 @@ sequenceDiagram
     K->>G: release
     K->>S: sync
     K->>S: commit(State { id + 1, N, W })
-    K->>T: free superseded slots with seq <= W (unless a snapshot pins them)
+    K->>T: free superseded pages with seq <= W (unless a snapshot pins them)
 ```
 
 The pass is the merge loop from plan 0013's `flush` plus plan 0015's
@@ -220,7 +222,7 @@ or in a later page of the same leaf that is also `<= W`.
 
 **Why `W` is complete at commit.** Every write-through holds the gate
 shared from drawing its sequence until it has written every page, swapped
-the slot table, and recorded its superseded slots. The exclusive
+the page table, and recorded its superseded pages. The exclusive
 acquisition waits for all write-throughs in flight. So every operation
 with sequence `<= W` has finished its writes before `sync`, and its
 superseded entries are in the list before the free step. Operations that
@@ -231,16 +233,41 @@ Buffered writes never take it.
 **Why freeing is safe.** An entry `(old, s)` with `s <= W` means a page of
 the same leaf with sequence `s` (or later) is committed. The committed
 image therefore does not reference `old`. Freeing happens after `commit`
-returns, so a crash before the free step only leaves extra slots for
+returns, so a crash before the free step only leaves extra pages for
 `open` to release.
 
 **Failures.** A store error in the pass, `sync`, or `commit` returns
 without committing or freeing anything. After a failed `sync` or `commit`,
 the operating system may have dropped dirty pages, and a later sync can
-report success without them. So a failed sync or commit sets a flag, and
-every later `checkpoint` returns `TreeError::CheckpointFailed`. The caller
-must reopen. Reads and writes continue. (This is an open question to
-confirm.)
+report success without them ("fsyncgate"). So a failed sync or commit sets
+a store-failed flag:
+
+- Every later `checkpoint` returns `TreeError::CheckpointFailed`, always:
+  a commit could otherwise name pages that never reached the disk.
+  `Tree::store_failed()` reports the flag. Reopening clears it, because
+  `open` reads only what the last good commit covers.
+- Reads always continue.
+- Writes follow `TreeConfig::on_store_failure`:
+
+```rust
+/// What writes do after a failed sync or commit. Checkpoints always fail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StoreFailurePolicy {
+    /// `put`, `remove`, and later write APIs return
+    /// `TreeError::StoreFailed`. Fail-stop: the operator must reopen.
+    #[default]
+    RejectWrites,
+    /// Writes continue. For deployments whose durability comes from a log
+    /// (plan 0022's external mode): the tree keeps serving until restarted.
+    AcceptWrites,
+}
+```
+
+The default rejects writes: with checkpoints only, no later write can
+become durable in this process, and with the WAL of plan 0021 the log
+could never be truncated. Like the caching knobs, the setting is a process
+setting and is not stored in the superblock. Eviction write-throughs may
+still fail on the same device; their errors reach the writer as before.
 
 ### Create
 
@@ -253,61 +280,86 @@ tree, not as a store with no committed page.
 
 ```mermaid
 flowchart TD
-    A[State from the selected superblock: N, W] --> B[read every slot]
+    A[State from the selected superblock: N, W] --> B[read every page]
     B --> Z{all zeros?}
     Z -->|yes| F[release]
-    Z -->|no| H[read the header before validation, max_seen = max of write_seq]
+    Z -->|no| H["read the raw header before any check: write_seq, leaf, max_seen = max of write_seq"]
     H --> W1{write_seq > W?}
     W1 -->|yes| X[erase list]
-    W1 -->|no| V{Page::validate, fences, limits, names a leaf?}
-    V -->|no| SU[suspect]
+    W1 -->|no| K{checksum matches?}
+    K -->|no| SU[suspect: page failing its CRC]
+    K -->|yes| V{"Page::validate, fences, limits, names a leaf?"}
+    V -->|no| E[CorruptPage]
     V -->|yes| C[candidate: keep the highest write_seq per leaf, release the loser]
-    SU --> SR{names no leaf, or its leaf has a candidate with write_seq >= its claim?}
+    SU --> SR{"header did not land (write_seq 0), or its leaf has a candidate with write_seq >= its claim?"}
     SR -->|yes| F
-    SR -->|no| E[CorruptSlot]
+    SR -->|no| E
     X --> ER[write zeros to each, sync, then release]
     C --> T[tile, bulk-build, holes]
     T --> R["write_seq counter = max(max_seen, W), applied = last_seq = N"]
 ```
 
-| What a slot holds after a crash | `open` |
+| What a page number holds after a crash | `open` |
 | --- | --- |
 | all zeros | release: allocated, never written |
 | intact page, `write_seq > W` | erase and release: written after the checkpoint |
-| torn page whose header landed (`write_seq > W`) | erase and release |
+| page failing its CRC, header `write_seq > W` | erase and release: written after the checkpoint, so a crash can tear it |
 | intact page, `write_seq <= W`, newest for its leaf | **committed page** |
 | intact page, `write_seq <= W`, older than another page of its leaf | release: superseded |
-| torn page in a new slot whose header did not land (no leaf) | release |
-| torn page in a reused slot with the old header (an older page of some leaf) | release: that leaf has a newer committed page |
-| invalid page claiming `<= W` with no newer page of its leaf | `CorruptSlot { slot, reason }` |
+| page failing its CRC in a new page number whose header did not land (zero header, `write_seq` 0) | release |
+| page failing its CRC in a reused page number with the old header (an older page of some leaf) | release: that leaf has a newer committed page |
+| page failing its CRC, header `write_seq <= W`, with no newer page of its leaf | `CorruptPage { page_number, reason }` |
+| intact page, `write_seq <= W`, that fails validation or names no leaf | `CorruptPage`: a bug wrote it |
 
 **Erase pages above `W` before the next commit.** Suppose `open` only
 released such a page `P` (leaf `L`, sequence `s > W`) and restarted the
-counter above `s`. If no later write reuses `P`'s slot, the next commit
+counter above `s`. If no later write reuses `P`'s page number, the next commit
 has `W' > s`. A second crash and open would then find `P` at or below
 `W'`. If `L` was not written since the first open, `P` would win over
 `L`'s committed page and resurrect state that the first recovery
 discarded. That state includes effects that the log may never have made
 durable, or one half of a split whose sibling was lost. So `open` writes
-a zero page into every slot whose header claims `> W`, syncs once, and
-only then releases those slots. The cost is bounded by the write-throughs
+a zero page into every page whose header claims `> W`, syncs once, and
+only then releases those pages. The cost is bounded by the write-throughs
 since the last checkpoint.
 
 Restarting the counter above `max_seen`, not only above `W`, keeps every
 sequence in the file unique. The argument then does not depend on every
 erase having landed. An open generation stored in the superblock and in
 each page would also fence these pages, but it needs a header field, and
-the only free one is reserved for a checksum.
+none is free: plan 0017 uses the last inactive field for the leaf stamp and
+the page CRC.
 
-**Suspect pages and checksums.** Structural validation decides torn pages
-here. A page checksum would detect corruption that still validates, such
-as damaged value bytes. It would not remove the superseded and nameless
-rules: a torn page fails a checksum just as it may fail validation. It
-would close one silent case. Suppose bit rot raises a committed page's
-`write_seq` above `W`. `open` erases that page, and an older superseded
-page of the same leaf, still in a freed slot, can win. With a checksum,
-the damaged header would be detected first. Checksums remain deferred
-(see plan 0017's open question on base-page identity).
+**Pages that fail their CRC.** Plan 0017's page CRC32C decides torn and
+damaged pages here; structural validation of a page that passes its CRC
+only catches bugs. A page that fails its CRC is torn or corrupt. `open`
+reads `write_seq` from the raw header anyway, because the header lands
+atomically (see below):
+
+- If `write_seq > W`, the page was written after the checkpoint, and a
+  crash can tear it. `open` erases and releases it.
+- Otherwise the header claims a page synced before the checkpoint
+  committed, and a crash cannot tear such a page. A crash can still leave
+  this header in two cases where the body is a newer, torn write: a write
+  into a new page number whose header sector did not land (the header is
+  zero, and no real page has `write_seq` 0), and a write into a reused page
+  number whose header sector still holds an older, superseded page of some
+  leaf. In the second case that leaf has a committed page with a higher
+  `write_seq`, because a superseded page is freed only after a commit
+  covers its replacement. `open` releases the page in both cases.
+- Any other page that fails its CRC with `write_seq <= W` is damage to a
+  committed page, and `open` fails with `CorruptPage`.
+
+**Known limit: the header of a failed page is trusted.** Classification
+reads `write_seq` and `leaf` from a page whose CRC failed. If corruption
+changes a committed page's header to claim `write_seq > W`, `open` erases
+that page. Open then fails the tiling check, unless an older superseded
+copy of the leaf survives in a freed page. In that case the leaf silently
+rolls back to that copy. The same happens if corruption changes the
+claimed `write_seq` or `leaf` so that a surviving page outranks the
+damaged one. Detecting this
+would need a second, independent record of each committed page, such as a
+persisted page map or fence list.
 
 **Header atomicity assumption.** The 32-byte header lies in the first
 device sector of a page and lands atomically. The crash model tears at
@@ -315,18 +367,24 @@ device sector of a page and lands atomically. The crash model tears at
 
 ## Decisions and trade-offs
 
-- **Superseded list instead of a committed/current slot pair:** A pair
-  cannot express "free this intermediate slot only after a commit covers
+- **Superseded list instead of a committed/current page pair:** A pair
+  cannot express "free this intermediate page only after a commit covers
   its replacement". The list can, and it costs 16 bytes per write-through
   until the next checkpoint.
 - **Selection by header scan, not a mapping-table file:** `open` already
-  reads every slot to rebuild inner nodes. A persisted map would be a
+  reads every page to rebuild inner nodes. A persisted map would be a
   second structure to make atomic. A fence list for faster open is
   deferred.
 - **Erase at open:** This is the smallest fix that keeps the selection
   rule purely "newest at or below `W`". The alternatives (an open
   generation, or a persisted discard range) need header space or
   superblock state that grows with crashes.
+- **Classify a page that fails its CRC by its header:** A crash can tear
+  only pages written after `W`, or a new write whose header sector did not
+  land, so the header decides between erase, release, and `CorruptPage`.
+  The known limit is that corruption of a committed page's header can
+  make it look uncommitted or superseded; see
+  [Pages that fail their CRC](#open-select-the-committed-image).
 - **Gate as `RwLock<()>` from `bf-tree-sync`:** Write-throughs share it.
   The checkpoint holds it exclusively for one load. Lock order (final):
   leaf lock -> frame write locks -> `root_grow` -> gate (shared) ->
@@ -357,17 +415,17 @@ device sector of a page and lands atomically. The crash model tears at
 - **Plan 0021** calls `checkpoint_with` from a policy thread. The
   checkpointing mutex makes concurrent calls safe without stalling writers.
 - **Plan 0023** measures checkpoint cost against dirty leaves and open cost
-  against slots, under both I/O modes.
+  against the page count, under both I/O modes.
 - **Leaf reclamation (deferred)** must erase, or otherwise fence, every
-  stored page of a reclaimed leaf before it commits. Freed slots keep old
+  stored page of a reclaimed leaf before it commits. Freed pages keep old
   pages, and selection would otherwise resurrect the leaf.
 - **Persisted fence list (deferred)** would make open proportional to
-  leaves rather than slots. Selection by header stays as the repair path.
+  leaves rather than pages. Selection by header stays as the repair path.
 
 ## Proposed commit stack
 
 Eight diffs. Diff 3 keeps the tree green between in-place writes and
-commits: fresh slots make old pages look like duplicate leaves, so open
+commits: fresh pages make old pages look like duplicate leaves, so open
 must select the newest page per leaf in the same diff.
 
 ### `[1/8][bf-checkpoint][plan] define shadow paging and checkpoints`
@@ -386,7 +444,7 @@ must select the newest page per leaf in the same diff.
 - **Verification:** Layout constants; the page model checks that the field
   survives every rebuild.
 
-### `[3/8][bf-checkpoint][shadow] write every base page to a fresh slot`
+### `[3/8][bf-checkpoint][shadow] write every base page to a fresh page number`
 
 - **Purpose:** Committed pages are never overwritten.
 - **Core changes:** `write_seq` counter, gate, and `superseded` list in
@@ -394,10 +452,11 @@ must select the newest page per leaf in the same diff.
   superseded entries recorded so far, sync, then free them (each entry's
   replacement finished writing before the sync, so it is now durable). `open`
   selects the newest page per leaf and restarts the counter above
-  `max_seen`. Invalid pages remain `CorruptLeaf`.
+  `max_seen`. Pages that fail their CRC or validation remain `CorruptPage`
+  (plan 0017).
 - **Verification:** Two write-throughs of a leaf leave one superseded
   entry; split halves share a sequence; the model suites pass on both
-  backends; after flush, the store holds one slot per leaf.
+  backends; after flush, the store holds one page per leaf.
 
 ### `[4/8][bf-checkpoint][commit] commit the write watermark and erase uncommitted pages`
 
@@ -405,11 +464,15 @@ must select the newest page per leaf in the same diff.
 - **Core changes:** `flush` takes the gate exclusively for `W`, syncs,
   commits `id + 1` with `W`, and frees entries `<= W`. `create` commits.
   `open` filters by `W`, erases pages above `W` and syncs, and keeps the
-  counter restart. `TreeError::CheckpointFailed` and the poison flag.
+  counter restart. `TreeError::{CheckpointFailed, StoreFailed}`, the
+  store-failed flag, `Tree::store_failed`, and
+  `TreeConfig::on_store_failure`.
 - **Verification:** A page written after the commit is ignored and erased
   on open; a crash between commit and free reopens cleanly; holding the
   gate shared blocks the commit; a failed commit leaves the store at the
-  previous state and poisons later calls; two-generation regression: write
+  previous state and fails later checkpoints; after it, writes return
+  `StoreFailed` under the default policy and succeed under `AcceptWrites`,
+  and reads succeed under both; reopen clears the flag; two-generation regression: write
   leaf `L` through after a commit, crash with that page landed, open, write
   only leaf `M`, commit, crash, open, and assert `L` is at its committed
   state.
@@ -419,10 +482,11 @@ must select the newest page per leaf in the same diff.
 - **Purpose:** Accept every torn write a crash can produce, and report
   real corruption.
 - **Core changes:** `select_committed(store, config, &State)` with the
-  suspect rules; `TreeError::CorruptSlot { slot, reason }`.
+  suspect rules for pages that fail their CRC; reuses plan 0017's
+  `TreeError::CorruptPage { page_number, reason }`.
 - **Verification:** Hand-built fixtures for every row of the selection
   table, at every 64-byte tear boundary; an invalid unsuperseded page gives
-  `CorruptSlot`.
+  `CorruptPage`.
 
 ### `[6/8][bf-checkpoint][checkpoint] record the applied watermark and rename flush`
 
@@ -463,7 +527,7 @@ must select the newest page per leaf in the same diff.
   checkpoint thread, crash at a random point. After open, each key's value
   equals the oracle's value at some sequence in `[N, last assigned]`. After
   replay from `N + 1`, the state equals the full oracle. A file-growth test
-  (`n` write-throughs of one leaf hold `n + 1` slots until the next
+  (`n` write-throughs of one leaf hold `n + 1` pages until the next
   checkpoint). Update `bf-tree-persistence.md` (protocol, arguments,
   selection table, growth), `bf-tree-concurrency.md` (lock order with the
   gate), and `bf-tree-leaf-store.md`.
@@ -471,13 +535,18 @@ must select the newest page per leaf in the same diff.
 
 ## Open questions
 
-1. **Poison after a failed `sync` or `commit`?** Recommendation: yes. Later
-   checkpoints fail until reopen, because a retried sync may report success
-   for writes the kernel dropped. Writers and readers continue.
-2. **Visit every leaf in the pass, or keep a buffered-leaf hint?** Locking
-   every leaf is simple and uncontended. An atomic "buffered or dirty"
-   hint per entry could skip clean leaves. Recommendation: lock every leaf
-   now, and let plan 0023 measure.
+None.
+
+Resolved (2026-11-06, review):
+
+1. **Poison after a failed `sync` or `commit`?** Yes, as a setting.
+   Checkpoints always fail until reopen. Writes are rejected by default
+   (`StoreFailurePolicy::RejectWrites`); `AcceptWrites` keeps them for
+   log-backed deployments. Reads continue. See "Failures".
+2. **Visit every leaf in the pass, or keep a buffered-leaf hint?** Visit
+   every leaf. A hint is correct only if writers set it before drawing a
+   sequence; plan 0023 measures the pass on large trees before any hint is
+   added.
 
 ## Verification strategy
 
@@ -489,15 +558,15 @@ must select the newest page per leaf in the same diff.
 | Stale resurrection | Diff 4 two-generation test; multi-generation crash model | Leaf at its committed state |
 | Fuzzy `N` | Checkpoint thread in the concurrent model; concurrent crash variant | Oracle after replay; per-key bounds before replay |
 | Pass coverage | Split during the pass into a new leaf | New leaf merged and committed |
-| Growth | Diff 8 growth test | `n + 1` slots until the checkpoint, then 1 |
+| Growth | Diff 8 growth test | `n + 1` pages until the checkpoint, then 1 |
 | Focused | `tools/buck2 run //crates/bf-tree:bf-tree-unittest -- crash` | Pass |
 | Workspace | `tools/fmt.sh`; `tools/clippy.sh`; `tools/buck2 test //crates/... //bin/... //go/...`; `tools/autocargo --check`; `tools/gobuckify-remote --check`; `cargo test --workspace --locked`; `(cd go && go vet ./... && go test ./...)` | Clean |
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: `write_seq` header field.
-- [ ] Diff 3: fresh-slot writes.
+- [ ] Diff 3: fresh-page writes.
 - [ ] Diff 4: commit, erase, and create.
 - [ ] Diff 5: suspect classification.
 - [ ] Diff 6: checkpoint and watermarks.
@@ -507,7 +576,12 @@ must select the newest page per leaf in the same diff.
 
 ## Discoveries and plan changes
 
-None yet.
+- 2026-11-06: plan 0017 now stamps `leaf` (not `backing_leaf`) and seals a
+  page CRC32C. Open classifies pages that fail their CRC instead of pages
+  that fail validation. A failed page claiming `write_seq <= W` is not
+  always corrupt: a torn write whose header sector did not land leaves a
+  zero header or an older superseded page's header, so the existing
+  release rules still apply to it.
 
 ## Agent notes
 
@@ -519,10 +593,11 @@ None yet.
 - **Gate placement:** Take it shared inside `write_through` only, never
   around a lock acquisition. Take it exclusively only in `checkpoint`, with
   no leaf or frame lock held.
-- **Header before validation:** Read `write_seq` and `backing_leaf` from
-  the raw 32-byte header (`Header::ref_from_prefix`) before
-  `Page::validate`. Torn pages still contribute to `max_seen` and to the
-  erase decision.
+- **Header before validation:** Read `write_seq` and `leaf` from the raw
+  32-byte header (`Header::ref_from_prefix`) before the CRC check and
+  `Page::validate`. Pages that fail their CRC still contribute to
+  `max_seen` and to the erase decision. A zero header reads as leaf 0, so
+  detect "header did not land" by `write_seq == 0`, not by `leaf()`.
 - **Free outside the mutex:** Drain covered entries under `superseded`,
   then call `store.free` after releasing it.
 - **Test helpers stay crate-private:** `FaultStore`, recorders, and fixture
