@@ -570,7 +570,7 @@ Resolved (2026-11-06, review):
 - [x] Diff 4: commit, erase, and create.
 - [x] Diff 5: suspect classification.
 - [x] Diff 6: checkpoint and watermarks.
-- [ ] Diff 7: fault store and crash model.
+- [x] Diff 7: fault store and crash model.
 - [ ] Diff 8: concurrent crash variant and documents.
 - [ ] Stack-wide verification.
 
@@ -628,6 +628,11 @@ Resolved (2026-11-06, review):
   `concurrent_checkpoints_commit_consecutive_ids_beside_writers` (1600
   writes, 60 checkpoints from three threads, consecutive ids, and a
   reopen with every write).
+- **The crash model's checks were shown to have teeth.** With open
+  keeping pages above `W`, and with the checkpoint committing an applied
+  watermark three above what it covered, the model fails on its first
+  seeds. The fault store also dies during open (in the erase), and the
+  recovery loop crashes the disk again in that case.
 
 ## Agent notes
 

@@ -8,6 +8,7 @@ mod checkpoint;
 mod concurrent;
 mod config;
 mod contention;
+mod crash;
 mod damage;
 mod disk;
 mod evict;
