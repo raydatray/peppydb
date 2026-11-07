@@ -1,7 +1,8 @@
 //! Reopening a tree from its stored leaves.
 //!
-//! Inner nodes are derived data. `Tree::open` reads and validates every slot,
-//! then `tile` checks that the leaf fences partition the key space and
+//! Inner nodes are derived data. `Tree::open` reads every page, checks its
+//! checksum and structure, maps the leaf it names to its page number, then
+//! `tile` checks that the leaf fences partition the key space and
 //! `build_inner` packs the separators into inner levels bottom-up. The last
 //! two are pure functions over fence lists, so they are tested without a
 //! store.
@@ -15,19 +16,21 @@ use super::{Tree, TreeConfig, TreeError};
 use bf_tree_inner::{HEADER_BYTES, InnerError, InnerNode, entry_size};
 use bf_tree_node_id::{ChildRef, LeafId};
 use bf_tree_page::{Fence, KeyRef, Page, PageError};
-use bf_tree_store::{PageStore, StoreError, Superblock};
+use bf_tree_store::{PageNumber, PageStore, StoreError, Superblock};
 
 impl Tree {
     /// Open a tree from a store written by [`Tree::create`] and
     /// [`Tree::flush`], rebuilding the routing layer from leaf fences.
     ///
-    /// The configuration comes from the store's superblock. Every slot is
-    /// read once: all-zero slots are free (allocated but never written) and
-    /// are returned to the store for reuse; every other slot must pass
-    /// [`Page::validate`], carry fences, and respect the configured key and
+    /// The configuration comes from the store's superblock. Every page is
+    /// read once: all-zero pages are free (allocated but never written) and
+    /// are returned to the store for reuse; every other page must pass its
+    /// checksum and [`Page::validate`] (else `CorruptPage`), name a leaf that
+    /// no other page names, carry fences, and respect the configured key and
     /// value limits. The leaves must tile the key space, so a store with a
-    /// missing, duplicated, or torn leaf is rejected rather than opened.
-    /// Open is `O(leaves)` in I/O and memory.
+    /// missing, duplicated, or torn leaf is rejected rather than opened. Leaf
+    /// IDs that no page names are holes and stay unused. Open is `O(pages)`
+    /// in I/O and memory.
     pub fn open(store: Box<dyn PageStore>) -> Result<Self, TreeError> {
         let config = TreeConfig::from(store.superblock());
         Self::open_with(config, store)
@@ -44,27 +47,52 @@ impl Tree {
         }
         config.validate()?;
 
-        let mut freed = Vec::new();
+        let page_count = store.page_count();
+        // Leaf IDs from disk are bounded before any table grows: every live
+        // leaf holds a distinct page, and a hole was once a leaf whose page
+        // a later leaf reused, so every ID is below the page count.
+        let mut pages: Vec<Option<PageNumber>> = Vec::new();
         let mut leaves = Vec::new();
         let mut bytes = vec![0; store.page_size()];
-        for raw in 0..store.slots() {
-            let id = LeafId::new(raw).expect("slot counts stay below the reserved ID");
-            store.read(id, &mut bytes)?;
-            let is_free = bytes.iter().all(|&byte| byte == 0);
-            freed.push(is_free);
-            if is_free {
-                // A slot allocated but never written. Return it to the store's
-                // free list; a backend that rescanned on open already has it.
-                match store.free(id) {
-                    Ok(()) | Err(StoreError::FreedSlot(_)) => continue,
+        for raw in 0..page_count {
+            let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
+            store.read(page_number, &mut bytes)?;
+            if bytes.iter().all(|&byte| byte == 0) {
+                // A page allocated but never written. Return it to the
+                // store's free list; a backend that rescanned on open
+                // already has it.
+                match store.free(page_number) {
+                    Ok(()) | Err(StoreError::FreedPage(_)) => continue,
                     Err(error) => return Err(error.into()),
                 }
             }
-
+            let corrupt = |reason| TreeError::CorruptPage {
+                page_number,
+                reason,
+            };
+            if !bf_tree_page::verify_stored_checksum(&bytes) {
+                return Err(corrupt("checksum mismatch"));
+            }
             let page = Page::validate(&bytes).map_err(|error| match error {
-                PageError::Corrupt(reason) => TreeError::CorruptLeaf { id, reason },
+                PageError::Corrupt(reason) => corrupt(reason),
                 other => TreeError::Page(other),
             })?;
+            let id = page
+                .leaf()
+                .ok_or(TreeError::InconsistentLeaves("a stored page names no leaf"))?;
+            if id.raw() >= page_count {
+                return Err(TreeError::InconsistentLeaves(
+                    "a stored page names a leaf beyond the page count",
+                ));
+            }
+            if pages.len() <= id.index() {
+                pages.resize(id.index() + 1, None);
+            }
+            if pages[id.index()].replace(page_number).is_some() {
+                return Err(TreeError::InconsistentLeaves(
+                    "two stored pages name the same leaf",
+                ));
+            }
 
             let fences = page
                 .fences()
@@ -106,7 +134,7 @@ impl Tree {
         Ok(Self::assemble(
             config,
             inner,
-            LeafMap::for_config(store, freed, &config)?,
+            LeafMap::for_config(store, pages, &config)?,
         ))
     }
 }

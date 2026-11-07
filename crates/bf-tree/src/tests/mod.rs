@@ -147,3 +147,11 @@ fn three_level() -> Tree {
     tree.set_root(root);
     tree
 }
+
+/// Stamp raw page bytes with `leaf` and seal their checksum, as
+/// `write_through` does, for fixtures that write the store directly.
+fn stamp(bytes: &mut [u8], leaf: u64) {
+    let page: &mut Page = zerocopy::FromBytes::mut_from_bytes(bytes).unwrap();
+    page.set_leaf(Some(LeafId::new(leaf).unwrap())).unwrap();
+    page.seal();
+}

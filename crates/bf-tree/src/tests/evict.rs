@@ -125,19 +125,19 @@ impl PageStore for Failing {
     fn page_size(&self) -> usize {
         self.inner.page_size()
     }
-    fn slots(&self) -> u64 {
-        self.inner.slots()
+    fn page_count(&self) -> u64 {
+        self.inner.page_count()
     }
-    fn alloc(&self) -> Result<LeafId, StoreError> {
+    fn alloc(&self) -> Result<PageNumber, StoreError> {
         self.inner.alloc()
     }
-    fn free(&self, id: LeafId) -> Result<(), StoreError> {
-        self.inner.free(id)
+    fn free(&self, page_number: PageNumber) -> Result<(), StoreError> {
+        self.inner.free(page_number)
     }
-    fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
-        self.inner.read(id, buf)
+    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
+        self.inner.read(page_number, buf)
     }
-    fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
         if self.fail.load(Ordering::Relaxed) {
             return Err(StoreError::Io {
                 op: "write",
@@ -145,7 +145,7 @@ impl PageStore for Failing {
                 code: None,
             });
         }
-        self.inner.write(id, buf)
+        self.inner.write(page_number, buf)
     }
     fn sync(&self) -> Result<(), StoreError> {
         self.inner.sync()

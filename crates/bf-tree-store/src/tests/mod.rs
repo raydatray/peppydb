@@ -15,12 +15,12 @@ pub(super) fn superblock(page_size: usize) -> Superblock {
     }
 }
 
-pub(super) fn leaf(raw: u64) -> LeafId {
-    LeafId::new(raw).unwrap()
+pub(super) fn page(raw: u64) -> PageNumber {
+    PageNumber::new(raw).unwrap()
 }
 
 /// A page image whose header carries a nonzero capacity, so that no backend
-/// mistakes it for a free slot.
+/// mistakes it for a free page.
 pub(super) fn page_image(page_size: usize, fill: u8) -> Vec<u8> {
     let mut page = vec![fill; page_size];
     page[2..4].copy_from_slice(&(page_size as u16).to_le_bytes());

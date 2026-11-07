@@ -335,9 +335,9 @@ fn a_closed_trees_store_holds_every_flushed_write_and_no_buffered_one() {
     assert_matches_model(&reopened, &model);
 }
 
-/// A flushed store of a small multi-leaf tree plus the leaf images, for
-/// corruption fixtures.
-fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>) {
+/// A flushed store of a small multi-leaf tree, the leaf images, and each
+/// leaf's page number, for corruption fixtures.
+fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>, Vec<PageNumber>) {
     let config = config(256, 128, 8, 16);
     let store = MemStore::new(Superblock::from(&config)).unwrap();
     let mut tree = Tree::create(config, Box::new(store)).unwrap();
@@ -348,14 +348,15 @@ fn flushed_store() -> (Box<dyn PageStore>, Vec<Vec<u8>>) {
     let images = (0..tree.leaf_count())
         .map(|index| tree.leaves.page_copy(leaf(index as u64)).unwrap())
         .collect();
-    (tree.into_store(), images)
+    let pages = tree.leaves.page_table().into_iter().flatten().collect();
+    (tree.into_store(), images, pages)
 }
 
 #[test]
 fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
-    // A zeroed (freed) middle leaf leaves a gap.
-    let (store, images) = flushed_store();
-    store.free(leaf(1)).unwrap();
+    // A zeroed middle leaf leaves a gap.
+    let (store, _, pages) = flushed_store();
+    store.write(pages[1], &[0; 256]).unwrap();
     assert_eq!(
         Tree::open(store).err(),
         Some(TreeError::InconsistentLeaves(
@@ -363,42 +364,61 @@ fn open_rejects_damaged_leaf_sets_with_errors_not_panics() {
         ))
     );
 
-    // A duplicated leaf: the same page written twice.
-    let (store, _) = flushed_store();
-    store.write(leaf(2), &images[1]).unwrap();
-    assert!(matches!(
-        Tree::open(store).err(),
-        Some(TreeError::InconsistentLeaves(_))
-    ));
-
-    // A torn page: the tail of a leaf zeroed.
-    let (store, _) = flushed_store();
-    let mut torn = images[1].clone();
-    torn[128..].fill(0);
-    store.write(leaf(1), &torn).unwrap();
-    assert!(matches!(
-        Tree::open(store).err(),
-        Some(TreeError::CorruptLeaf { id, .. }) if id == leaf(1)
-    ));
-
-    // A flipped header byte.
-    let (store, _) = flushed_store();
-    let mut flipped = images[0].clone();
-    flipped[3] ^= 0x40;
-    store.write(leaf(0), &flipped).unwrap();
+    // A duplicated leaf: leaf 1's page written over leaf 2's.
+    let (store, images, pages) = flushed_store();
+    store.write(pages[2], &images[1]).unwrap();
     assert_eq!(
         Tree::open(store).err(),
-        Some(TreeError::CorruptLeaf {
-            id: leaf(0),
+        Some(TreeError::InconsistentLeaves(
+            "two stored pages name the same leaf"
+        ))
+    );
+
+    // A torn page: the tail of a leaf zeroed.
+    let (store, images, pages) = flushed_store();
+    let mut torn = images[1].clone();
+    torn[128..].fill(0);
+    store.write(pages[1], &torn).unwrap();
+    assert_eq!(
+        Tree::open(store).err(),
+        Some(TreeError::CorruptPage {
+            page_number: pages[1],
+            reason: "checksum mismatch",
+        })
+    );
+
+    // A flipped header byte fails the checksum; resealed, it fails
+    // validation.
+    let (store, images, pages) = flushed_store();
+    let mut flipped = images[0].clone();
+    flipped[3] ^= 0x40;
+    store.write(pages[0], &flipped).unwrap();
+    assert_eq!(
+        Tree::open(store).err(),
+        Some(TreeError::CorruptPage {
+            page_number: pages[0],
+            reason: "checksum mismatch",
+        })
+    );
+    let (store, images, pages) = flushed_store();
+    let mut flipped = images[0].clone();
+    flipped[3] ^= 0x40;
+    stamp(&mut flipped, 0);
+    store.write(pages[0], &flipped).unwrap();
+    assert_eq!(
+        Tree::open(store).err(),
+        Some(TreeError::CorruptPage {
+            page_number: pages[0],
             reason: "capacity field differs from the buffer length",
         })
     );
 
     // A valid but unfenced page.
-    let (store, _) = flushed_store();
+    let (store, _, pages) = flushed_store();
     let mut unfenced = vec![0; 256];
     Page::init(&mut unfenced).unwrap();
-    store.write(leaf(0), &unfenced).unwrap();
+    stamp(&mut unfenced, 0);
+    store.write(pages[0], &unfenced).unwrap();
     assert_eq!(
         Tree::open(store).err(),
         Some(TreeError::InconsistentLeaves("leaf has no fences"))
@@ -442,6 +462,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
     )
     .unwrap();
     page.try_insert(&[1; 8], b"v").unwrap();
+    stamp(&mut bytes, 0);
     store.write(id, &bytes).unwrap();
     assert_eq!(
         Tree::open(Box::new(store)).err(),
@@ -465,6 +486,7 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
             },
         )
         .unwrap();
+        stamp(&mut bytes, id.raw());
         store.write(id, &bytes).unwrap();
     }
     assert_eq!(

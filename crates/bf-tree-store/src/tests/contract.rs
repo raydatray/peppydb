@@ -24,19 +24,19 @@ fn file() -> Box<dyn PageStore> {
         fn page_size(&self) -> usize {
             self.store.page_size()
         }
-        fn slots(&self) -> u64 {
-            self.store.slots()
+        fn page_count(&self) -> u64 {
+            self.store.page_count()
         }
-        fn alloc(&self) -> Result<LeafId, StoreError> {
+        fn alloc(&self) -> Result<PageNumber, StoreError> {
             self.store.alloc()
         }
-        fn free(&self, id: LeafId) -> Result<(), StoreError> {
+        fn free(&self, id: PageNumber) -> Result<(), StoreError> {
             self.store.free(id)
         }
-        fn read(&self, id: LeafId, buf: &mut [u8]) -> Result<(), StoreError> {
+        fn read(&self, id: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
             self.store.read(id, buf)
         }
-        fn write(&self, id: LeafId, buf: &[u8]) -> Result<(), StoreError> {
+        fn write(&self, id: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
             self.store.write(id, buf)
         }
         fn sync(&self) -> Result<(), StoreError> {
@@ -73,27 +73,27 @@ fn for_each_backend(scenario: impl Fn(&dyn PageStore)) {
 #[test]
 fn new_stores_are_empty_and_describe_themselves() {
     for_each_backend(|store| {
-        assert_eq!(store.slots(), 0);
+        assert_eq!(store.page_count(), 0);
         assert_eq!(store.page_size(), PAGE);
         assert_eq!(*store.superblock(), superblock(PAGE));
     });
 }
 
 #[test]
-fn alloc_hands_out_dense_zeroed_slots() {
+fn alloc_hands_out_dense_zeroed_pages() {
     for_each_backend(|store| {
         let ids: Vec<_> = (0..3).map(|_| store.alloc().unwrap()).collect();
-        assert_eq!(ids, [leaf(0), leaf(1), leaf(2)]);
-        assert_eq!(store.slots(), 3);
+        assert_eq!(ids, [page(0), page(1), page(2)]);
+        assert_eq!(store.page_count(), 3);
 
         let mut buf = vec![1; PAGE];
-        store.read(leaf(1), &mut buf).unwrap();
+        store.read(page(1), &mut buf).unwrap();
         assert!(buf.iter().all(|&byte| byte == 0));
     });
 }
 
 #[test]
-fn writes_round_trip_independently_per_slot() {
+fn writes_round_trip_independently_per_page() {
     for_each_backend(|store| {
         let a = store.alloc().unwrap();
         let b = store.alloc().unwrap();
@@ -116,7 +116,7 @@ fn writes_round_trip_independently_per_slot() {
 }
 
 #[test]
-fn freed_slots_are_zeroed_and_reused_before_growth() {
+fn freed_pages_keep_their_bytes_and_are_reused_before_growth() {
     for_each_backend(|store| {
         let ids: Vec<_> = (0..3).map(|_| store.alloc().unwrap()).collect();
         for &id in &ids {
@@ -125,55 +125,58 @@ fn freed_slots_are_zeroed_and_reused_before_growth() {
 
         store.free(ids[1]).unwrap();
         store.free(ids[0]).unwrap();
-        assert_eq!(store.slots(), 3, "freeing does not shrink the slot count");
+        assert_eq!(
+            store.page_count(),
+            3,
+            "freeing does not shrink the page count"
+        );
 
         let mut buf = vec![1; PAGE];
         store.read(ids[1], &mut buf).unwrap();
-        assert!(
-            buf.iter().all(|&byte| byte == 0),
-            "freed slot reads as zeros"
-        );
+        assert_eq!(buf, page_image(PAGE, 0xcc), "a freed page keeps its bytes");
 
-        // Last freed, first reused.
+        // Last freed, first reused, with its old bytes.
         assert_eq!(store.alloc().unwrap(), ids[0]);
+        store.read(ids[0], &mut buf).unwrap();
+        assert_eq!(buf, page_image(PAGE, 0xcc));
         assert_eq!(store.alloc().unwrap(), ids[1]);
-        assert_eq!(store.alloc().unwrap(), leaf(3));
-        assert_eq!(store.slots(), 4);
+        assert_eq!(store.alloc().unwrap(), page(3));
+        assert_eq!(store.page_count(), 4);
     });
 }
 
 #[test]
-fn freed_slots_reject_writes_and_double_frees() {
+fn freed_pages_reject_writes_and_double_frees() {
     for_each_backend(|store| {
         let id = store.alloc().unwrap();
         store.free(id).unwrap();
 
         assert_eq!(
             store.write(id, &page_image(PAGE, 1)),
-            Err(StoreError::FreedSlot(id))
+            Err(StoreError::FreedPage(id))
         );
-        assert_eq!(store.free(id), Err(StoreError::FreedSlot(id)));
+        assert_eq!(store.free(id), Err(StoreError::FreedPage(id)));
     });
 }
 
 #[test]
-fn unknown_slots_are_rejected() {
+fn unknown_pages_are_rejected() {
     for_each_backend(|store| {
         store.alloc().unwrap();
         let mut buf = vec![0; PAGE];
-        let missing = leaf(1);
-        let far = leaf(u64::MAX - 1);
+        let missing = page(1);
+        let far = page(u64::MAX - 1);
 
         assert_eq!(
             store.read(missing, &mut buf),
-            Err(StoreError::UnknownSlot(missing))
+            Err(StoreError::UnknownPage(missing))
         );
         assert_eq!(
             store.write(missing, &buf),
-            Err(StoreError::UnknownSlot(missing))
+            Err(StoreError::UnknownPage(missing))
         );
-        assert_eq!(store.free(missing), Err(StoreError::UnknownSlot(missing)));
-        assert_eq!(store.read(far, &mut buf), Err(StoreError::UnknownSlot(far)));
+        assert_eq!(store.free(missing), Err(StoreError::UnknownPage(missing)));
+        assert_eq!(store.read(far, &mut buf), Err(StoreError::UnknownPage(far)));
     });
 }
 
@@ -196,7 +199,7 @@ fn buffers_must_be_exactly_one_page() {
 #[test]
 fn concurrent_allocs_return_distinct_ids() {
     for_each_backend(|store| {
-        let ids: Vec<LeafId> = std::thread::scope(|scope| {
+        let ids: Vec<PageNumber> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
                 .map(|_| {
                     scope.spawn(|| (0..50).map(|_| store.alloc().unwrap()).collect::<Vec<_>>())
@@ -211,12 +214,12 @@ fn concurrent_allocs_return_distinct_ids() {
         raw.sort_unstable();
         raw.dedup();
         assert_eq!(raw.len(), 200);
-        assert_eq!(store.slots(), 200);
+        assert_eq!(store.page_count(), 200);
     });
 }
 
 #[test]
-fn threads_write_distinct_slots_and_read_them_back() {
+fn threads_write_distinct_pages_and_read_them_back() {
     for_each_backend(|store| {
         let ids: Vec<_> = (0..64).map(|_| store.alloc().unwrap()).collect();
         std::thread::scope(|scope| {
