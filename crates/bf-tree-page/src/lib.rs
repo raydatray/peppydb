@@ -49,8 +49,8 @@ mod write;
 pub use fence::{Fence, Fences};
 pub use key::KeyRef;
 use layout::{
-    COUNT_MASK, HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, Header, LOW_INFINITY, NO_BACKING_LEAF,
-    Slot,
+    COUNT_MASK, CRC_RANGE, HAS_FENCES, HEADER_BYTES, HIGH_INFINITY, Header, LOW_INFINITY,
+    NO_BACKING_LEAF, NO_LEAF, Slot,
 };
 pub use read::Iter;
 pub use record::{RecordKind, RecordRef, RecordState};
@@ -90,6 +90,9 @@ pub enum PageError {
     /// check that failed.
     #[error("corrupt page: {0}")]
     Corrupt(&'static str),
+    /// A leaf ID does not fit the page header's 32-bit `leaf` field.
+    #[error("leaf ID does not fit the page header's 32-bit leaf field")]
+    LeafIdTooLarge,
 }
 
 /// A leaf-level page viewed in place over caller-owned bytes: the header
@@ -124,6 +127,7 @@ impl Page {
             .remaining_size
             .set((capacity - HEADER_BYTES) as u16);
         page.header.backing_leaf.set(NO_BACKING_LEAF);
+        page.header.leaf.set(NO_LEAF);
 
         Ok(page)
     }
@@ -138,6 +142,51 @@ impl Page {
         self.header
             .backing_leaf
             .set(leaf.map_or(NO_BACKING_LEAF, LeafId::raw));
+    }
+
+    /// The leaf this stored base page belongs to, or `None`. Only pages the
+    /// tree has written to its store carry one.
+    pub fn leaf(&self) -> Option<LeafId> {
+        match self.header.leaf.get() {
+            NO_LEAF => None,
+            raw => LeafId::new(u64::from(raw)),
+        }
+    }
+
+    /// Stamp the leaf this page belongs to, or clear it. The field holds 32
+    /// bits, so a raw ID of `u32::MAX` or more is rejected.
+    pub fn set_leaf(&mut self, leaf: Option<LeafId>) -> Result<(), PageError> {
+        let raw = match leaf {
+            None => NO_LEAF,
+            Some(leaf) => u32::try_from(leaf.raw())
+                .ok()
+                .filter(|&raw| raw != NO_LEAF)
+                .ok_or(PageError::LeafIdTooLarge)?,
+        };
+        self.header.leaf.set(raw);
+        Ok(())
+    }
+
+    /// CRC32C of every byte of the page, with the `crc` field taken as zero.
+    pub fn checksum(&self) -> u32 {
+        checksum(self.as_bytes())
+    }
+
+    /// The `crc` field as stored.
+    pub fn stored_checksum(&self) -> u32 {
+        self.header.crc.get()
+    }
+
+    /// Store [`Page::checksum`] in the `crc` field. Call after every other
+    /// change to the page.
+    pub fn seal(&mut self) {
+        let crc = self.checksum();
+        self.header.crc.set(crc);
+    }
+
+    /// Whether the stored checksum matches the bytes.
+    pub fn verify_checksum(&self) -> bool {
+        self.stored_checksum() == self.checksum()
     }
 
     /// Number of records, including tombstones and phantoms but not fences.
@@ -241,3 +290,20 @@ impl Page {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether `bytes`, a stored page that may be damaged, carries a matching
+/// checksum. Reads only the `crc` field and the bytes, never the capacity, so
+/// it is safe on any buffer of at least `HEADER_BYTES` bytes.
+pub fn verify_stored_checksum(bytes: &[u8]) -> bool {
+    let Some(stored) = bytes.get(CRC_RANGE) else {
+        return false;
+    };
+    u32::from_le_bytes(stored.try_into().expect("four bytes")) == checksum(bytes)
+}
+
+/// CRC32C of `bytes` with the `crc` field taken as zero.
+fn checksum(bytes: &[u8]) -> u32 {
+    let crc = crc32c::crc32c(&bytes[..CRC_RANGE.start]);
+    let crc = crc32c::crc32c_append(crc, &[0; 4]);
+    crc32c::crc32c_append(crc, &bytes[CRC_RANGE.end..])
+}

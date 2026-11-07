@@ -32,7 +32,9 @@ fn assert_model(page: &Page, model: &BTreeMap<Vec<u8>, Vec<u8>>) {
     assert_eq!(usize::from(word(4)), payload_start - slots_end);
     assert_eq!(&bytes[6..8], &[0; 2]);
     assert_eq!(&bytes[8..16], &[0xff; 8]);
-    assert_eq!(&bytes[16..32], &[0; 16]);
+    assert_eq!(&bytes[16..24], &[0; 8]);
+    assert_eq!(&bytes[24..28], &[0xff; 4], "no leaf stamp");
+    assert_eq!(&bytes[28..32], &[0; 4], "not sealed");
     let mut occupied = vec![false; capacity];
     occupied[..slots_end].fill(true);
     for (index, (key, value)) in model.iter().enumerate() {

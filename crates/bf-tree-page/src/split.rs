@@ -115,9 +115,8 @@ impl Page {
 
         page.header.backing_leaf.set(self.header.backing_leaf.get());
         page.header.lsn.set(self.header.lsn.get());
-        page.header
-            .snapshot_version
-            .set(self.header.snapshot_version.get());
+        page.header.leaf.set(self.header.leaf.get());
+        page.header.crc.set(self.header.crc.get());
     }
 }
 

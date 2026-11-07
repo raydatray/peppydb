@@ -18,7 +18,9 @@ fn initialize_all_capacities_on_unaligned_buffers() {
         );
         assert_eq!(&page.as_bytes()[6..8], &[0, 0]);
         assert_eq!(&page.as_bytes()[8..16], &[0xff; 8]);
-        assert!(page.as_bytes()[16..].iter().all(|&byte| byte == 0));
+        assert!(page.as_bytes()[16..24].iter().all(|&byte| byte == 0));
+        assert_eq!(&page.as_bytes()[24..28], &[0xff; 4], "no leaf");
+        assert!(page.as_bytes()[28..].iter().all(|&byte| byte == 0));
         assert_eq!(storage[0], 0xa5);
     }
 }
@@ -94,4 +96,91 @@ fn the_backing_leaf_round_trips_and_survives_rebuilds() {
         .unwrap();
     assert_eq!(split.right.backing_leaf(), Some(leaf));
     assert_eq!(page.backing_leaf(), Some(leaf));
+}
+
+#[test]
+fn the_leaf_stamp_round_trips_and_rejects_ids_beyond_32_bits() {
+    use bf_tree_node_id::LeafId;
+
+    let mut bytes = vec![0; 256];
+    let page = Page::init(&mut bytes).unwrap();
+    assert_eq!(page.leaf(), None);
+    for raw in [0, 1, 4096, u64::from(u32::MAX) - 1] {
+        let leaf = LeafId::new(raw).unwrap();
+        page.set_leaf(Some(leaf)).unwrap();
+        assert_eq!(page.leaf(), Some(leaf));
+        assert_eq!(page.backing_leaf(), None, "the fields are independent");
+    }
+    let stamped = page.leaf();
+    for raw in [u64::from(u32::MAX), u64::from(u32::MAX) + 1, u64::MAX - 1] {
+        assert_eq!(
+            page.set_leaf(Some(LeafId::new(raw).unwrap())),
+            Err(PageError::LeafIdTooLarge)
+        );
+        assert_eq!(page.leaf(), stamped, "a rejected stamp changes nothing");
+    }
+    page.set_leaf(None).unwrap();
+    assert_eq!(page.leaf(), None);
+    assert_eq!(&page.as_bytes()[24..28], &[0xff; 4]);
+}
+
+#[test]
+fn a_sealed_checksum_detects_any_flipped_byte() {
+    use bf_tree_node_id::LeafId;
+
+    let unbounded = Fences {
+        lower: Fence::Key(&b"a"[..]),
+        upper: Fence::Unbounded,
+    };
+    let mut bytes = vec![0; 256];
+    let page = Page::init_with_fences(&mut bytes, unbounded).unwrap();
+    page.try_insert(b"b", b"value").unwrap();
+    page.set_leaf(Some(LeafId::new(7).unwrap())).unwrap();
+    assert!(!page.verify_checksum(), "a fresh page is not sealed");
+    page.seal();
+    assert!(page.verify_checksum());
+    assert_eq!(page.stored_checksum(), page.checksum());
+    assert_eq!(
+        &page.as_bytes()[28..32],
+        &page.checksum().to_le_bytes(),
+        "the crc field is bytes 28..32"
+    );
+    assert!(crate::verify_stored_checksum(&bytes));
+
+    // Header, slot directory, free gap, and payload bytes are all covered.
+    for index in 0..bytes.len() {
+        let mut damaged = bytes.clone();
+        damaged[index] ^= 0x10;
+        assert!(!crate::verify_stored_checksum(&damaged), "byte {index}");
+    }
+    assert!(!crate::verify_stored_checksum(&bytes[..16]), "too short");
+    assert!(
+        !crate::verify_stored_checksum(&[0; 256]),
+        "a zero page fails"
+    );
+}
+
+#[test]
+fn split_outputs_inherit_the_leaf_stamp_and_the_stale_checksum() {
+    use bf_tree_node_id::LeafId;
+
+    let unbounded = Fences {
+        lower: Fence::Unbounded,
+        upper: Fence::Unbounded,
+    };
+    let mut left = vec![0; 128];
+    let mut right = vec![0; 128];
+    let page = Page::init_with_fences(&mut left, unbounded).unwrap();
+    for key in [&b"a"[..], b"b", b"c"] {
+        page.try_insert(key, b"0123456789").unwrap();
+    }
+    let leaf = LeafId::new(3).unwrap();
+    page.set_leaf(Some(leaf)).unwrap();
+    page.seal();
+    let split = page
+        .merge_batch_split(&mut right, [live(b"d", b"0123456789")].into_iter())
+        .unwrap();
+    assert_eq!(split.right.leaf(), Some(leaf));
+    assert!(!split.right.verify_checksum(), "only the tree seals");
+    assert!(!page.verify_checksum());
 }
