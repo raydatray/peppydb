@@ -1,3 +1,5 @@
 syntax: glob
 target/**
 buck-out/**
+.zed/**
+/rust-project.json
