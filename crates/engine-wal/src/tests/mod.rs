@@ -1,3 +1,4 @@
+mod bench;
 mod lifecycle;
 mod record;
 mod replay;

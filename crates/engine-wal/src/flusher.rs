@@ -71,7 +71,7 @@ pub(crate) struct Shared {
     failed: OnceLock<(&'static str, std::io::ErrorKind)>,
     /// The original error, returned once by `close`.
     first_error: Mutex<Option<WalError>>,
-    /// Syncs of a group, for tests.
+    /// Groups synced; written by the flusher only.
     syncs: AtomicU64,
     /// Make the next group's sync fail, for tests.
     #[cfg(test)]
@@ -280,9 +280,9 @@ impl Wal {
         }
     }
 
-    /// Syncs so far, for tests.
-    #[cfg(test)]
-    pub(crate) fn syncs(&self) -> u64 {
+    /// Groups synced since open: one per flusher sync. Appends divided by
+    /// syncs is the average group size.
+    pub fn syncs(&self) -> u64 {
         self.shared.syncs.load(Ordering::Relaxed)
     }
 
