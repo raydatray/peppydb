@@ -2,29 +2,35 @@
 //!
 //! An append-only sequence of checksummed records in segment files.
 //! Records carry logical operations and a sequence; the log knows nothing
-//! about trees. The record format is in [`record`].
+//! about trees.
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the writer uses it from diff 4")
-)]
+mod flusher;
 mod record;
 mod replay;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the writer uses it from diff 4")
-)]
 mod segment;
 
 #[cfg(test)]
 mod tests;
 
+pub use flusher::WalOptions;
 pub use record::MAX_RECORD_BYTES;
 pub use replay::Replayed;
 
-/// The write-ahead log. Diff 4 adds the writer.
-#[derive(Debug)]
-pub struct Wal {}
+/// The write-ahead log: appends from many threads, made durable by one
+/// flusher thread with group commit.
+pub struct Wal {
+    shared: std::sync::Arc<flusher::Shared>,
+    flusher: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for Wal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wal")
+            .field("durable_seq", &self.durable_seq())
+            .field("last_seq", &self.last_seq())
+            .finish_non_exhaustive()
+    }
+}
 
 /// One logged change. Keys and values borrow the caller's bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
