@@ -1,6 +1,6 @@
 # 0023: Direct I/O and performance
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [persistence](../design/bf-tree-persistence.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -37,7 +37,7 @@ numbers in the design documents.
   - batched aligned reads for the open-time page scan;
   - `engine::Options::io`;
   - page and lookup fast paths: routed lookups without fence checks, integer
-    comparison of previews and short key parts, slot-directory warming;
+    comparison of previews and short key parts;
   
   - committed `#[ignore]` benchmarks for persistence, the circular buffer,
     the engine, and the WAL;
@@ -217,17 +217,6 @@ diff is dropped and the result recorded under Discoveries.
    }
    ```
 
-3. **Warm the slot directory.** A binary search's probes depend on each
-   other, so on a cold leaf each probe waits for its own cache miss. Touching
-   one byte per 64-byte line of the slot directory first lets those misses
-   overlap. The cost on an L1-hot leaf is a few loads. This is
-   hardware-dependent and lands only if the random-leaf benchmark confirms it.
-
-   ```rust
-   let lines = self.slot_bytes().iter().step_by(64).fold(0u8, |acc, &b| acc ^ b);
-   std::hint::black_box(lines);
-   ```
-
 ### Benchmarks
 
 All are `#[ignore]` tests, run with
@@ -278,6 +267,16 @@ counter in a lock path can halve a contended rate.
 
 ## Decisions and trade-offs
 
+- **No slot-directory warming (review, 2026-11-07).** An earlier draft
+  touched one byte per cache line of the slot directory before a binary
+  search, so that a cold leaf's dependent cache misses would overlap.
+  Dropped for now: upstream does no warming or prefetching (its
+  `LeafNode::lower_bound` is a plain binary search), the gain is
+  hardware-dependent and possibly covered by hardware prefetchers, and a
+  cold leaf's cost is dominated by its page read. It can return as its own
+  measured change if a profile shows cold binary searches as a hotspot; a
+  denser preview layout (fewer lines to touch) would come first.
+
 - **Bounce buffer over aligned tree buffers.** Every caller works unchanged,
   and an aligned caller skips the copy. Alternative: align the tree's scratch
   pages; a later optimisation if the copy ever shows up. Circular-buffer
@@ -318,7 +317,19 @@ Ten diffs.
 - **Core changes:** This plan; link it from the roadmap's milestone 9 row.
 - **Verification:** Review. Check local links.
 
-### `[2/10][bf-io-perf][store] add direct I/O to the file store`
+### `[2/10][bf-io-perf][tools] make the Linux container build and give benchmarks a native volume`
+
+- **Purpose:** Run the Linux tests and benchmarks in the container from
+  plan 0016, which had never run (no Docker engine then).
+- **Core changes:** `tools/linux/Dockerfile` installs `clang` and `lld`:
+  the Buck2 prelude's system C++ toolchain links with `clang++`.
+  `tools/linux-run` mounts a named volume at `/bench` and sets
+  `PEPPYDB_BENCH_DIR=/bench`, so benchmark and `Io::Direct` data live on
+  the VM's own ext4 disk, not on the bind-mounted checkout from macOS.
+- **Verification:** `tools/linux-run tools/buck2 test //crates/...` passes;
+  `stat -f /bench` inside the container reports ext4.
+
+### `[3/10][bf-io-perf][store] add direct I/O to the file store`
 
 - **Purpose:** Let the circular buffer's budget bound memory on Linux.
 - **Core changes:** `Io`, `create_with`, `open_with`, `io()`,
@@ -330,7 +341,7 @@ Ten diffs.
   reopens with `Cached` and the reverse; non-Linux and non-4096 page sizes
   return `DirectIo`; the crash model (0018) passes over a `Direct` store.
 
-### `[3/10][bf-io-perf][store] read pages in aligned runs at open`
+### `[4/10][bf-io-perf][store] read pages in aligned runs at open`
 
 - **Purpose:** Avoid one device round trip per page during open.
 - **Core changes:** `PageStore::read_run` with a default; the `FileStore`
@@ -339,7 +350,7 @@ Ten diffs.
   and with a page count that is not a multiple of the run; `bench_persistence`
   open rate with `Direct` before and after.
 
-### `[4/10][bf-io-perf][engine] pass the store I/O mode through engine options`
+### `[5/10][bf-io-perf][engine] pass the store I/O mode through engine options`
 
 - **Purpose:** Make direct I/O available to applications.
 - **Core changes:** `bf-tree` re-exports `Io`; `engine::Options::io`; open
@@ -347,7 +358,7 @@ Ten diffs.
 - **Verification:** Engine tests pass with `Io::Direct` on Linux (selected by
   a test that iterates both modes and skips `Direct` elsewhere).
 
-### `[5/10][bf-io-perf][page] skip fence checks on routed lookups`
+### `[6/10][bf-io-perf][page] skip fence checks on routed lookups`
 
 - **Purpose:** Remove a fence decode and two comparisons per base lookup.
 - **Core changes:** `Page::get_routed`, `Page::find_index_routed` with debug
@@ -356,7 +367,7 @@ Ten diffs.
   routed call with an out-of-range key panics; `bench_components` random
   `get` before and after.
 
-### `[6/10][bf-io-perf][search] compare previews and short key parts as integers`
+### `[7/10][bf-io-perf][search] compare previews and short key parts as integers`
 
 - **Purpose:** Remove out-of-line comparisons from every binary-search probe.
 - **Core changes:** Preview and inline words in `bf-tree-page` and
@@ -366,14 +377,6 @@ Ten diffs.
   all pairs of byte strings up to length 3 over the alphabet {0, 1, 255},
   plus random longer pairs; page and inner model tests; hot-leaf and descent
   benchmarks before and after.
-
-### `[7/10][bf-io-perf][search] warm the slot directory before a binary search`
-
-- **Purpose:** Overlap the cache misses of a cold binary search.
-- **Core changes:** The warming loop in the leaf search.
-- **Verification:** Random-leaf `get_with` and `put` before and after on
-  Linux, and hot-leaf cost; drop the diff if the random-leaf gain is within
-  noise.
 
 ### `[8/10][bf-io-perf][bench] add persistence and circular-buffer benchmarks`
 
@@ -397,7 +400,7 @@ Ten diffs.
 - **Core changes:** `bf-tree-persistence.md` (direct I/O, persistence
   numbers, the ext4 finding), `bf-tree-concurrency.md` (Linux thread scaling,
   hot set, circular-buffer lock), `bf-tree-pages.md` (routed lookups,
-  integer compares, warming), `bf-tree-circular-buffer.md` (free-list
+  integer compares), `bf-tree-circular-buffer.md` (free-list
   result), `engine.md` (write latency, recovery rate, interval and I/O-mode
   answers); this plan's outcomes; roadmap milestone 9 complete.
 - **Verification:** Workspace checks; every number in the documents names its
@@ -405,12 +408,27 @@ Ten diffs.
 
 ## Open questions
 
-- **`O_DIRECT` constant source:** unconditional `libc` (recommended),
-  target-specific dependencies through `autocargo`, or hand-written
-  constants. Decide before diff 2.
-- **Benchmark machine:** which bare-metal Linux machine with NVMe is
-  available. Without one, numbers from a virtual machine are recorded and
-  labelled.
+None.
+
+Resolved (review, 2026-11-08):
+
+- **`O_DIRECT` constant source: `libc` as an unconditional dependency.**
+  `libc::O_DIRECT` is correct on every Linux architecture, which matters
+  here: the benchmark path runs on aarch64 (Docker on Apple Silicon) and
+  x86_64 (WSL2, GCP), whose values differ (`0o200000` and `0o40000`). It
+  is used only under `cfg(target_os = "linux")`.
+- **Benchmark environments, in order.** Each result is labelled with its
+  environment:
+  1. *Docker on macOS (aarch64 Linux VM), indicative.* Correctness of
+     `Io::Direct` and first measurements. Data must be on a named Docker
+     volume (`PEPPYDB_BENCH_DIR`), never the bind-mounted checkout. I/O
+     numbers reflect a virtual disk backed by the Mac's SSD.
+  2. *WSL2 (x86_64), indicative.* CPU fast paths and plan 0016's contended
+     benchmarks; the repository and data on the Linux file system, not
+     `/mnt/c`. I/O through a virtual disk.
+  3. *GCP with a Local SSD (NVMe), reference.* The numbers the design
+     documents treat as the baseline. Default persistent disks are network
+     storage and would distort fsync latency.
 
 ## Verification strategy
 
@@ -426,13 +444,13 @@ Ten diffs.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
-- [ ] Diff 2: direct I/O.
-- [ ] Diff 3: batched open reads.
-- [ ] Diff 4: engine I/O option.
-- [ ] Diff 5: routed lookups.
-- [ ] Diff 6: integer comparisons.
-- [ ] Diff 7: slot-directory warming.
+- [x] Agree on the design and commit stack with the user.
+- [ ] Diff 2: Linux container and benchmark volume.
+- [ ] Diff 3: direct I/O.
+- [ ] Diff 4: batched open reads.
+- [ ] Diff 5: engine I/O option.
+- [ ] Diff 6: routed lookups.
+- [ ] Diff 7: integer comparisons.
 - [ ] Diff 8: persistence and circular-buffer benchmarks.
 - [ ] Diff 9: engine and WAL benchmarks.
 - [ ] Diff 10: measurements and milestone completion.
