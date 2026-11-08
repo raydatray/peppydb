@@ -1,6 +1,6 @@
 # 0020: Engine write-ahead log
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Project direction](../design/architecture.md),
 [build system](../design/build-system.md),
@@ -143,7 +143,7 @@ payload by kind:
 
 All integers are little-endian. Rules that the decoder enforces:
 
-- `len` must be at least 9 and at most `MAX_RECORD_BYTES` (64 MiB). The lower
+- `len` must be at least 9 and at most `MAX_RECORD_BYTES` (16 MiB). The lower
   bound matters: a zero-filled tail has `len = 0`, and `crc32c` of an empty
   input is 0, so without the bound and without `len` inside the checksum a
   run of zeros would decode as a record. Both defences are kept.
@@ -566,9 +566,17 @@ reviewed against its own tests.
 
 ## Open questions
 
+None.
+
+Resolved:
+
 - **CRC32C source.** Resolved in 0017: the `crc32c` crate.
-- **Maximum record size.** 64 MiB is proposed. It bounds a `WriteBatch` in
-  0021. A smaller bound (for example 16 MiB) limits memory at replay.
+- **Maximum record size: 16 MiB (review, 2026-11-07).** `MAX_RECORD_BYTES`
+  bounds one record (a put, a delete, or a whole batch), not a segment
+  file. It rejects garbage lengths in a torn tail, and it bounds the memory
+  that replay and the pending buffer hold for one record. With the tree's
+  default limits, 16 MiB is about 15,000 maximum-size operations per
+  `WriteBatch` (plan 0021); larger bulk loads use several batches.
 
 ## Verification strategy
 
@@ -585,7 +593,7 @@ reviewed against its own tests.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: crate and record format.
 - [ ] Diff 3: replay and torn-tail repair.
 - [ ] Diff 4: append and group commit.
