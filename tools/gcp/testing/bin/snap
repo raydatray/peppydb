@@ -1,0 +1,5 @@
+#!/bin/sh
+# A stand-in for snap in offline tests (plan 0024): records its arguments in
+# $PEPPYDB_FAKE_LOG.
+echo "snap $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+exit 0
