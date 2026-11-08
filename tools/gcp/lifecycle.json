@@ -1,0 +1,12 @@
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": { "age": 7, "matchesPrefix": ["peppydb-bench/artifacts/"] }
+    },
+    {
+      "action": { "type": "Delete" },
+      "condition": { "age": 14, "matchesPrefix": ["peppydb-bench/results/"] }
+    }
+  ]
+}

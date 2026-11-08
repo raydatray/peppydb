@@ -1,11 +1,32 @@
 #!/bin/sh
 # A stand-in for gcloud in offline tests (plan 0024). It never contacts GCP.
 #
-# Every call is appended to $PEPPYDB_FAKE_LOG. Objects live under
-# $PEPPYDB_FAKE_GCS: gs://BUCKET/PATH is $PEPPYDB_FAKE_GCS/BUCKET/PATH.
-# Supported: storage cp [--quiet] SRC DST, storage ls URL, storage cat URL.
+# Every call is appended to $PEPPYDB_FAKE_LOG.
+#
+# Storage: gs://BUCKET/PATH is $PEPPYDB_FAKE_GCS/BUCKET/PATH. Supported:
+# storage cp [--recursive] SRC DST, storage ls URL, storage cat URL, and
+# storage buckets describe (prints $PEPPYDB_FAKE_BUCKET_JSON).
+#
+# Compute: instances live as files in $PEPPYDB_FAKE_COMPUTE. Supported:
+# instances create/describe/delete/list/get-serial-port-output, disks
+# list/delete, operations list. Behaviour switches:
+#   PEPPYDB_FAKE_VM=run (default)  create runs the startup script in the
+#                                  background, as a booted VM would
+#   PEPPYDB_FAKE_VM=noboot         the VM never runs its startup script
+#   PEPPYDB_FAKE_VM=vanish         the instance disappears after its read-back
+#   PEPPYDB_FAKE_VM=stop           the instance is TERMINATED after its read-back
+#   PEPPYDB_FAKE_VM=hang           the VM uploads "started" and nothing else
+#   PEPPYDB_FAKE_CAPACITY_ZONES    zones where create fails for capacity
+#   PEPPYDB_FAKE_CREATE_ERROR      create fails everywhere with this message
+#   PEPPYDB_FAKE_CREATE_LEAKS=1    a failed create still creates the instance
+#   PEPPYDB_FAKE_NO_LIMIT=1        describe shows no maxRunDuration
+#   PEPPYDB_FAKE_PREEMPTED=1       operations list reports a preemption
+#   PEPPYDB_FAKE_GCS_FAIL=1        storage cp fails
+#   PEPPYDB_FAKE_BENCH_DIR         the VM's PEPPYDB_BENCH_DIR (default: a
+#                                  directory beside the fake instance)
 set -u
 echo "gcloud $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+COMPUTE=${PEPPYDB_FAKE_COMPUTE:-${PEPPYDB_FAKE_GCS:-/tmp}/../compute}
 
 local_path() {
     case $1 in
@@ -14,44 +35,198 @@ local_path() {
     esac
 }
 
-[ "${1:-}" = storage ] || {
+# flag NAME: the value of --NAME=VALUE in the original arguments.
+flag() {
+    for arg in $ARGS; do
+        case $arg in
+            --"$1"=*) echo "${arg#--"$1"=}"; return ;;
+        esac
+    done
+}
+
+has_flag() {
+    for arg in $ARGS; do
+        [ "$arg" = "--$1" ] && return 0
+    done
+    return 1
+}
+
+# Positional arguments only; this fake's callers pass no spaces in values.
+ARGS="$*"
+positional=
+for arg in "$@"; do
+    case $arg in
+        -*) ;;
+        *) positional="$positional $arg" ;;
+    esac
+done
+# shellcheck disable=SC2086
+set -- $positional
+
+storage() {
+    command=$1
+    shift
+    case $command in
+        cp)
+            [ "${PEPPYDB_FAKE_GCS_FAIL:-}" = 1 ] && exit 1
+            src=$(local_path "$1")
+            dst=$(local_path "$2")
+            if has_flag recursive; then
+                [ -d "$src" ] || exit 1
+                mkdir -p "$dst" && cp -R "$src" "$dst"
+            else
+                [ -f "$src" ] || {
+                    echo "fake gcloud: no such object: $1" >&2
+                    exit 1
+                }
+                mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+            fi
+            ;;
+        ls)
+            [ -e "$(local_path "$1")" ] || {
+                echo "ERROR: One or more URLs matched no objects." >&2
+                exit 1
+            }
+            echo "$1"
+            ;;
+        cat) cat "$(local_path "$1")" ;;
+        buckets)
+            [ "$1" = describe ] || exit 2
+            cat "$PEPPYDB_FAKE_BUCKET_JSON"
+            ;;
+        *)
+            echo "fake gcloud: unsupported storage command: $command" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# boot NAME: run the startup script as the VM would, in the background.
+boot() {
+    vm=$COMPUTE/vm/$1
+    mkdir -p "$vm/metadata" "$vm/bench"
+    for pair in $(flag metadata | tr , ' '); do
+        echo "${pair#*=}" >"$vm/metadata/instance_attributes_${pair%%=*}"
+    done
+    script=
+    for pair in $(flag metadata-from-file | tr , ' '); do
+        if [ "${pair%%=*}" = startup-script ]; then
+            script=${pair#*=}
+        else
+            cp "${pair#*=}" "$vm/metadata/instance_attributes_${pair%%=*}"
+        fi
+    done
+    echo "zones/$(flag zone)" >"$vm/metadata/instance_zone"
+    echo "machineTypes/$(flag machine-type)" >"$vm/metadata/instance_machine-type"
+    case ${PEPPYDB_FAKE_VM:-run} in
+        run)
+            PEPPYDB_REMOTE_STATE=$vm/state PEPPYDB_REMOTE_METADATA=$vm/metadata \
+                PEPPYDB_REMOTE_NO_MKFS=1 PEPPYDB_BENCH_DIR=${PEPPYDB_FAKE_BENCH_DIR:-$vm/bench} \
+                sh "$script" >"$vm/console" 2>&1 &
+            ;;
+        hang)
+            bucket=$(cat "$vm/metadata/instance_attributes_peppydb-bucket")
+            run=$(cat "$vm/metadata/instance_attributes_peppydb-run-id")
+            mkdir -p "$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run"
+            date >"$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run/started"
+            ;;
+    esac
+}
+
+instances() {
+    command=$1
+    shift
+    case $command in
+        create)
+            name=$1
+            zone=$(flag zone)
+            mkdir -p "$COMPUTE/instances"
+            error=${PEPPYDB_FAKE_CREATE_ERROR:-}
+            for capacity_zone in ${PEPPYDB_FAKE_CAPACITY_ZONES:-}; do
+                [ "$capacity_zone" = "$zone" ] &&
+                    error="The zone '$zone' does not have enough resources available (ZONE_RESOURCE_POOL_EXHAUSTED)."
+            done
+            if [ -n "$error" ]; then
+                if [ "${PEPPYDB_FAKE_CREATE_LEAKS:-}" = 1 ]; then
+                    echo "$zone RUNNING $ARGS" >"$COMPUTE/instances/$name"
+                fi
+                echo "ERROR: (gcloud.compute.instances.create) $error" >&2
+                exit 1
+            fi
+            echo "$zone RUNNING $ARGS" >"$COMPUTE/instances/$name"
+            echo 0 >"$COMPUTE/instances/$name.describes"
+            boot "$name"
+            ;;
+        describe)
+            name=$1
+            file=$COMPUTE/instances/$name
+            [ -f "$file" ] || {
+                echo "ERROR: (gcloud.compute.instances.describe) Could not fetch resource: The resource 'projects/p/zones/z/instances/$name' was not found" >&2
+                exit 1
+            }
+            count=$(($(cat "$file.describes" 2>/dev/null || echo 0) + 1))
+            echo "$count" >"$file.describes"
+            status=$(cut -d' ' -f2 "$file")
+            if [ "$count" -ge 2 ]; then
+                case ${PEPPYDB_FAKE_VM:-run} in
+                    vanish)
+                        rm -f "$file" "$file.describes"
+                        echo "ERROR: The resource 'projects/p/zones/z/instances/$name' was not found" >&2
+                        exit 1
+                        ;;
+                    stop) status=TERMINATED ;;
+                esac
+            fi
+            seconds=$(sed -n 's/.*--max-run-duration=\([0-9]*\)s.*/\1/p' "$file")
+            action=$(sed -n 's/.*--instance-termination-action=\([A-Z]*\).*/\1/p' "$file")
+            if [ "${PEPPYDB_FAKE_NO_LIMIT:-}" = 1 ]; then
+                echo "{\"status\": \"$status\", \"scheduling\": {\"automaticRestart\": false}}"
+            else
+                echo "{\"name\": \"$name\", \"status\": \"$status\", \"scheduling\": {\"maxRunDuration\": {\"seconds\": \"$seconds\"}, \"instanceTerminationAction\": \"$action\", \"provisioningModel\": \"SPOT\"}}"
+            fi
+            ;;
+        delete)
+            rm -f "$COMPUTE/instances/$1" "$COMPUTE/instances/$1.describes"
+            ;;
+        list)
+            for file in "$COMPUTE"/instances/*; do
+                case $file in *.describes | *'*') continue ;; esac
+                [ -f "$file" ] && echo "$(basename "$file") $(cut -d' ' -f1-2 "$file")"
+            done
+            ;;
+        get-serial-port-output) echo "fake serial port output for $1" ;;
+        *) exit 2 ;;
+    esac
+}
+
+[ "${1:-}" = config ] && {
+    echo fake-project
+    exit 0
+}
+[ "${1:-}" = storage ] && {
+    shift
+    storage "$@"
+    exit $?
+}
+[ "${1:-}" = compute ] || {
     echo "fake gcloud: unsupported command: $*" >&2
     exit 2
 }
 shift
-command=$1
-shift
-args=
-for arg in "$@"; do
-    case $arg in
-        --*) ;;
-        *) args="$args $arg" ;;
-    esac
-done
-# shellcheck disable=SC2086 # paths have no spaces in these tests
-set -- $args
-
-case $command in
-    cp)
-        [ "${PEPPYDB_FAKE_GCS_FAIL:-}" = 1 ] && exit 1
-        src=$(local_path "$1")
-        dst=$(local_path "$2")
-        [ -f "$src" ] || {
-            echo "fake gcloud: no such object: $1" >&2
-            exit 1
-        }
-        mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+case $1 in
+    instances) shift; instances "$@" ;;
+    disks)
+        case $2 in
+            list)
+                for file in "$COMPUTE"/disks/*; do
+                    [ -f "$file" ] && echo "$(basename "$file") $(cat "$file")"
+                done
+                ;;
+            delete) rm -f "$COMPUTE/disks/$3" ;;
+        esac
         ;;
-    ls)
-        path=$(local_path "$1")
-        [ -e "$path" ] || exit 1
-        echo "$1"
+    operations)
+        [ "${PEPPYDB_FAKE_PREEMPTED:-}" = 1 ] && echo "operation-preempted-1"
         ;;
-    cat)
-        cat "$(local_path "$1")"
-        ;;
-    *)
-        echo "fake gcloud: unsupported storage command: $command" >&2
-        exit 2
-        ;;
+    *) exit 2 ;;
 esac
