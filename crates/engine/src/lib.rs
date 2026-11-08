@@ -280,8 +280,17 @@ pub struct Db {
     policy_thread: Option<JoinHandle<()>>,
     /// Held for the database's lifetime; dropping it releases the lock.
     /// Taken by a snapshot install, which keeps it across the reopen.
-    #[expect(dead_code, reason = "taken by install_snapshot from diff 3")]
     lock: Option<File>,
+}
+
+impl std::fmt::Debug for Db {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db")
+            .field("path", &self.path)
+            .field("mode", &self.options.mode)
+            .field("applied_seq", &self.applied_seq())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Where a snapshot install writes before its rename.
@@ -556,6 +565,47 @@ impl Db {
             (Err(_), Some(error)) => Err(Error::Hook(error)),
             (Err(error), None) => Err(error.into()),
         }
+    }
+
+    /// External mode: replace this database's state with a snapshot (the
+    /// output of [`Db::write_snapshot`] on another replica) and reopen.
+    ///
+    /// The snapshot is written to a partial file and synced, then opened as
+    /// a tree to check its superblocks, pages, tiling, and limits; only a
+    /// valid snapshot is renamed over `tree.bf`, and the directory is
+    /// synced. The lock is kept throughout. On error the database is closed
+    /// and the old state is intact unless the rename completed; reopen with
+    /// [`Db::open`].
+    pub fn install_snapshot(mut self, snapshot: &mut dyn std::io::Read) -> Result<Db, Error> {
+        self.external()?;
+        let (path, options) = (self.path.clone(), self.options);
+        let lock = self.lock.take().expect("an open database holds its lock");
+        // Close the tree before its file is replaced.
+        drop(self);
+        let partial = path.join(PARTIAL);
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&partial)
+                .map_err(io("create the partial snapshot"))?;
+            std::io::copy(snapshot, &mut file).map_err(io("copy the snapshot"))?;
+            file.sync_all().map_err(io("sync the partial snapshot"))?;
+            drop(file);
+            let store = FileStore::open(&partial).map_err(TreeError::from)?;
+            drop(Tree::open_with(options.tree, Box::new(store))?);
+            Ok::<_, Error>(())
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+        std::fs::rename(&partial, path.join("tree.bf")).map_err(io("install the snapshot"))?;
+        File::open(&path)
+            .and_then(|dir| dir.sync_all())
+            .map_err(io("sync the database directory"))?;
+        Self::open_locked(path, options, lock)
     }
 
     fn external(&self) -> Result<(), Error> {

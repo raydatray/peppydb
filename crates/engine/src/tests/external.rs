@@ -155,3 +155,106 @@ fn an_external_open_over_a_standalone_wal_is_refused() {
     let db = Db::open(dir.path(), external()).unwrap();
     assert_eq!(db.get(b"a").unwrap(), Some(b"1".to_vec()));
 }
+
+/// A leader in external mode with entries 1..=n, checkpointed.
+fn leader(dir: &std::path::Path, n: u64) -> Db {
+    let db = Db::open(dir, external()).unwrap();
+    for seq in 1..=n {
+        db.apply(seq, &[put(&seq.to_be_bytes(), &[seq as u8; 4])])
+            .unwrap();
+    }
+    db.checkpoint().unwrap();
+    db
+}
+
+fn snapshot(db: &Db) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    db.write_snapshot(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn installing_a_snapshot_replaces_the_state() {
+    let leader_dir = tempfile::tempdir().unwrap();
+    let leader = leader(leader_dir.path(), 200);
+    let bytes = snapshot(&leader);
+    let dir = tempfile::tempdir().unwrap();
+    let follower = Db::open(dir.path(), external()).unwrap();
+    follower.apply(1, &[put(b"stale", b"x")]).unwrap();
+    let follower = follower.install_snapshot(&mut bytes.as_slice()).unwrap();
+    assert_eq!(follower.applied_seq(), 200);
+    assert_eq!(contents(&follower), contents(&leader));
+    assert!(!dir.path().join(PARTIAL).exists());
+    // The lock was kept: a second handle cannot open the database.
+    assert!(matches!(
+        Db::open(dir.path(), external()),
+        Err(Error::Locked)
+    ));
+    // The follower continues from the snapshot.
+    follower.apply(201, &[put(b"next", b"y")]).unwrap();
+    follower.close().unwrap();
+    let follower = Db::open(dir.path(), external()).unwrap();
+    assert_eq!(follower.applied_seq(), 201);
+}
+
+#[test]
+fn a_bad_snapshot_is_rejected_and_the_old_state_reopens() {
+    let leader_dir = tempfile::tempdir().unwrap();
+    let leader = leader(leader_dir.path(), 100);
+    let good = snapshot(&leader);
+    let mut flipped = good.clone();
+    flipped[20] ^= 0xff; // in both superblock copies
+    flipped[4096 + 20] ^= 0xff;
+    let other_dir = tempfile::tempdir().unwrap();
+    let other_limits = Options {
+        tree: TreeConfig {
+            max_key_len: 9,
+            ..external().tree
+        },
+        ..external()
+    };
+    let other = Db::open(other_dir.path(), other_limits).unwrap();
+    other.apply(1, &[put(b"z", b"z")]).unwrap();
+    other.checkpoint().unwrap();
+    let mismatched = snapshot(&other);
+    let cases: [(&str, &[u8]); 3] = [
+        ("truncated", &good[..good.len() - 100]),
+        ("flipped superblocks", &flipped),
+        ("other limits", &mismatched),
+    ];
+    for (name, bytes) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path(), external()).unwrap();
+        db.apply(1, &[put(b"keep", b"me")]).unwrap();
+        db.checkpoint().unwrap();
+        let mut reader = bytes;
+        let error = db.install_snapshot(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, Error::Tree(_) | Error::Options(_)),
+            "{name}: {error:?}"
+        );
+        assert!(!dir.path().join(PARTIAL).exists(), "{name}");
+        let db = Db::open(dir.path(), external()).unwrap();
+        assert_eq!(db.get(b"keep").unwrap(), Some(b"me".to_vec()), "{name}");
+    }
+}
+
+#[test]
+fn a_leftover_partial_snapshot_is_removed_by_open() {
+    let dir = tempfile::tempdir().unwrap();
+    Db::open(dir.path(), external()).unwrap().close().unwrap();
+    std::fs::write(dir.path().join(PARTIAL), b"half a snapshot").unwrap();
+    let db = Db::open(dir.path(), external()).unwrap();
+    assert!(!dir.path().join(PARTIAL).exists());
+    drop(db);
+}
+
+#[test]
+fn standalone_install_is_wrong_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small()).unwrap();
+    assert!(matches!(
+        db.install_snapshot(&mut [].as_slice()),
+        Err(Error::WrongMode)
+    ));
+}
