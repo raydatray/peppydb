@@ -1,4 +1,5 @@
 mod batch;
+mod bench;
 mod checkpoint;
 mod crash;
 mod external;

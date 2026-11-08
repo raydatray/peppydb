@@ -452,7 +452,7 @@ Resolved (review, 2026-11-08):
 - [x] Diff 6: routed lookups.
 - [x] Diff 7: integer comparisons.
 - [x] Diff 8: persistence and circular-buffer benchmarks.
-- [ ] Diff 9: engine and WAL benchmarks.
+- [x] Diff 9: engine and WAL benchmarks.
 - [ ] Diff 10: measurements and milestone completion.
 - [ ] Stack-wide verification.
 
@@ -510,6 +510,15 @@ Resolved (review, 2026-11-08):
   because counting failures would put a shared counter on the put path.
   The stall hook (`evict::EVICT_STALL_MICROS`) exists only under
   `cfg(test)`, and each eviction reads it once.
+- **Benchmark deviations (diff 9).** `bench_wal_append` reports the
+  uncontended `append` cost (an upper bound on the time inside the pending
+  mutex) and the all-thread append rate; timing the critical section itself
+  would need instrumentation inside it. `Wal::syncs` becomes public so that
+  `bench_engine_write` can report puts per group. The fsync interference
+  question is answered inside `bench_engine_write`: one thread's durable
+  put latency alone, and while a loader writes 1000-put batches and another
+  thread checkpoints in a loop, for each I/O mode. The WAL on a different
+  file system was not measured.
 
 ## Agent notes
 
