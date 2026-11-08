@@ -2,6 +2,7 @@ mod batch;
 mod checkpoint;
 mod crash;
 mod external;
+mod io;
 mod open;
 mod replica;
 mod write;

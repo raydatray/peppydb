@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use bf_tree::{Entry, FileStore, Superblock, Tree};
 use engine_wal::{Wal, WalOptions};
 
-pub use bf_tree::{LogError, Op, Scan, TreeConfig, TreeError};
+pub use bf_tree::{Io, LogError, Op, Scan, TreeConfig, TreeError};
 pub use engine_wal::WalError;
 
 #[cfg(test)]
@@ -61,6 +61,11 @@ pub struct Options {
     /// Tree limits and runtime knobs.
     pub tree: TreeConfig,
     pub mode: Mode,
+    /// How the tree's store file is read and written. `Io::Direct` (Linux
+    /// only) bypasses the page cache, so the circular buffer's budget
+    /// bounds the data's memory. Default `Io::Cached`. A runtime setting:
+    /// a database opens in either mode.
+    pub io: Io,
     /// The WAL flusher waits this long after the first pending write.
     /// Zero (the default) syncs as soon as the previous sync ends.
     pub flush_interval: Duration,
@@ -78,6 +83,7 @@ impl Default for Options {
         Self {
             tree: TreeConfig::default(),
             mode: Mode::Standalone,
+            io: Io::Cached,
             flush_interval: Duration::ZERO,
             segment_bytes: 64 << 20,
             checkpoint_wal_bytes: 256 << 20,
@@ -795,11 +801,11 @@ fn lock_file(path: &Path) -> Result<File, Error> {
 fn open_or_create_tree(path: &Path, options: &Options) -> Result<Tree, Error> {
     let file = path.join("tree.bf");
     if file.exists() {
-        let store = FileStore::open(&file).map_err(TreeError::from)?;
+        let store = FileStore::open_with(&file, options.io).map_err(TreeError::from)?;
         return Ok(Tree::open_with(options.tree, Box::new(store))?);
     }
-    let store =
-        FileStore::create(&file, Superblock::from(&options.tree)).map_err(TreeError::from)?;
+    let store = FileStore::create_with(&file, Superblock::from(&options.tree), options.io)
+        .map_err(TreeError::from)?;
     Ok(Tree::create(options.tree, Box::new(store))?)
 }
 
