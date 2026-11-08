@@ -20,7 +20,8 @@ pub use replay::Replayed;
 /// flusher thread with group commit.
 pub struct Wal {
     shared: std::sync::Arc<flusher::Shared>,
-    flusher: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Returns the active segment when it exits cleanly or is abandoned.
+    flusher: std::sync::Mutex<Option<std::thread::JoinHandle<Option<std::fs::File>>>>,
 }
 
 impl std::fmt::Debug for Wal {

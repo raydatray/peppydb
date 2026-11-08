@@ -597,13 +597,28 @@ Resolved:
 - [x] Diff 2: crate and record format.
 - [x] Diff 3: replay and torn-tail repair.
 - [x] Diff 4: append and group commit.
-- [ ] Diff 5: truncation and simulated crashes.
+- [x] Diff 5: truncation and simulated crashes.
 - [ ] Diff 6: design document.
 - [ ] Stack-wide verification.
 
 ## Discoveries and plan changes
 
-None yet.
+- **An empty segment is never sealed.** With a `segment_bytes` below the
+  header size, the first group after `open` tried to rotate out of the
+  fresh, header-only segment into one with the same name (the group's
+  first sequence), and `create_new` failed. Rotation now requires the
+  active segment to hold at least one group.
+- **`open` replaces a header-only last segment.** It deletes such a
+  segment and creates one named `next_seq`, whatever the old name, rather
+  than reusing it only when the names match.
+- **The flusher returns the active segment when it exits**, so `abandon`
+  can write the torn prefix into it. After a failure it returns nothing.
+- **Concurrent truncations may both count one deletion.** Two `unlink`
+  calls on one path both succeeded on macOS (APFS), so the returned counts
+  of concurrent calls can overlap. The test checks the surviving segments
+  instead; the plan never promised exact counts under concurrency.
+- **`create` moved from `segment.rs` to `flusher.rs`.** Only the writer
+  creates segments, so diff 3 had no use for it.
 
 ## Agent notes
 

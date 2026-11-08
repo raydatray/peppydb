@@ -62,6 +62,8 @@ pub(crate) struct Shared {
     force_to: AtomicU64,
     /// The highest assigned sequence.
     last_seq: AtomicU64,
+    /// Bytes appended since open, for the engine's checkpoint policy.
+    appended_bytes: AtomicU64,
     state: AtomicU8,
     /// The flusher has exited.
     stopped: AtomicBool,
@@ -69,8 +71,11 @@ pub(crate) struct Shared {
     failed: OnceLock<(&'static str, std::io::ErrorKind)>,
     /// The original error, returned once by `close`.
     first_error: Mutex<Option<WalError>>,
-    /// Syncs of a group, for tests (diff 5).
+    /// Syncs of a group, for tests.
     syncs: AtomicU64,
+    /// Make the next group's sync fail, for tests.
+    #[cfg(test)]
+    pub(crate) fail_sync: AtomicBool,
 }
 
 struct Pending {
@@ -117,11 +122,14 @@ impl Wal {
             durable: Condvar::new(),
             force_to: AtomicU64::new(0),
             last_seq: AtomicU64::new(next_seq - 1),
+            appended_bytes: AtomicU64::new(0),
             state: AtomicU8::new(OPEN),
             stopped: AtomicBool::new(false),
             failed: OnceLock::new(),
             first_error: Mutex::new(None),
             syncs: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_sync: AtomicBool::new(false),
         });
         let flusher = {
             let shared = shared.clone();
@@ -157,12 +165,17 @@ impl Wal {
         // Re-check under the lock: a close drains only what it sees.
         self.check_open()?;
         let seq = pending.next_seq;
+        let before = pending.buf.len();
         encode(&mut pending.buf, seq);
+        let added = (pending.buf.len() - before) as u64;
         pending.next_seq += 1;
         pending.first_in_buf.get_or_insert(seq);
         pending.first_pending_at.get_or_insert_with(Instant::now);
         self.shared.last_seq.store(seq, Ordering::Release);
         drop(pending);
+        self.shared
+            .appended_bytes
+            .fetch_add(added, Ordering::Relaxed);
         self.shared.wake.notify_one();
         Ok(seq)
     }
@@ -211,6 +224,68 @@ impl Wal {
     /// The highest assigned sequence.
     pub fn last_seq(&self) -> u64 {
         self.shared.last_seq.load(Ordering::Acquire)
+    }
+
+    /// Bytes appended since open. The engine's checkpoint policy compares
+    /// it with its value at the last checkpoint.
+    pub fn appended_bytes(&self) -> u64 {
+        self.shared.appended_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Delete every sealed segment whose successor starts at or below
+    /// `applied + 1`: such a segment holds only records at or below
+    /// `applied`. The last segment is never deleted. Deletions are not
+    /// synced: one that does not survive a crash leaves a redundant segment
+    /// that replay skips and the next truncation deletes. Concurrent calls
+    /// are safe. Returns the number of segments deleted.
+    pub fn truncate_below(&self, applied: u64) -> Result<usize, WalError> {
+        let segments = segment::list(&self.shared.dir)?;
+        let mut deleted = 0;
+        for pair in segments.windows(2) {
+            let ((_, path), (next_first, _)) = (&pair[0], &pair[1]);
+            if *next_first > applied.saturating_add(1) {
+                break;
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => deleted += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io("delete segment")(error)),
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Simulate a crash, for tests: stop the flusher after any group in
+    /// flight, write the first `written` bytes of the pending records to the
+    /// active segment without syncing, and drop the rest. Waiters for
+    /// records that were never reported durable get [`WalError::Closed`].
+    /// `written` can cut a record anywhere, which makes a torn tail.
+    ///
+    /// Production code calls [`Wal::close`], which makes every appended
+    /// record durable.
+    pub fn abandon(self, written: usize) {
+        self.shared.state.store(ABANDONED, Ordering::Release);
+        drop(lock(&self.shared.pending));
+        self.shared.wake.notify_all();
+        let file = lock(&self.flusher)
+            .take()
+            .and_then(|flusher| flusher.join().ok())
+            .flatten();
+        let pending = lock(&self.shared.pending);
+        if let Some(mut file) = file {
+            let _ = file.write_all(&pending.buf[..written.min(pending.buf.len())]);
+        }
+    }
+
+    /// Syncs so far, for tests.
+    #[cfg(test)]
+    pub(crate) fn syncs(&self) -> u64 {
+        self.shared.syncs.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_sync(&self) {
+        self.shared.fail_sync.store(true, Ordering::Relaxed);
     }
 
     /// Stop accepting appends, make every appended record durable, and stop
@@ -278,7 +353,9 @@ fn create(dir: &Path, first_seq: u64) -> Result<File, WalError> {
     Ok(file)
 }
 
-fn flush_loop(shared: &Shared, mut file: File) {
+/// The flusher thread. Returns the active segment, or `None` after a
+/// failure.
+fn flush_loop(shared: &Shared, mut file: File) -> Option<File> {
     let mut active_bytes = HEADER_BYTES as u64;
     let mut spare = Vec::new();
     loop {
@@ -287,7 +364,8 @@ fn flush_loop(shared: &Shared, mut file: File) {
             let state = shared.state.load(Ordering::Acquire);
             if state == ABANDONED || (pending.buf.is_empty() && state == CLOSING) {
                 drop(pending);
-                return stop(shared);
+                stop(shared);
+                return Some(file);
             }
             if pending.buf.is_empty() {
                 pending = shared
@@ -318,13 +396,20 @@ fn flush_loop(shared: &Shared, mut file: File) {
         drop(pending);
 
         let result = (|| {
-            if active_bytes >= shared.options.segment_bytes {
+            // An empty segment is never sealed: the next one would share
+            // its name, the group's first sequence.
+            let holds_records = active_bytes > HEADER_BYTES as u64;
+            if holds_records && active_bytes >= shared.options.segment_bytes {
                 // The old segment is synced, so it is sealed with no torn
                 // tail; the group never spans two segments.
                 file = create(&shared.dir, first)?;
                 active_bytes = HEADER_BYTES as u64;
             }
             file.write_all(&spare).map_err(io("write WAL group"))?;
+            #[cfg(test)]
+            if shared.fail_sync.swap(false, Ordering::Relaxed) {
+                return Err(io("sync WAL group")(std::io::Error::other("injected")));
+            }
             file.sync_data().map_err(io("sync WAL group"))?;
             Ok::<_, WalError>(())
         })();
@@ -333,7 +418,8 @@ fn flush_loop(shared: &Shared, mut file: File) {
                 let _ = shared.failed.set((op, source.kind()));
             }
             *lock(&shared.first_error) = Some(error);
-            return stop(shared);
+            stop(shared);
+            return None;
         }
         shared.syncs.fetch_add(1, Ordering::Relaxed);
         active_bytes += spare.len() as u64;
