@@ -446,7 +446,7 @@ Resolved (review, 2026-11-08):
 
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: Linux container and benchmark volume.
-- [ ] Diff 3: direct I/O.
+- [x] Diff 3: direct I/O.
 - [ ] Diff 4: batched open reads.
 - [ ] Diff 5: engine I/O option.
 - [ ] Diff 6: routed lookups.
@@ -468,6 +468,17 @@ Resolved (review, 2026-11-08):
 - **Mount types in the container:** the checkout is a virtiofs share from
   macOS, `/tmp` is overlayfs, and the `/bench` volume is ext4 on the VM's
   disk.
+- **The crash model cannot run over a file store**, because it uses the
+  in-memory fault store. Diff 3 instead checks the real tree over a direct
+  store (`a_tree_over_a_direct_store_reopens_at_its_commit`: 20,000 writes
+  with checkpoints, an uncommitted tail, reopened in both modes).
+- **The intermittent test failure from plan 0021 was the writer-latency
+  test.** Under the parallel load of a full `buck2 test` run in the
+  container, the slowest of 204 puts took 62 ms against a 1.19 s
+  checkpoint, a factor of 19 where the test demanded 20. A writer stalled
+  on a lock held for the whole checkpoint would take about the full
+  checkpoint, so the bound is now a factor of 4; six full container runs
+  then passed.
 
 ## Agent notes
 

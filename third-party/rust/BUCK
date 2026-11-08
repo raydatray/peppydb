@@ -382,6 +382,12 @@ buildscript_run(
     version = "0.4.3",
 )
 
+alias(
+    name = "libc",
+    actual = ":libc-0.2",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "libc-0.2.191.crate",
     sha256 = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a",
@@ -415,7 +421,10 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PRE": "",
         "OUT_DIR": "$(location :libc-0.2-build-script-run[out_dir])",
     },
-    features = ["std"],
+    features = [
+        "default",
+        "std",
+    ],
     rustc_flags = ["@$(location :libc-0.2-build-script-run[rustc_flags])"],
     visibility = [],
 )
@@ -443,7 +452,10 @@ cargo.rust_binary(
         "CARGO_PKG_VERSION_PATCH": "191",
         "CARGO_PKG_VERSION_PRE": "",
     },
-    features = ["std"],
+    features = [
+        "default",
+        "std",
+    ],
     visibility = [],
 )
 
@@ -463,7 +475,10 @@ buildscript_run(
         "CARGO_PKG_VERSION_PATCH": "191",
         "CARGO_PKG_VERSION_PRE": "",
     },
-    features = ["std"],
+    features = [
+        "default",
+        "std",
+    ],
     version = "0.2.191",
 )
 

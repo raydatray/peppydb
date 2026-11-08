@@ -163,7 +163,11 @@ fn writers_are_not_stalled_by_a_checkpoint() {
         (checkpointer.join().unwrap(), slowest, i)
     });
     assert!(
-        slowest * 20 < checkpoint_took,
+        // A writer stalled on a lock held for the whole checkpoint would
+        // take about as long as the checkpoint; scheduling noise under a
+        // parallel test run reaches a few percent of it (62 ms of 1.2 s
+        // was seen in the Linux container), so the bound is a quarter.
+        slowest * 4 < checkpoint_took,
         "slowest of {i} puts {slowest:?} vs checkpoint {checkpoint_took:?}"
     );
 }

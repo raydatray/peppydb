@@ -79,6 +79,7 @@ dependencies = [
  "bf-tree-page",
  "bf-tree-sync",
  "crc32c",
+ "libc",
  "tempfile",
  "thiserror",
  "zerocopy",
