@@ -11,10 +11,15 @@ covers two crates:
   database, which composes the BF-Tree and the WAL. The second part, from
   [The `Db`](#the-db), describes its boundaries, on-disk layout, options,
   errors, recovery, writes, batches, checkpoints, the checkpoint policy,
-  close, crash testing, and its guarantees.
+  close, crash testing, and its guarantees. The third part,
+  [External-log mode](#external-log-mode), describes `Mode::External`: the
+  `Db` driven by another log, the replication contract, `Db::apply`,
+  owner-driven checkpoints, and snapshot installation.
 
-[Plan 0020](../plans/0020-engine-wal.md) built the WAL, and
-[plan 0021](../plans/0021-engine-db.md) built the `Db`. Related documents:
+[Plan 0020](../plans/0020-engine-wal.md) built the WAL,
+[plan 0021](../plans/0021-engine-db.md) built the `Db`, and
+[plan 0022](../plans/0022-engine-external.md) added the external-log mode.
+Related documents:
 [architecture](architecture.md) (components and phases),
 [persistence](bf-tree-persistence.md#logs-and-sequenced-writes) (the tree's
 `Log` contract, which the WAL serves through the `Db`'s adapter, and the
@@ -659,9 +664,10 @@ impl Db {
 }
 ```
 
-Internally, a `Db` holds its path, an `Arc<Shared>`, the policy thread's
-`JoinHandle`, and the open `LOCK` file. `Shared` holds what the `Db` and
-the policy thread share: the `Tree`, the `Wal`, the writer gate, the
+Internally, a `Db` holds its path, its `Options`, an `Arc<Shared>`, the
+policy thread's `JoinHandle` (`None` in external mode), and the open `LOCK`
+file. `Shared` holds what the `Db` and the policy thread share: the `Tree`,
+the `Wal` (`Option<Wal>`, `None` in external mode), the writer gate, the
 `Policy` atomics, and the stored background error. `Db` is `Send + Sync`;
 a compile-time assertion in `lib.rs` checks it.
 
@@ -691,8 +697,9 @@ peppy_rust_library(
   is visible only to `//crates/engine:`. Plan 0021 checked both rules with
   local experiments; each failed with "is not visible".
 - **Re-exports.** `engine` re-exports, under their own names, the types
-  that appear in its public signatures: `LogError`, `Scan`, `TreeConfig`,
-  and `TreeError` from `bf-tree`, and `WalError` from `engine-wal`.
+  that appear in its public signatures: `LogError`, `Op` (for
+  `Db::apply`), `Scan`, `TreeConfig`, and `TreeError` from `bf-tree`, and
+  `WalError` from `engine-wal`.
   `Checkpoint` is the engine's own type, converted from `bf_tree::State`:
 
 ```rust
@@ -745,7 +752,7 @@ process is also `Locked` (`open.rs`: `a_second_open_is_locked`).
 ```rust
 pub struct Options {
     pub tree: TreeConfig,               // TreeConfig::default()
-    pub mode: Mode,                     // Mode::Standalone, the only mode
+    pub mode: Mode,                     // Mode::Standalone
     pub flush_interval: Duration,       // 0
     pub segment_bytes: u64,             // 64 MiB
     pub checkpoint_wal_bytes: u64,      // 256 MiB
@@ -758,7 +765,8 @@ pub struct Options {
   `checkpoint_interval` its interval (see
   [The checkpoint policy](#the-checkpoint-policy)).
 - `Mode::Standalone` means that the engine keeps a WAL and that writes
-  return once durable. Plan 0022 adds `Mode::External`.
+  return once durable. `Mode::External` means that another log sequences
+  and stores the writes (see [External-log mode](#external-log-mode)).
 
 `Options::validate` runs first in `open`. It returns `Error::Options` if
 `segment_bytes < 4096`, if `checkpoint_wal_bytes == 0`, or if
@@ -781,8 +789,14 @@ pub enum Error {
     Io { op: &'static str, source: std::io::Error },
     Options(&'static str),
     Locked,
+    WrongMode,                                         // plan 0022
+    Hook(Box<dyn std::error::Error + Send + Sync>),   // plan 0022
 }
 ```
+
+`WrongMode` and `Hook` belong to the external-log mode; see
+[Modes and methods](#modes-and-methods) and
+[Checkpoints in external mode](#checkpoints-in-external-mode).
 
 | Origin | Becomes |
 | --- | --- |
@@ -1364,11 +1378,12 @@ their own stack after plan 0023; the recommended design is MVCC.
 
 ### Db extension points
 
-- **Plan 0022** adds `Mode::External`, an error for the wrong mode,
-  `Db::apply`, `Db::checkpoint_with`, and `Db::install_snapshot`. It makes
-  the WAL optional in `Shared` and skips the policy thread in external
-  mode. It must not change the standalone write path, the policy, or the
-  recovery order.
+- **Plan 0022** added `Mode::External`, `Error::WrongMode`,
+  `Error::Hook`, `Db::apply`, `Db::checkpoint_with`, and
+  `Db::install_snapshot`. It made the WAL optional in `Shared` and skips
+  the policy thread in external mode. It did not change the standalone
+  write path, the policy, or the recovery order. See
+  [External-log mode](#external-log-mode).
 - **Plan 0023** adds an I/O option for `FileStore::create` and `open`, and
   engine benchmarks.
 - **Phase 2** uses external mode. A `put` that returns its sequence,
@@ -1376,6 +1391,451 @@ their own stack after plan 0023; the recommended design is MVCC.
   additive.
 - `Options` gains fields, `Error` gains variants, and `Db` gains methods.
   None of these reshape what plan 0021 introduced.
+
+## External-log mode
+
+In phase 2 a replicated log (Raft or similar) orders and stores every write,
+and each replica's engine applies the committed entries
+([architecture](architecture.md)). Such an engine must not keep a second
+log of its own: the replicated log is already the history, and a second log
+would cost a second fsync per write and could disagree with the first.
+`Mode::External` is a `Db` with no WAL and no policy thread. An **owner**
+(in phase 2, the replication layer) drives it: the owner supplies sequenced
+entries with `Db::apply`, decides when to checkpoint, and moves whole
+states between replicas with snapshots.
+[Plan 0022](../plans/0022-engine-external.md) built it.
+
+The code is in `crates/engine/src/lib.rs`. The tests are in
+`crates/engine/src/tests/`: `external.rs` (modes, `apply`, the hook,
+reopen, and snapshot install) and `replica.rs` (a standalone leader and an
+external follower, end to end).
+
+```rust
+impl Db {
+    pub fn apply(&self, seq: u64, ops: &[Op<'_>]) -> Result<Applied, Error>;
+    pub fn checkpoint_with(
+        &self,
+        hook: impl FnOnce(u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<Checkpoint, Error>;
+    pub fn install_snapshot(self, snapshot: &mut dyn std::io::Read) -> Result<Db, Error>;
+}
+
+/// What `Db::apply` did with an entry.
+pub enum Applied {
+    Applied,
+    /// At or below the applied sequence: a redelivery, ignored.
+    AlreadyApplied,
+}
+```
+
+`Op` is `bf_tree::Op`, re-exported by `engine`, so an owner needs no other
+crate.
+
+### The mode
+
+```rust
+pub enum Mode {
+    /// The engine keeps a WAL; writes return once durable.
+    #[default]
+    Standalone,
+    /// Another log sequences and stores writes and hands them over with
+    /// `Db::apply`. The engine keeps no WAL and runs no background thread.
+    External,
+}
+```
+
+The mode is chosen per `open` with `Options::mode`. It cannot change on an
+open `Db`. In external mode:
+
+- **No WAL.** `Shared::wal` is `None`. `open` does not replay, create, or
+  read `wal/` except for the check below, and creates no `wal/` directory
+  (`external.rs`:
+  `entries_apply_in_order_with_gaps_and_redeliveries_are_skipped` checks
+  that `wal/` does not exist).
+- **No policy thread.** `policy_thread` is `None`. Nothing checkpoints
+  except the owner's calls and `close`.
+- **Ignored options.** `flush_interval`, `segment_bytes`,
+  `checkpoint_wal_bytes`, and `checkpoint_interval` have no effect.
+  `Options::validate` still checks them, so they must hold valid values;
+  the defaults do. The tree limits in `Options::tree` apply as in
+  standalone mode.
+
+**A standalone WAL refuses an external open.** If `wal/` holds at least one
+file whose name ends in `.wal`, an external `open` returns
+`Error::Options("a standalone WAL exists")`. Replaying that WAL would be
+wrong: its sequences belong to the engine, not to the owner. Ignoring it
+silently would lose acknowledged standalone writes that no checkpoint
+holds. A database moves from standalone to external mode in one of two
+explicit ways:
+
+1. `close` the standalone database, which checkpoints every applied write,
+   so the WAL replays nothing. Then delete `wal/` and open in external mode
+   (`external.rs`: `an_external_open_over_a_standalone_wal_is_refused`).
+2. Open an external database and `install_snapshot` into it.
+
+The check runs after `open` removes a stale `tree.bf.partial` and before
+the tree opens.
+
+### Modes and methods
+
+| Method | `Standalone` | `External` |
+| --- | --- | --- |
+| `put`, `delete`, `write` | yes | `WrongMode` |
+| `apply`, `checkpoint_with`, `install_snapshot` | `WrongMode` | yes |
+| `get`, `get_with`, `range`, `scan_with` | yes | yes |
+| `checkpoint`, `write_snapshot`, `applied_seq`, `path`, `close` | yes | yes |
+
+- In standalone mode the engine's own WAL is the history. An `apply` would
+  take sequences that the WAL does not know, and a reopen would not replay
+  them.
+- In external mode `write` returns `WrongMode` even for an empty batch: the
+  mode check comes first.
+- `install_snapshot` consumes the `Db`. In standalone mode it returns
+  `WrongMode` and the `Db` is dropped (without a checkpoint; the WAL
+  drains, so a reopen replays it).
+- `Error::WrongMode` is reported before the call has any effect.
+
+### The replication contract
+
+```mermaid
+sequenceDiagram
+    participant O as log owner, phase 2 replication
+    participant D as Db in Mode External
+    participant T as Tree
+
+    O->>D: open with Mode External
+    D-->>O: applied_seq returns N, the committed sequence
+    loop entries N+1, N+2, and later
+        O->>D: apply seq and ops
+        D->>T: Tree apply with Entry seq and ops
+        D-->>O: Applied or AlreadyApplied
+    end
+    O->>D: checkpoint_with hook
+    D->>O: hook with captured_seq, owner log durable through it
+    D-->>O: Checkpoint with applied_seq M
+    Note over O: may discard its entries at or below M
+    O->>D: write_snapshot to out, on the sender
+    O->>D: install_snapshot from a reader, on the receiver
+```
+
+The owner must:
+
+1. **Order.** Call `apply` with strictly increasing sequences. Gaps are
+   allowed, for example for log entries that carry no data operation.
+2. **Redeliver.** After an `open`, start at `applied_seq() + 1`. An entry at
+   or below the current applied sequence is acknowledged with
+   `Applied::AlreadyApplied` and has no effect, so redelivering more than
+   necessary is safe.
+3. **Retain.** Keep every entry above the `applied_seq` of the last
+   *committed* checkpoint. Only the `Checkpoint` that `checkpoint` and
+   `checkpoint_with` return reports that sequence. After a crash, the
+   engine reopens at that sequence and needs every later entry again.
+4. **Make entries redeliverable before data.** Apply only entries that the
+   owner can redeliver after a crash, or commit with a `checkpoint_with`
+   hook that makes them redeliverable before the commit. A checkpoint can
+   capture effects of an entry above the committed sequence, including an
+   entry still being applied. If the owner then loses that entry, the
+   replica holds part of it and nothing can complete it. `checkpoint` and
+   `close` commit with no hook, so before either call every applied entry
+   must already be redeliverable.
+
+The engine guarantees:
+
+1. **`apply` is all or nothing** after any crash, once the owner
+   redelivers: the reopen is at a committed sequence, and redelivery
+   applies every entry above it whole.
+2. **After `open`, `applied_seq()` is the committed sequence**, and the
+   state equals the result of applying every entry up to it.
+3. **Determinism.** Two replicas that apply the same entries from the same
+   snapshot hold the same contents. This rests on the tree's apply rules
+   ([persistence](bf-tree-persistence.md#apply)) and on normalization.
+
+### `Db::apply`
+
+```rust
+pub fn apply(&self, seq: u64, ops: &[Op<'_>]) -> Result<Applied, Error> {
+    self.external()?;                                     // WrongMode
+    let tree = &self.shared.tree;
+    let _serial = self.shared.gate.write().unwrap_or_else(PoisonError::into_inner);
+    if seq <= tree.applied_seq() {
+        return Ok(Applied::AlreadyApplied);
+    }
+    let last: BTreeMap<&[u8], Op<'_>> = ops.iter().map(|op| (op.key(), *op)).collect();
+    let ops: Vec<Op<'_>> = last.into_values().collect();
+    ops.iter().try_for_each(|op| tree.check_op(op))?;
+    tree.apply(Entry { seq, ops: &ops })?;
+    Ok(Applied::Applied)
+}
+```
+
+- **Serialized under the writer gate.** `apply` holds the writer gate
+  exclusively, so the redelivery check and the application are one step,
+  and concurrent callers cannot reorder entries or violate
+  `Tree::apply`'s one-caller rule. Readers and checkpoints do not take the
+  gate. A phase-2 applier is sequential anyway: the gate makes misuse
+  safe, not fast.
+- **Redelivery is skipped, not re-applied.** Re-applying an old entry over
+  newer state is not harmless: an old `Put` would overwrite a newer value.
+  The check runs before the operations are examined, so a redelivered
+  entry returns `AlreadyApplied` even if its operations would now be
+  invalid.
+- **Normalization.** As for a `WriteBatch`, the operations are collected
+  into a `BTreeMap` by key: the result is sorted, and the last operation
+  for each key wins. The effect of an entry then does not depend on the
+  order of its operations, and a reopen that re-applies an entry whose
+  effects a checkpoint partly captured converges to the same state.
+- **Limits before any write.** `Tree::check_op` checks every operation
+  before `Tree::apply` writes any. An invalid operation rejects the whole
+  entry with `Error::Tree` (for example `KeyTooLarge`), and the entry takes
+  no sequence: the same sequence can then be applied with valid operations
+  (`external.rs`: `an_entry_past_the_limits_is_rejected_before_any_write`).
+- **Empty entries.** An entry with no operations applies and advances the
+  applied sequence.
+- **Gaps.** Any `seq` above the applied sequence is accepted. Gaps in the
+  owner's sequence do not stall the applied sequence.
+- **Watermark.** `apply` is serialized, and the tree advances the applied
+  sequence once per entry, after its last operation. The applied sequence
+  is therefore always the last completed entry.
+- **Applied, not durable.** `apply` returns once the entry is applied. The
+  owner's log provides durability; the entry becomes part of the engine's
+  durable state at the next committed checkpoint.
+
+### Checkpoints in external mode
+
+```rust
+pub fn checkpoint_with(
+    &self,
+    hook: impl FnOnce(u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+) -> Result<Checkpoint, Error> {
+    self.external()?;
+    let mut failure = None;
+    let result = self.shared.tree.checkpoint_with(|point| {
+        hook(point.captured_seq).map_err(|error| {
+            failure = Some(error);
+            LogError::Other("external hook")
+        })
+    });
+    match (result, failure) {
+        (Ok(state), _) => Ok(state.into()),
+        (Err(_), Some(error)) => Err(Error::Hook(error)),
+        (Err(error), None) => Err(error.into()),
+    }
+}
+```
+
+**On demand only. The owner is fully responsible for checkpoints.** There
+is no policy thread and no interval checkpoint. The committed
+`applied_seq` is where the owner may truncate its log and where a replica
+resumes after a crash, so the owner must decide when it advances. An
+engine-driven checkpoint would also have no owner hook. Consequences:
+
+- The owner must checkpoint periodically. Between checkpoints the store
+  file grows, because shadow paging writes every page to a fresh location
+  and frees old pages only at a commit
+  ([persistence](bf-tree-persistence.md#shadow-paging)).
+- After a crash, everything applied since the last committed checkpoint is
+  lost from the engine and must be redelivered (owner obligation 3).
+- `close` still commits one checkpoint, with no hook (owner obligation 4).
+
+**The hook.** The engine passes the hook to `Tree::checkpoint_with`. The
+tree calls it after it fixes the write sequence `W` and before the
+superblock commit, with `CommitPoint::captured_seq`: at least the sequence
+of every effect in the image being committed, including an entry that
+`apply` is still writing
+([persistence](bf-tree-persistence.md#the-pre-commit-hook)). The owner
+makes its log durable, or otherwise redeliverable, through that sequence.
+
+- **A hook error aborts the commit.** The engine keeps the owner's boxed
+  error and returns it as `Error::Hook`; the tree sees
+  `LogError::Other("external hook")` and commits nothing. A reopen is at
+  the previous commit (`external.rs`:
+  `a_failing_hook_aborts_the_checkpoint_and_returns_the_owners_error`).
+- **The hook must not call back into the `Db`.** The tree calls it under
+  its checkpointing mutex. The hook may wait on the owner's log, but a
+  call to `checkpoint` or `checkpoint_with` from the hook would wait for
+  that mutex. Writers keep running while the hook waits.
+- **`checkpoint` in external mode** commits with no hook: `Shared::checkpoint`
+  calls `Tree::checkpoint` when there is no WAL. It is correct only if
+  every applied entry is already redeliverable.
+- `checkpoint_with` and `apply` can run at the same time: the checkpoint
+  does not take the writer gate. This is why `captured_seq` can be above
+  the committed `applied_seq`.
+
+### Snapshots
+
+**Sender.** `write_snapshot(out)` works in both modes
+([Checkpoints](#checkpoints-and-wal-before-data)). It streams the last
+committed checkpoint to `out` as a complete store file, with the
+checkpoint's `applied_seq` in its superblock, while writes continue, and
+returns that `Checkpoint`. The snapshot format is the store format
+([persistence](bf-tree-persistence.md#snapshots)).
+
+**Receiver.** `install_snapshot(self, snapshot)` replaces this database's
+state with a snapshot and reopens. It consumes `self`, because the tree
+must be closed before its file is replaced; ownership makes that
+impossible to get wrong. A fresh follower opens an empty external database
+and installs into it.
+
+```mermaid
+flowchart TD
+    A{"Mode::External?"} -->|no| W["Error::WrongMode, the Db is dropped"]
+    A -->|yes| B["take the LOCK handle, drop self: the tree closes, no checkpoint"]
+    B --> C["create or truncate tree.bf.partial"]
+    C --> D["io::copy the reader into the partial file"]
+    D --> E["sync_all the partial file"]
+    E --> F{"FileStore::open and Tree::open_with(options.tree) on the partial succeed?"}
+    C -->|"I/O error"| X["remove the partial, return the error"]
+    D -->|"I/O error"| X
+    E -->|"I/O error"| X
+    F -->|"no: Error::Tree or Error::Options"| X
+    F -->|yes| G["drop the validation tree, rename the partial over tree.bf"]
+    G -->|"I/O error"| Y["Error::Io, the old tree.bf stays, open removes the partial"]
+    G --> H["sync the database directory"]
+    H -->|"I/O error"| Z["Error::Io, the new tree.bf is in place"]
+    H --> I["open_locked: remove a stale partial, open the tree, keep the LOCK"]
+```
+
+- **Validate before replacing.** A truncated, corrupt, or foreign snapshot
+  must not destroy a good state. Opening the partial file as a tree runs
+  the tree's open checks: the superblocks, page validation, and the
+  limits. A snapshot whose limits differ from `options.tree` is
+  `Error::Options("tree limits differ from the store")`; other failures are
+  `Error::Tree`. On any error before the rename, the partial file is
+  removed and `tree.bf` is untouched
+  (`external.rs`: `a_bad_snapshot_is_rejected_and_the_old_state_reopens`).
+- **Atomic replacement.** `rename` replaces `tree.bf` in one step on POSIX
+  file systems. The partial file is synced before the rename, and the
+  directory after it, so a crash never exposes a half-written store, and a
+  completed install is durable.
+- **The lock is kept.** The `LOCK` handle moves out of the old `Db` and
+  into the reopened one, so no other process or handle opens the database
+  during the install (`external.rs`:
+  `installing_a_snapshot_replaces_the_state` checks that a second open is
+  `Locked` after the install).
+- **The old state is discarded without a checkpoint.** Entries applied
+  since the last commit are not saved; the snapshot replaces them.
+- **The reopen** goes through the same `open_locked` path as `open`, so the
+  new state opens at the snapshot's `applied_seq`. The owner continues
+  with `apply` from `applied_seq() + 1`.
+
+**Crash during install.** Before the rename, `tree.bf` holds the old state,
+and a partial file may remain; the next `open` removes `tree.bf.partial`
+(`external.rs`: `a_leftover_partial_snapshot_is_removed_by_open`). After
+the rename, the new state is in place. If the crash comes after the rename
+but before the directory sync, either the old or the new `tree.bf` is
+found; both are valid stores.
+
+**On error the database is closed.** `install_snapshot` returns only the
+error; the caller reopens with `Db::open`. The old state is intact unless
+the rename completed.
+
+**The reader is `&mut dyn Read`.** `install_snapshot` copies it with
+`io::copy`, so the engine does not hold the whole snapshot in memory. A
+chunked, resumable transfer (offset-based, across reconnects) is deferred.
+The snapshot is a store file with fixed offsets, so such a transfer can be
+added later as a second method without changing the format.
+
+### Replica tests
+
+`replica.rs` exercises the contract the way replication will. The leader
+is a standalone `Db` with one 1 GiB segment (`segment_bytes = 1 << 30`),
+so its WAL holds every entry from sequence 1. The test helper `stream`
+reads the leader's WAL with `engine_wal::Wal::replay`, as a log shipper
+would, and `ship` passes each record to the follower's `apply`. The leader
+stays open: reopening it would seal its segment and truncate it below the
+committed sequence. Every leader write is acknowledged before `stream`
+runs, so the WAL has no torn tail for replay to repair. `state_at(entries,
+seq)` replays the stream into a map up to `seq` and is the oracle.
+
+- `a_follower_installs_a_snapshot_and_catches_up`: the leader writes 400
+  random operations, checkpoints, and writes 200 more. The follower installs
+  the leader's snapshot, applies every later entry (each returns
+  `Applied`), and then equals the leader in contents and `applied_seq`.
+- `a_follower_that_crashes_resumes_and_converges`: the follower applies the
+  stream, checkpoints, applies 300 more operations' entries, and is dropped
+  (a crash in external mode). It reopens at the committed sequence. The
+  whole stream is redelivered: exactly the entries at or below the
+  committed sequence return `AlreadyApplied`, and the follower converges.
+- `a_randomized_follower_tracks_the_leader`: 4 seeds of 60 steps. Each step
+  writes 1 to 15 random operations on the leader, then may reinstall a
+  fresh leader snapshot (1 in 10), checkpoint the follower (1 in 10), or
+  drop and reopen it (1 in 10). It ships a random number of entries,
+  starting up to 4 entries below the follower's applied sequence so some
+  are redelivered, and asserts each `Applied` result. After every step,
+  the follower equals `state_at` the follower's applied sequence.
+
+### External mode guarantees
+
+Test paths are relative to `crates/engine/src/tests/`.
+
+| Guarantee | Tests |
+| --- | --- |
+| 1. Each mode refuses the other mode's methods with `WrongMode`; reads, `checkpoint`, `write_snapshot`, and `close` work in external mode. | `external.rs`: `each_mode_refuses_the_other_modes_writes`, `standalone_install_is_wrong_mode` |
+| 2. Entries apply in sequence order with gaps and empty entries; the last operation per key wins; redeliveries return `AlreadyApplied` and change nothing. | `external.rs`: `entries_apply_in_order_with_gaps_and_redeliveries_are_skipped`; `replica.rs`: `a_follower_that_crashes_resumes_and_converges`, `a_randomized_follower_tracks_the_leader` |
+| 3. An entry over the limits is rejected before any write and takes no sequence. | `external.rs`: `an_entry_past_the_limits_is_rejected_before_any_write` |
+| 4. A hook error returns the owner's error as `Error::Hook` and commits nothing. | `external.rs`: `a_failing_hook_aborts_the_checkpoint_and_returns_the_owners_error` |
+| 5. After `open`, `applied_seq()` is the committed sequence and the state equals every entry up to it; `close` checkpoints. | `external.rs`: `a_reopen_resumes_at_the_committed_sequence`; `replica.rs`: `a_follower_that_crashes_resumes_and_converges`, `a_randomized_follower_tracks_the_leader` |
+| 6. An external open over a standalone WAL is refused; deleting `wal/` after `close` converts the database. | `external.rs`: `an_external_open_over_a_standalone_wal_is_refused` |
+| 7. An install replaces the state, keeps the lock, and the replica continues from the snapshot's sequence. | `external.rs`: `installing_a_snapshot_replaces_the_state`; `replica.rs`: `a_follower_installs_a_snapshot_and_catches_up` |
+| 8. A truncated snapshot, a snapshot with both superblock copies damaged, and a snapshot with other limits are rejected, the partial file is removed, and the old state reopens. | `external.rs`: `a_bad_snapshot_is_rejected_and_the_old_state_reopens` |
+| 9. `open` removes a leftover `tree.bf.partial`. | `external.rs`: `a_leftover_partial_snapshot_is_removed_by_open` |
+| 10. A follower that installs a snapshot and applies every later entry, with redeliveries, checkpoints, crashes, and reinstalls, equals the leader at its applied sequence. | `replica.rs`: `a_follower_installs_a_snapshot_and_catches_up`, `a_randomized_follower_tracks_the_leader` |
+
+Some properties rest on the code alone: that the partial file and the
+directory are synced (the tests cannot observe a sync), that the
+`rename` is atomic, and a crash at each step of an install (the tests
+simulate only a leftover partial file). The owner's obligations cannot be
+tested by the engine; `replica.rs` follows them.
+
+### External mode: not guaranteed, and limits
+
+- **Durability before a checkpoint.** An applied entry is in the engine's
+  durable state only after a committed checkpoint. A crash loses every
+  entry since then; the owner must redeliver them.
+- **`checkpoint` and `close` have no hook.** They are correct only if
+  every applied entry is already redeliverable (owner obligation 4).
+- **Store growth.** Without periodic checkpoints, the store file grows
+  without a bound.
+- **An `apply` after a store error.** If `Tree::apply` fails with a store
+  error after it started writing, the entry can be partly applied in the
+  live tree, and the applied sequence does not advance. The owner should
+  reopen and redeliver.
+- **Follower reads.** Reads see applied entries that no checkpoint holds
+  yet, which a crash can take back until they are redelivered. There is no
+  read barrier ("wait until applied is at least n").
+- **Snapshot metadata.** A snapshot carries only the store file and its
+  `applied_seq`; replication metadata such as a term or a configuration is
+  the owner's.
+- **Limits must match.** A follower must open with the leader's tree
+  limits; a snapshot with other limits is rejected.
+- **One damaged superblock copy is not a rejection.** The store keeps two
+  superblock copies and selects a valid one
+  ([persistence](bf-tree-persistence.md#dual-copies-and-selection)), so a
+  snapshot with one damaged copy opens from the other copy and is not
+  rejected. The test damages both copies.
+- **Rename atomicity** relies on POSIX `rename` semantics.
+- **Switching back.** Opening an external database in standalone mode is
+  not tested.
+
+### External mode extension points
+
+This is the interface that phase 2 drives. Replication adds callers, not
+changes:
+
+- **Raft apply loop:** `apply(index, ops)` for each committed entry;
+  `Applied::AlreadyApplied` on replays after a restart.
+- **Log compaction:** `checkpoint_with(|seq| raft_log.sync_to(seq))`, then
+  discard entries at or below the returned `applied_seq`.
+- **Follower catch-up:** `write_snapshot` on the leader, `install_snapshot`
+  on the follower, then `apply` from `applied_seq() + 1`.
+- **Restart:** `open`, then resume at `applied_seq() + 1`.
+
+Expected later additions, all additive: a chunked or streaming snapshot
+transfer (a second install method, resumable by offset), snapshot metadata
+(term, configuration) carried beside the store file, a read barrier for
+follower reads, and metrics. Later plans must not need to change `apply`'s
+ordering rules, the snapshot format (the store format), or the standalone
+path.
 
 ## Relationship to sources
 
@@ -1398,5 +1858,10 @@ their own stack after plan 0023; the recommended design is MVCC.
 - The Microsoft implementation's
   [`src/snapshot.rs`](https://github.com/microsoft/bf-tree/blob/f442e6172bf7e5483ff320d8e3ac16a70e31bbd6/src/snapshot.rs)
   recovers by logical replay, as `Db::open` does through `Tree::apply`.
+- The [ZippyDB engineering overview](../references.md#zippydb-engineering-overview)
+  describes a replicated log that drives a storage engine on each replica,
+  the shape that the external-log mode serves. The owner contract, the
+  redelivery rule, owner-driven checkpoints with a hook, and the snapshot
+  install steps are peppydb-specific.
 - RFC 3720 (iSCSI), §B.4, gives the CRC32C check value
   `crc32c(b"123456789") == 0xE306_9283`.
