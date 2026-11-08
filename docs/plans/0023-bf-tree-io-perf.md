@@ -445,7 +445,7 @@ Resolved (review, 2026-11-08):
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: Linux container and benchmark volume.
+- [x] Diff 2: Linux container and benchmark volume.
 - [ ] Diff 3: direct I/O.
 - [ ] Diff 4: batched open reads.
 - [ ] Diff 5: engine I/O option.
@@ -458,7 +458,16 @@ Resolved (review, 2026-11-08):
 
 ## Discoveries and plan changes
 
-None yet.
+- **Plan 0016's container had never built anything.** With a working
+  Docker engine, `tools/linux-run tools/buck2 test` failed at the first
+  link: the prelude's system C++ toolchain calls `clang++`, which the image
+  lacked. Diff 2 installs `clang` and `lld`. The plan 0016 stacks were
+  already landed, so the fix is a new diff here rather than an amend. After
+  it, all 21 Buck2 test targets pass in the container on aarch64 Linux
+  (Docker Desktop, 12 CPUs, 8 GB, kernel 6.12 linuxkit).
+- **Mount types in the container:** the checkout is a virtiofs share from
+  macOS, `/tmp` is overlayfs, and the `/bench` volume is ext4 on the VM's
+  disk.
 
 ## Agent notes
 

@@ -7,7 +7,9 @@
 #
 # The image is rebuilt when its inputs change. Linux build outputs live in
 # named volumes mounted over buck-out/ and target/, so they never mix with
-# the host's. The PEPPYDB_BENCH_* and PEPPYDB_SOAK_SECS settings pass
+# the host's. Benchmark and direct-I/O data go to /bench (PEPPYDB_BENCH_DIR),
+# a named volume on the VM's own disk: the checkout is a share from the host,
+# where O_DIRECT is not meaningful. The PEPPYDB_BENCH_* and PEPPYDB_SOAK_SECS settings pass
 # through. Contended benchmarks see the CPUs of Docker's VM.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -37,6 +39,8 @@ exec docker run --rm -i $TTY \
     -v peppydb-linux-target:/work/peppydb/target \
     -v peppydb-linux-cargo:/root/.cargo/registry \
     -v peppydb-linux-dotslash:/root/.cache/dotslash \
+    -v peppydb-linux-bench:/bench \
+    -e PEPPYDB_BENCH_DIR=/bench \
     -e PEPPYDB_BENCH_KEY -e PEPPYDB_BENCH_VALUE \
     -e PEPPYDB_BENCH_CIRCULAR_BUFFER_MIB -e PEPPYDB_BENCH_KEYS \
     -e PEPPYDB_BENCH_MILLIS -e PEPPYDB_SOAK_SECS \
