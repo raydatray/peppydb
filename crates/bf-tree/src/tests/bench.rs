@@ -20,16 +20,16 @@ use super::*;
 
 /// The record shape and run lengths, from the environment.
 #[derive(Clone, Copy, Debug)]
-struct Shape {
-    key: usize,
-    value: usize,
-    buffer_mib: usize,
-    keys: u64,
-    measure: Duration,
+pub(super) struct Shape {
+    pub(super) key: usize,
+    pub(super) value: usize,
+    pub(super) buffer_mib: usize,
+    pub(super) keys: u64,
+    pub(super) measure: Duration,
 }
 
 impl Shape {
-    fn from_env() -> Self {
+    pub(super) fn from_env() -> Self {
         let var = |name: &str, default: u64| -> u64 {
             std::env::var(name)
                 .ok()
@@ -44,7 +44,7 @@ impl Shape {
         }
     }
 
-    fn config(&self, record_cache: bool) -> TreeConfig {
+    pub(super) fn config(&self, record_cache: bool) -> TreeConfig {
         let defaults = TreeConfig::default();
         TreeConfig {
             max_key_len: defaults.max_key_len.max(self.key),
@@ -56,13 +56,13 @@ impl Shape {
     }
 
     /// The `i`th key: a scrambled index, padded to the key length.
-    fn key(&self, i: u64) -> Vec<u8> {
+    pub(super) fn key(&self, i: u64) -> Vec<u8> {
         let mut key = i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes().to_vec();
         key.resize(self.key.max(8), 0x5a);
         key
     }
 
-    fn describe(&self) -> String {
+    pub(super) fn describe(&self) -> String {
         format!(
             "{} keys of {} bytes, {}-byte values, {} MiB circular buffer, {:?} per point",
             self.keys, self.key, self.value, self.buffer_mib, self.measure
@@ -81,10 +81,10 @@ fn loaded(shape: &Shape, record_cache: bool) -> Tree {
 }
 
 /// A per-thread xorshift generator.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn below(&mut self, bound: u64) -> u64 {
+    pub(super) fn below(&mut self, bound: u64) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -94,16 +94,16 @@ impl Rng {
 
 /// A mix of point operations: the percentage that are puts.
 #[derive(Clone, Copy, Debug)]
-struct Mix {
+pub(super) struct Mix {
     name: &'static str,
     put_percent: u64,
 }
 
-const GET: Mix = Mix {
+pub(super) const GET: Mix = Mix {
     name: "get",
     put_percent: 0,
 };
-const PUT: Mix = Mix {
+pub(super) const PUT: Mix = Mix {
     name: "put",
     put_percent: 100,
 };
@@ -118,7 +118,7 @@ const MOSTLY_GET: Mix = Mix {
 
 /// Run `threads` threads of `mix` over `keys` (indices into the shape) for
 /// the shape's measurement time; return the total rate in M ops/s.
-fn measure(tree: &Tree, shape: &Shape, keys: &[u64], threads: usize, mix: Mix) -> f64 {
+pub(super) fn measure(tree: &Tree, shape: &Shape, keys: &[u64], threads: usize, mix: Mix) -> f64 {
     let stop = AtomicBool::new(false);
     let value = vec![9; shape.value];
     let started = Instant::now();
@@ -156,7 +156,7 @@ fn measure(tree: &Tree, shape: &Shape, keys: &[u64], threads: usize, mix: Mix) -
 }
 
 /// 1, 2, 4, 8, and the available parallelism, in order and deduplicated.
-fn thread_counts() -> Vec<usize> {
+pub(super) fn thread_counts() -> Vec<usize> {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let mut counts = vec![1, 2, 4, 8, available];
     counts.sort_unstable();
@@ -197,7 +197,7 @@ fn baseline_threads() {
 }
 
 /// The keys of the first `leaves` leaves in key order.
-fn hot_keys(tree: &Tree, shape: &Shape, leaves: usize) -> Vec<u64> {
+pub(super) fn hot_keys(tree: &Tree, shape: &Shape, leaves: usize) -> Vec<u64> {
     let mut by_key: Vec<_> = (0..shape.keys).map(|i| (shape.key(i), i)).collect();
     by_key.sort_unstable();
     let mut seen = Vec::new();

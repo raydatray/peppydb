@@ -4,6 +4,7 @@ use bf_tree_node_id::InnerId;
 
 mod apply;
 mod bench;
+mod bench_io;
 mod buffered;
 mod checkpoint;
 mod concurrent;

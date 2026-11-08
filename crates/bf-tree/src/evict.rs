@@ -75,6 +75,8 @@ impl Tree {
             self.leaves.circular_buffer.retire(victim);
             return Ok(());
         }
+        #[cfg(test)]
+        stall_for_bench();
         // A full page: write it back if dirty, then free it.
         if let Residency::Full(_) = leaf.residency() {
             return match self.leaves.release_full(&mut leaf) {
@@ -104,5 +106,21 @@ impl Tree {
                 Err(error)
             }
         }
+    }
+}
+
+/// Microseconds by which the next eviction stalls while it holds its claim
+/// and its leaf lock; zero for none. Set only by `bench_head_stall`, to
+/// model a slow head write-back. Each eviction reads it once.
+#[cfg(test)]
+pub(crate) static EVICT_STALL_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn stall_for_bench() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if EVICT_STALL_MICROS.load(Relaxed) != 0 {
+        let micros = EVICT_STALL_MICROS.swap(0, Relaxed);
+        std::thread::sleep(std::time::Duration::from_micros(micros));
     }
 }
