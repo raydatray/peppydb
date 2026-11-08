@@ -609,7 +609,7 @@ by plans 0019 and 0013.
 - [ ] Diff 2: crate, open, recovery, reads.
 - [x] Diff 3: durable writes.
 - [x] Diff 4: write batches.
-- [ ] Diff 5: checkpoint policy.
+- [x] Diff 5: checkpoint policy.
 - [ ] Diff 6: crash tests.
 - [ ] Diff 7: documentation.
 - [ ] Stack-wide verification.

@@ -47,7 +47,7 @@ fn writes_past_the_limits_are_rejected_before_logging() {
         db.delete(b""),
         Err(Error::Tree(TreeError::EmptyKey))
     ));
-    assert_eq!(db.wal.last_seq(), 0, "nothing was logged");
+    assert_eq!(db.shared.wal.last_seq(), 0, "nothing was logged");
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn a_closed_wal_surfaces_as_a_wal_error() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), small()).unwrap();
     db.put(b"a", b"1").unwrap();
-    db.wal.close().unwrap();
+    db.shared.wal.close().unwrap();
     assert!(matches!(
         db.put(b"b", b"2"),
         Err(Error::Wal(WalError::Closed))
