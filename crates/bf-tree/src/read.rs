@@ -42,9 +42,10 @@ impl Tree {
                 Lookup::Miss => None,
             },
             // A full page is the complete leaf.
+            // The route was validated under the leaf lock, so the key is in
+            // the leaf's fences.
             Residency::Full(page) => {
-                page.check_key(key)?;
-                Some(page.get(key)?.and_then(|record| record.state.value()))
+                Some(page.get_routed(key).and_then(|record| record.state.value()))
             }
             Residency::Base => None,
         };
@@ -53,8 +54,7 @@ impl Tree {
             Some(value) => f(value),
             None => with_scratch(|scratch| -> Result<_, TreeError> {
                 let page = self.leaves.load_base(&leaf, &mut scratch.page[..n])?;
-                page.check_key(key)?;
-                let value = page.get(key)?.and_then(|record| match record.state {
+                let value = page.get_routed(key).and_then(|record| match record.state {
                     RecordState::Insert(value) => Some(value),
                     _ => None,
                 });

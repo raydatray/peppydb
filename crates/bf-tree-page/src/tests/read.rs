@@ -376,3 +376,38 @@ fn unequal_previews_do_not_access_payloads() {
     assert!(page.compare_suffix(&slot, b"aa").is_gt());
     assert!(page.compare_suffix(&slot, b"ac").is_lt());
 }
+
+#[test]
+fn routed_lookups_match_checked_ones() {
+    let mut bytes = vec![0; 256];
+    let page = Page::init_with_fences(
+        &mut bytes,
+        Fences {
+            lower: Fence::Key(&b"b"[..]),
+            upper: Fence::Key(&b"m"[..]),
+        },
+    )
+    .unwrap();
+    for key in [&b"b"[..], b"c", b"dd", b"k"] {
+        page.try_insert(key, key).unwrap();
+    }
+    for key in [&b"b"[..], b"bb", b"c", b"dd", b"e", b"k", b"lz"] {
+        assert_eq!(page.get_routed(key), page.get(key).unwrap(), "{key:?}");
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a routed key is in range")]
+fn a_routed_lookup_outside_the_fences_panics_in_debug_builds() {
+    let mut bytes = vec![0; 256];
+    let page = Page::init_with_fences(
+        &mut bytes,
+        Fences {
+            lower: Fence::Key(&b"b"[..]),
+            upper: Fence::Key(&b"m"[..]),
+        },
+    )
+    .unwrap();
+    let _ = page.get_routed(b"z");
+}

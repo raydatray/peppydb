@@ -449,7 +449,7 @@ Resolved (review, 2026-11-08):
 - [x] Diff 3: direct I/O.
 - [x] Diff 4: batched open reads.
 - [x] Diff 5: engine I/O option.
-- [ ] Diff 6: routed lookups.
+- [x] Diff 6: routed lookups.
 - [ ] Diff 7: integer comparisons.
 - [ ] Diff 8: persistence and circular-buffer benchmarks.
 - [ ] Diff 9: engine and WAL benchmarks.
@@ -479,6 +479,14 @@ Resolved (review, 2026-11-08):
   on a lock held for the whole checkpoint would take about the full
   checkpoint, so the bound is now a factor of 4; six full container runs
   then passed.
+- **Routed lookups: the tree checked the fences twice.** `get_with` called
+  `Page::check_key` and then `Page::get`, which checks again. Diff 6
+  replaces both with `Page::get_routed` on the base page and the full
+  page. Container A/B (Docker on macOS, aarch64, release, four alternating
+  runs): `get_with` on a hot leaf 189.7 to 192.3 ns before, 184.2 to
+  185.1 ns after (about 3%); the descent, unchanged, stayed at 133.6 to
+  135.0 ns. Only `get_routed` landed; `find_index_routed` had no caller
+  on a routed path.
 
 ## Agent notes
 

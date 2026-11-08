@@ -18,6 +18,14 @@ impl Page {
         Ok(self.search(key).ok().map(|index| self.record_at(index)))
     }
 
+    /// [`Page::get`] for a key that a validated route brought to this page,
+    /// so it is nonempty and inside the fences by construction: skips the
+    /// fence check, which debug builds still assert.
+    pub fn get_routed(&self, key: &[u8]) -> Option<RecordRef<'_>> {
+        debug_assert_eq!(self.check_key(key), Ok(()), "a routed key is in range");
+        self.search(key).ok().map(|index| self.record_at(index))
+    }
+
     /// Borrow all record states in lexicographic key order without allocation.
     pub fn iter(&self) -> Iter<'_> {
         Iter {
