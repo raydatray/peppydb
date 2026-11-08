@@ -13,8 +13,10 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::{PoisonError, RwLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
+use std::thread::{JoinHandle, Thread};
+use std::time::{Duration, Instant};
 
 use bf_tree::{Entry, FileStore, Superblock, Tree};
 use engine_wal::{Wal, WalOptions};
@@ -226,6 +228,15 @@ fn tree_ops(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<bf_tree::Op<'_>> {
 /// The embedded database.
 pub struct Db {
     path: PathBuf,
+    shared: Arc<Shared>,
+    /// The checkpoint policy thread; `None` once stopped.
+    policy_thread: Option<JoinHandle<()>>,
+    /// Held for the database's lifetime; dropping it releases the lock.
+    _lock: File,
+}
+
+/// What the database and its policy thread share.
+struct Shared {
     tree: Tree,
     wal: Wal,
     /// Single writes hold it shared; a batch holds it exclusively from its
@@ -233,8 +244,119 @@ pub struct Db {
     /// keys can take a later sequence and apply first. Readers and
     /// checkpoints never take it.
     gate: RwLock<()>,
-    /// Held for the database's lifetime; dropping it releases the lock.
-    _lock: File,
+    policy: Policy,
+    /// The first background checkpoint error, for `close`. Only the policy
+    /// thread and `close` touch it; writers never do.
+    background_error: Mutex<Option<Error>>,
+}
+
+/// A committed checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// Every write at or below this sequence is in the committed tree.
+    pub applied_seq: u64,
+    /// Increases by one per committed checkpoint.
+    pub checkpoint_id: u64,
+}
+
+impl From<bf_tree::State> for Checkpoint {
+    fn from(state: bf_tree::State) -> Self {
+        Self {
+            applied_seq: state.applied_seq,
+            checkpoint_id: state.checkpoint_id,
+        }
+    }
+}
+
+/// When to checkpoint. Writers touch only its atomics, so a writer never
+/// waits for a checkpoint; the policy thread sleeps with `park_timeout`.
+struct Policy {
+    /// WAL bytes appended since the last checkpoint began that trigger one.
+    threshold: u64,
+    interval: Duration,
+    /// `wal.appended_bytes()` when the last checkpoint began.
+    bytes_at_checkpoint: AtomicU64,
+    /// The committed applied sequence of the last checkpoint.
+    applied_at_checkpoint: AtomicU64,
+    kicked: AtomicBool,
+    stop: AtomicBool,
+    thread: OnceLock<Thread>,
+}
+
+impl Policy {
+    /// After a write: one relaxed load and a subtraction in the common case;
+    /// at most one writer per threshold crossing unparks the thread.
+    fn note_append(&self, wal: &Wal) {
+        let grown = wal
+            .appended_bytes()
+            .saturating_sub(self.bytes_at_checkpoint.load(Ordering::Relaxed));
+        if grown >= self.threshold
+            && !self.kicked.load(Ordering::Relaxed)
+            && !self.kicked.swap(true, Ordering::AcqRel)
+            && let Some(thread) = self.thread.get()
+        {
+            thread.unpark();
+        }
+    }
+}
+
+impl Shared {
+    /// Checkpoint the tree with WAL-before-data, then truncate the WAL.
+    fn checkpoint(&self) -> Result<Checkpoint, Error> {
+        // Writes during this checkpoint do not re-kick it for bytes it
+        // already covers.
+        self.policy
+            .bytes_at_checkpoint
+            .store(self.wal.appended_bytes(), Ordering::Relaxed);
+        let state = self.tree.checkpoint_with(|point| {
+            // Every effect in the pages being committed has a sequence at or
+            // below `captured_seq`, and its record was appended before the
+            // effect was applied: syncing through it makes every committed
+            // effect durable in the WAL first.
+            self.wal
+                .sync_to(point.captured_seq)
+                .map_err(|error| to_log_error(&error))
+        })?;
+        self.wal.truncate_below(state.applied_seq)?;
+        self.policy
+            .applied_at_checkpoint
+            .store(state.applied_seq, Ordering::Relaxed);
+        Ok(state.into())
+    }
+
+    /// The policy thread: checkpoint when enough WAL bytes arrived, or when
+    /// the interval passed and something new was applied.
+    fn run_policy(&self) {
+        let mut deadline = Instant::now() + self.policy.interval;
+        loop {
+            std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+            if self.policy.stop.load(Ordering::Acquire) {
+                return;
+            }
+            let grown = self.policy.kicked.swap(false, Ordering::AcqRel)
+                || self
+                    .wal
+                    .appended_bytes()
+                    .saturating_sub(self.policy.bytes_at_checkpoint.load(Ordering::Relaxed))
+                    >= self.policy.threshold;
+            let now = Instant::now();
+            let due = now >= deadline
+                && self.tree.applied_seq()
+                    > self.policy.applied_at_checkpoint.load(Ordering::Relaxed);
+            if (grown || due)
+                && let Err(error) = self.checkpoint()
+            {
+                let mut stored = self
+                    .background_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                stored.get_or_insert(error);
+            }
+            if now >= deadline {
+                deadline = now + self.policy.interval;
+            }
+        }
+    }
 }
 
 // Compile-time check: a database is shared between threads.
@@ -265,13 +387,57 @@ impl Db {
         let next = applied.max(replayed.last_seq.unwrap_or(0)) + 1;
         let wal = Wal::open(&wal_dir, options.wal(), next)?;
         wal.truncate_below(applied)?;
-        Ok(Db {
-            path,
+        let shared = Arc::new(Shared {
+            policy: Policy {
+                threshold: options.checkpoint_wal_bytes,
+                interval: options.checkpoint_interval,
+                bytes_at_checkpoint: AtomicU64::new(wal.appended_bytes()),
+                applied_at_checkpoint: AtomicU64::new(applied),
+                kicked: AtomicBool::new(false),
+                stop: AtomicBool::new(false),
+                thread: OnceLock::new(),
+            },
             tree,
             wal,
             gate: RwLock::new(()),
+            background_error: Mutex::new(None),
+        });
+        let policy_thread = {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("engine-checkpoint".into())
+                .spawn(move || shared.run_policy())
+                .map_err(io("spawn the checkpoint thread"))?
+        };
+        let _ = shared.policy.thread.set(policy_thread.thread().clone());
+        Ok(Db {
+            path,
+            shared,
+            policy_thread: Some(policy_thread),
             _lock: lock,
         })
+    }
+
+    /// Commit a checkpoint now: the tree at every write applied so far, with
+    /// every committed effect durable in the WAL first. Then delete WAL
+    /// segments the checkpoint covers. The policy thread calls the same
+    /// function; concurrent calls are safe.
+    pub fn checkpoint(&self) -> Result<Checkpoint, Error> {
+        self.shared.checkpoint()
+    }
+
+    /// Write the last committed checkpoint to `out` as a tree store file,
+    /// while writes continue. Returns that checkpoint.
+    pub fn write_snapshot(&self, out: &mut dyn std::io::Write) -> Result<Checkpoint, Error> {
+        Ok(self.shared.tree.write_snapshot(out)?.into())
+    }
+
+    fn stop_policy(&mut self) {
+        if let Some(thread) = self.policy_thread.take() {
+            self.shared.policy.stop.store(true, Ordering::Release);
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
     }
 
     /// Insert or replace `key`. Returns once the write is durable in the
@@ -280,21 +446,35 @@ impl Db {
     /// never returned `Ok`.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         let seq = {
-            let _single = self.gate.read().unwrap_or_else(PoisonError::into_inner);
-            self.tree.put_logged(&WalLog(&self.wal), key, value)?
+            let _single = self
+                .shared
+                .gate
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.shared
+                .tree
+                .put_logged(&WalLog(&self.shared.wal), key, value)?
         };
         // After the leaf lock is released: a slow sync holds no lock.
-        self.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(&self.shared.wal);
+        self.shared.wal.wait_durable(seq)?;
         Ok(())
     }
 
     /// Remove `key` if present. Returns once the removal is durable.
     pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
         let seq = {
-            let _single = self.gate.read().unwrap_or_else(PoisonError::into_inner);
-            self.tree.remove_logged(&WalLog(&self.wal), key)?
+            let _single = self
+                .shared
+                .gate
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.shared
+                .tree
+                .remove_logged(&WalLog(&self.shared.wal), key)?
         };
-        self.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(&self.shared.wal);
+        self.shared.wal.wait_durable(seq)?;
         Ok(())
     }
 
@@ -308,36 +488,43 @@ impl Db {
             return Ok(());
         }
         let tree_ops = tree_ops(&ops);
-        tree_ops.iter().try_for_each(|op| self.tree.check_op(op))?;
+        tree_ops
+            .iter()
+            .try_for_each(|op| self.shared.tree.check_op(op))?;
         let wal_ops: Vec<_> = tree_ops.iter().map(to_wal_op).collect();
         let seq = {
-            let _exclusive = self.gate.write().unwrap_or_else(PoisonError::into_inner);
-            let seq = self.wal.append_batch(&wal_ops)?;
-            self.tree.apply(Entry {
+            let _exclusive = self
+                .shared
+                .gate
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            let seq = self.shared.wal.append_batch(&wal_ops)?;
+            self.shared.tree.apply(Entry {
                 seq,
                 ops: &tree_ops,
             })?;
             seq
         };
-        self.wal.wait_durable(seq)?;
+        self.shared.policy.note_append(&self.shared.wal);
+        self.shared.wal.wait_durable(seq)?;
         Ok(())
     }
 
     /// The value stored for `key`, or `None`.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        Ok(self.tree.get(key)?)
+        Ok(self.shared.tree.get(key)?)
     }
 
     /// Call `f` exactly once with the value stored for `key`, or `None`.
     /// `f` runs under a leaf lock and must not call back into the database.
     pub fn get_with<R>(&self, key: &[u8], f: impl FnOnce(Option<&[u8]>) -> R) -> Result<R, Error> {
-        Ok(self.tree.get_with(key, f)?)
+        Ok(self.shared.tree.get_with(key, f)?)
     }
 
     /// The records in `[start, end)`, in key order. Consistent per leaf,
     /// not across leaves.
     pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Result<Scan<'_>, Error> {
-        Ok(self.tree.range(start, end)?)
+        Ok(self.shared.tree.range(start, end)?)
     }
 
     /// Visit the records in `[start, end)` in key order without copying.
@@ -349,12 +536,12 @@ impl Db {
         end: Option<&[u8]>,
         visit: impl FnMut(&[u8], &[u8]) -> ControlFlow<()>,
     ) -> Result<(), Error> {
-        Ok(self.tree.scan_with(start, end, visit)?)
+        Ok(self.shared.tree.scan_with(start, end, visit)?)
     }
 
     /// Every write with a sequence at or below this is applied.
     pub fn applied_seq(&self) -> u64 {
-        self.tree.applied_seq()
+        self.shared.tree.applied_seq()
     }
 
     /// The directory that holds the database.
@@ -362,10 +549,23 @@ impl Db {
         &self.path
     }
 
-    /// Close the database: make every write durable and release the lock.
-    pub fn close(self) -> Result<(), Error> {
-        self.wal.close()?;
-        Ok(())
+    /// Close the database: stop the policy thread, checkpoint, close the
+    /// WAL, and release the lock. Returns the first error among the
+    /// checkpoint, the WAL, and any earlier background checkpoint. A reopen
+    /// after `close` replays nothing.
+    pub fn close(mut self) -> Result<(), Error> {
+        self.stop_policy();
+        let checkpointed = self.shared.checkpoint();
+        let closed = self.shared.wal.close();
+        let background = self
+            .shared
+            .background_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        checkpointed?;
+        closed?;
+        background.map_or(Ok(()), Err)
     }
 }
 
@@ -393,4 +593,12 @@ fn open_or_create_tree(path: &Path, options: &Options) -> Result<Tree, Error> {
     let store =
         FileStore::create(&file, Superblock::from(&options.tree)).map_err(TreeError::from)?;
     Ok(Tree::create(options.tree, Box::new(store))?)
+}
+
+impl Drop for Db {
+    /// Without `close`: stop the policy thread, and let the WAL drain when
+    /// the last reference drops. No checkpoint; a reopen replays the WAL.
+    fn drop(&mut self) {
+        self.stop_policy();
+    }
 }
