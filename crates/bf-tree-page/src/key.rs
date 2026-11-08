@@ -55,12 +55,37 @@ impl<'p> KeyRef<'p> {
     pub fn cmp_bytes(self, other: &[u8]) -> Ordering {
         let (head, tail) = other.split_at(self.prefix.len().min(other.len()));
         // A prefix longer than `other` compares greater on a tie, as required.
-        self.prefix.cmp(head).then_with(|| self.suffix.cmp(tail))
+        cmp_short(self.prefix, head).then_with(|| cmp_short(self.suffix, tail))
     }
 
     pub fn to_vec(self) -> Vec<u8> {
         [self.prefix, self.suffix].concat()
     }
+}
+
+/// Lexicographic order of two byte strings. When the common length is at
+/// most 8, compares it as one big-endian `u64` and then the lengths, with
+/// no out-of-line `memcmp`; longer strings use slice order.
+#[inline]
+pub(crate) fn cmp_short(a: &[u8], b: &[u8]) -> Ordering {
+    let common = a.len().min(b.len());
+    if common > 8 {
+        return a.cmp(b);
+    }
+    padded_word(&a[..common])
+        .cmp(&padded_word(&b[..common]))
+        .then(a.len().cmp(&b.len()))
+}
+
+/// Up to 8 bytes as a big-endian `u64`, zero-padded on the right. For two
+/// strings, a strict inequality of their words is their lexicographic
+/// order: at the first differing byte either both bytes are real, or the
+/// padded one ends a shorter string that is a prefix of the other.
+#[inline]
+pub(crate) fn padded_word(bytes: &[u8]) -> u64 {
+    let mut word = [0; 8];
+    word[..bytes.len()].copy_from_slice(bytes);
+    u64::from_be_bytes(word)
 }
 
 impl<'p> From<&'p [u8]> for KeyRef<'p> {

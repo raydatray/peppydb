@@ -5,7 +5,7 @@ use zerocopy::little_endian::U64;
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::InnerNode;
-use super::layout::{Slot, decode_child};
+use super::layout::{INLINE_KEY_BYTES, Slot, decode_child};
 use bf_tree_node_id::ChildRef;
 use bf_tree_page::KeyRef;
 
@@ -54,9 +54,15 @@ impl InnerNode {
     /// a key equal to a separator routes to that separator's right child. Any
     /// byte slice is a valid query, including an empty one.
     pub fn route(&self, key: &[u8]) -> Route {
-        let index = self
-            .slots()
-            .partition_point(|slot| self.key_of(slot).cmp_bytes(key).is_le());
+        // Compare the zero-padded inline bytes as integers; read the tail
+        // only on a tie (a strict inequality of zero-padded words orders the full keys).
+        let query_word = inline_word(&key[..key.len().min(INLINE_KEY_BYTES)]);
+        let index = self.slots().partition_point(|slot| {
+            u32::from_be_bytes(slot.inline_key)
+                .cmp(&query_word)
+                .then_with(|| self.key_of(slot).cmp_bytes(key))
+                .is_le()
+        });
 
         let child = self.child_at(index).expect("routing position has a child");
 
@@ -142,3 +148,11 @@ impl<'n> Iterator for Iter<'n> {
 impl ExactSizeIterator for Iter<'_> {}
 
 impl FusedIterator for Iter<'_> {}
+
+/// At most `INLINE_KEY_BYTES` bytes, zero-padded, as a big-endian integer,
+/// matching a slot's `inline_key`.
+fn inline_word(bytes: &[u8]) -> u32 {
+    let mut word = [0; INLINE_KEY_BYTES];
+    word[..bytes.len()].copy_from_slice(bytes);
+    u32::from_be_bytes(word)
+}
