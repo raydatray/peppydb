@@ -5,12 +5,12 @@
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 ENV DEBIAN_FRONTEND=noninteractive
-# build-essential: the C compiler that rustc uses as its linker. python3: the
-# Buck2 prelude's helper scripts. unzip: http_archive (plan 0009). git: tools
-# that list files.
+# clang: the system C++ toolchain links with clang++ (Buck2 prelude);
+# build-essential: cc for Cargo. python3: the Buck2 prelude's helper scripts.
+# unzip: http_archive (plan 0009). git: tools that list files.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git python3 unzip zstd \
+        build-essential ca-certificates clang curl git lld python3 unzip zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust in rustup's default locations, with the components preinstalled:
