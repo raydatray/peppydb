@@ -156,3 +156,16 @@ fn reopening_continues_the_log() {
         (1..=7).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn sequence_zero_means_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Wal::open(dir.path(), WalOptions::default(), 0).unwrap();
+    assert_eq!(wal.durable_seq(), 0);
+    let seq = wal.append(put(b"a", b"1")).unwrap();
+    assert_eq!(seq, 1);
+    wal.wait_durable(seq).unwrap();
+    wal.close().unwrap();
+    let replayed = Wal::replay(dir.path(), 0, |_| Ok::<_, WalError>(())).unwrap();
+    assert_eq!(replayed.records, 1);
+}

@@ -35,6 +35,8 @@ impl Wal {
         from_seq: u64,
         mut apply: impl FnMut(Record<'_>) -> Result<(), E>,
     ) -> Result<Replayed, E> {
+        // Sequences start at 1.
+        let from_seq = from_seq.max(1);
         let segments = segment::list(dir)?;
         let mut replayed = Replayed::default();
         // The last record read, for contiguity; `None` at the start and
