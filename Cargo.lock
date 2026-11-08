@@ -110,6 +110,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "bf-tree",
+ "engine-wal",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "engine-wal"
 version = "0.1.0"
 dependencies = [
