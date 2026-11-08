@@ -451,7 +451,7 @@ Resolved (review, 2026-11-08):
 - [x] Diff 5: engine I/O option.
 - [x] Diff 6: routed lookups.
 - [x] Diff 7: integer comparisons.
-- [ ] Diff 8: persistence and circular-buffer benchmarks.
+- [x] Diff 8: persistence and circular-buffer benchmarks.
 - [ ] Diff 9: engine and WAL benchmarks.
 - [ ] Diff 10: measurements and milestone completion.
 - [ ] Stack-wide verification.
@@ -499,6 +499,17 @@ Resolved (review, 2026-11-08):
   209 to 86 ns, `put` unchanged at about 1.6 µs. The benchmark keys are
   hashed, so previews decide most probes; keys with long shared prefixes
   gain less.
+- **Benchmark deviations (diff 8).** Three benchmarks differ from the
+  table above. `bench_circular_buffer_lock` compares put scaling with a
+  32 MiB and a 1 GiB circular buffer instead of reading a `perf` profile:
+  the container has no `perf`, and Docker's default seccomp profile blocks
+  `perf_event_open`. `bench_circular_buffer_free` uses a synthetic, seeded
+  leaf trace (skewed owners, grow-by-one-class, eviction on a failed
+  allocation) instead of a trace recorded from the tree. `bench_head_stall`
+  reports evictions per 1000 puts rather than per allocation failure,
+  because counting failures would put a shared counter on the put path.
+  The stall hook (`evict::EVICT_STALL_MICROS`) exists only under
+  `cfg(test)`, and each eviction reads it once.
 
 ## Agent notes
 

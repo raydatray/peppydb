@@ -148,6 +148,10 @@ pub struct CircularBuffer {
     /// A block at least this far behind the tail is in the second-chance
     /// region; `usize::MAX` when the region is empty.
     second_chance: usize,
+    /// Whether `free` keeps holes for reuse (the size-class free lists).
+    /// Always true outside the free-list benchmark, which compares it with
+    /// tombstone-on-free.
+    holes: bool,
 }
 
 // Compile-time check: the buffer and its blocks can be shared between threads.
@@ -220,7 +224,16 @@ impl CircularBuffer {
             capacity,
             classes: classes.into(),
             second_chance,
+            holes: true,
         })
+    }
+
+    /// Make every `free` a tombstone, so space returns only when the head
+    /// passes it. For the free-list benchmark only.
+    #[cfg(test)]
+    pub(crate) fn without_holes(mut self) -> Self {
+        self.holes = false;
+        self
     }
 
     /// Allocate a zeroed block of exactly `size` bytes for `owner`. Panics if
@@ -296,7 +309,10 @@ impl CircularBuffer {
                 .get_mut(seq)
                 .expect("checked above")
                 .freed_while_claimed = true;
-        } else if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
+        } else if !self.holes
+            || state.is_head(seq)
+            || state.in_region(block.addr(), self.second_chance)
+        {
             state.get_mut(seq).expect("checked above").state = BlockState::Tombstone;
             state.metrics.tombstones += 1;
         } else {
