@@ -7,7 +7,9 @@ write sequence, and checksum in every stored page, shadow paging, the
 checkpoint protocol, and how `Tree::open` selects the committed image after
 a crash. It then covers how a log sequences writes: the `Log` contract,
 `Tree::apply` and the logged writes, the one sequence space, the
-checkpoint's pre-commit hook, and snapshots of the committed image. It also
+checkpoint's pre-commit hook, and snapshots of the committed image. It
+covers the file store's I/O modes (direct I/O) and batched reads at open,
+with their measurements. It also
 records what is guaranteed today, with the test that backs each guarantee,
 and what is not guaranteed yet.
 
@@ -15,7 +17,9 @@ and what is not guaranteed yet.
 [Plan 0018](../plans/0018-bf-tree-checkpoint.md) built shadow paging,
 checkpoints, and recovery on that format without changing its layout.
 [Plan 0019](../plans/0019-bf-tree-apply.md) added sequenced writes, the
-pre-commit hook, and snapshots, again without changing the layout. The tree
+pre-commit hook, and snapshots, again without changing the layout.
+[Plan 0023](../plans/0023-bf-tree-io-perf.md) added direct I/O and batched
+reads at open, also without changing the layout. The tree
 stays log-agnostic: it persists no log, and it defines the contract that any
 log meets.
 Related documents:
@@ -255,6 +259,9 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
     fn free(&self, page_number: PageNumber) -> Result<(), StoreError>;
     fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
     fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
+    /// Read consecutive pages, live or freed, from `first` (plan 0023).
+    /// The default reads one page at a time.
+    fn read_run(&self, first: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
     fn sync(&self) -> Result<(), StoreError>;
     fn superblock(&self) -> &Superblock;
     /// The last committed state.
@@ -283,6 +290,12 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
   all-zero, superseded, and erased ones; a `FreedPage` reply from a backend
   that already knows is accepted.
 - `state` and `commit` are described in [Commit](#commit).
+- `read_run(first, buf)` reads `buf.len() / page_size` consecutive pages.
+  `buf.len()` must be a multiple of the page size (`BufferLength`
+  otherwise), and every page in the run must be below `page_count`
+  (`UnknownPage` otherwise). The trait's default method calls `read` once
+  per page, so `MemStore` needs no change. `FileStore` overrides it with one
+  positioned read of the whole run ([Direct I/O](#direct-io)).
 - The [concurrency design](bf-tree-concurrency.md#the-shareable-store-contract)
   records the threading rules: every method takes `&self`, and the caller
   serializes accesses to one page.
@@ -292,6 +305,143 @@ places: `write_through` (a fresh page whose write failed), the checkpoint's
 free step (superseded pages that a commit covers), `LeafMap::discard` (a
 failed split's right half), and `Tree::open` (zero, superseded, suspect,
 and erased pages).
+
+## Direct I/O
+
+[Plan 0023](../plans/0023-bf-tree-io-perf.md) added an I/O mode to
+`FileStore` (`crates/bf-tree-store/src/file.rs`). Through the page cache,
+the kernel caches every store page a second time, outside the circular
+buffer's budget. Direct I/O (`O_DIRECT`) bypasses the page cache, so the
+budget bounds the memory that the data occupies, and a circular-buffer miss
+reaches the device.
+
+```rust
+/// How a FileStore reaches its file. Re-exported by bf-tree and engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Io {
+    /// Through the page cache. Portable.
+    #[default]
+    Cached,
+    /// Bypassing the page cache (O_DIRECT). Linux only; 4096-byte pages.
+    Direct,
+}
+
+impl FileStore {
+    pub fn create(path: impl AsRef<Path>, superblock: Superblock) -> Result<Self, StoreError>; // Cached
+    pub fn create_with(path: impl AsRef<Path>, superblock: Superblock, io: Io) -> Result<Self, StoreError>;
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError>;                          // Cached
+    pub fn open_with(path: impl AsRef<Path>, io: Io) -> Result<Self, StoreError>;
+    pub fn io(&self) -> Io;
+}
+```
+
+### Rules
+
+- **Linux and 4096-byte pages only.** `create_with` and `open_with` with
+  `Io::Direct` return `StoreError::DirectIo("direct I/O requires Linux")`
+  on other systems. A page size other than 4096 returns
+  `StoreError::DirectIo("direct I/O requires 4096-byte pages")`;
+  `open_with` checks this again after it reads the superblock.
+- **Alignment.** `O_DIRECT` requires the buffer address, the file offset,
+  and the length to be multiples of the device's logical block size. The
+  store uses 4096, which covers devices with 512-byte and 4096-byte logical
+  blocks. Offsets and lengths are aligned by construction: superblock copies
+  are 4096 bytes at offsets 0 and 4096, and pages start at 8192
+  ([On-disk layout](#on-disk-layout)).
+- **The flag.** `open_file` sets `libc::O_DIRECT` through the safe
+  `OpenOptionsExt::custom_flags`, only under `cfg(target_os = "linux")`.
+  `libc` is an unconditional dependency, because the value of `O_DIRECT`
+  differs between Linux architectures (`0o40000` on x86_64, `0o200000` on
+  aarch64).
+- **A bounce buffer, no `unsafe` code.** The tree's buffers are not
+  4096-aligned: scratch pages are ordinary heap slices, and circular-buffer
+  blocks follow a 16-byte header in a packed slab. With `Io::Direct`, a
+  read or write whose buffer address or length is not a multiple of 4096
+  goes through a thread-local buffer of `AlignedPage` values
+  (`#[repr(C, align(4096))]`), viewed as bytes through `zerocopy`. The
+  buffer grows to the largest transfer that a thread makes. An aligned
+  caller buffer skips the copy. Alignment is a type property, so
+  `bf-tree-store` stays free of `unsafe` code.
+- **No durability change.** `O_DIRECT` bypasses the page cache. It does
+  not bypass the device's volatile cache, and it does not persist
+  file-size changes. `sync` and `commit` still call `sync_data`, and the
+  checkpoint protocol is unchanged.
+- **The format does not depend on the mode.** A file written in one mode
+  opens in the other (`open_with`). The mode is a runtime setting and is
+  not stored in the superblock.
+- **`tmpfs` refuses `O_DIRECT`** at open with `EINVAL`. Tests and
+  benchmarks that use `Io::Direct` take their directory from
+  `PEPPYDB_BENCH_DIR` and report a skip, not a pass, when the platform or
+  the file system refuses direct I/O.
+
+### Batched reads at open
+
+`Tree::open` and `Tree::write_snapshot` read every page through `select`
+([Open](#open-select-the-committed-image)). With `Io::Direct`, each read is
+a synchronous device round trip. `select` therefore reads runs of
+`OPEN_RUN_PAGES` (64) pages with `PageStore::read_run`: 256 KiB per call
+with 4096-byte pages (`crates/bf-tree/src/open.rs`). `FileStore::read_run`
+makes one positioned read per run; with `Io::Direct` the run goes through
+the bounce buffer. The scan's results do not depend on the run length:
+the tests compare runs of 1, 7, and 64 pages, including a page count that
+is not a multiple of the run.
+
+### Measurements
+
+The numbers below are informational. Environment: *Docker on macOS
+(aarch64), indicative*. Docker Desktop 29.2.1 on macOS 27.0.1, Apple M4
+Pro host; a Linux VM with 12 CPUs, 8 GB of RAM, and kernel
+6.12.72-linuxkit. Data is on the `/bench` named volume: ext4
+(`rw,relatime,discard`) on the VM's virtual disk `/dev/vda1`, which a file
+on the Mac's SSD backs. Release builds (`@build/mode/release`). The I/O
+numbers come from a virtual disk, so they are indicative only. The
+reference runs on WSL2 and on GCP with a Local SSD (plan 0023, environments
+2 and 3) were not done.
+
+`bench_persistence` (`crates/bf-tree/src/tests/bench_io.rs`): 1,000,000
+keys of 8 bytes, 16-byte values, a 32 MiB circular buffer, 1 s per `get`
+point:
+
+| Measurement | `Cached` | `Direct` |
+| --- | --- | --- |
+| Load (M puts/s) | 1.39 | 0.40 |
+| Full checkpoint, 8258 leaves (ms) | 118 | 818 |
+| Checkpoint after 10% of leaves are dirtied, 100,768 keys (ms) | 7 | 31 |
+| File after both checkpoints (MiB) | 112.3 | 112.3 |
+| Open (ms, pages/s) | 91 (316,287) | 111 (259,797) |
+| Random `get`, 1 thread (M ops/s) | 0.74 | 0.03 |
+| Random `get`, 12 threads (M ops/s) | 5.23 | 0.11 |
+
+The second checkpoint did not grow the file. The likely reason is that its
+write-throughs reused pages that the first checkpoint freed; this was not
+checked separately. Open reads 64-page runs.
+
+`bench_eviction_io`: the same keys with a 4 MiB circular buffer, so most
+puts evict; replacing puts for 1 s; store file 284.4 MiB in both modes:
+
+| Mode, threads | M puts/s | p50 (µs) | p99 (µs) | Max (µs) | Evictions per 1000 puts |
+| --- | --- | --- | --- | --- | --- |
+| `Cached`, 1 | 0.67 | 0.3 | 1.4 | 14,032 | 74.1 |
+| `Cached`, 12 | 1.68 | 0.8 | 49.5 | 73,108 | 82.2 |
+| `Direct`, 1 | 0.20 | 0.3 | 1.3 | 56,609 | 55.1 |
+| `Direct`, 12 | 0.54 | 0.6 | 48.1 | 108,269 | 82.4 |
+
+Interpretation:
+
+- In these runs the whole store file fits in the VM's page cache. `Cached`
+  therefore serves base pages from RAM, and `Direct` reads the virtual disk
+  on every circular-buffer miss and writes it on every write-through. Every
+  store-bound measurement is slower with `Direct`: from 1.2 times (open)
+  to about 48 times (random `get` on 12 threads).
+- The runs do not test data larger than memory, which is the case that
+  `Direct` exists for. There, `Cached` would also reach the device, and its
+  second copy of each page would compete with the circular buffer for RAM.
+
+**Recommendation.** `Io::Cached` stays the default. `Io::Direct` is for
+data larger than memory on Linux. Measurements on the reference device
+must confirm this before the documents recommend it. The engine
+measurements do not support `Direct` as a way to protect WAL fsync latency
+([engine](engine.md#fsync-interference)).
 
 ## Base-page identity and the page checksum
 
@@ -912,7 +1062,8 @@ leaf ID, its page is freed, and the next leaf reuses that page, so leaf IDs
 can run ahead of page numbers. Plan 0017's diff 7 hole fixture found this.
 The exact multiple has no correctness role.
 
-Open costs one read and one CRC pass per page, plus one zero write per
+Open costs one CRC pass per page and one store read per run of 64 pages
+([Batched reads at open](#batched-reads-at-open)), plus one zero write per
 erased page and one sync if any page was erased. Memory is proportional to
 the page count. The erase cost is bounded by the write-throughs since the
 last checkpoint.
@@ -1279,8 +1430,8 @@ both.
 
 - The hook runs after the store `sync` and before the `commit`. This is the
   simplest order that keeps the write-ahead rule. Running the hook
-  concurrently with the store sync would overlap two fsyncs; plan 0023 may
-  measure that.
+  concurrently with the store sync would overlap two fsyncs. Plan 0023 did
+  not measure that; it remains a candidate optimisation.
 - The hook holds the checkpointing mutex and no tree lock. Writers keep
   running. It must not call `checkpoint`, which would wait for the mutex.
 - A hook error returns `TreeError::Log` and aborts the checkpoint before
@@ -1496,6 +1647,25 @@ free pin (the storm snapshot test), and checkpointing without the hook (the
 lossy-log model, at once). Plan 0019 records the seeds, rounds, and
 repeated runs.
 
+### Direct I/O and batched reads (plan 0023)
+
+The Linux parts run only where the file system takes `O_DIRECT`; elsewhere
+they report a skip.
+
+| Guarantee | Tests |
+| --- | --- |
+| `Io::Direct` is refused off Linux with `DirectIo` | `bf-tree-store` `tests/direct.rs`: `direct_io_is_refused_off_linux` |
+| `Io::Direct` needs 4096-byte pages, at create and at open | `tests/direct.rs`: `direct_stores_need_4096_byte_pages` (Linux) |
+| `O_DIRECT` is in effect: a misaligned read through the store's handle fails with `EINVAL` | `tests/direct.rs`: `o_direct_is_in_effect` (Linux) |
+| A direct store allocates, frees, writes, commits, and reopens in both modes with the same bytes | `tests/direct.rs`: `a_direct_store_behaves_like_a_cached_one` (Linux) |
+| A run reads the same bytes as single pages; runs past the page count and ragged buffers are rejected | `tests/contract.rs`: `a_run_reads_the_same_bytes_as_single_pages` |
+| A tree over a direct store (20,000 writes with checkpoints and an uncommitted tail) reopens at its commit in both modes | `bf-tree` `tests/open.rs`: `a_tree_over_a_direct_store_reopens_at_its_commit` (Linux) |
+| The open scan selects the same pages with runs of 1, 7, and 64 pages | `tests/open.rs`: `the_open_scan_selects_the_same_pages_with_any_run_length` |
+
+The crash model uses an in-memory fault store, so it cannot run over a
+file store in either mode. The direct-store reopen test above replaces it
+for `Io::Direct`.
+
 ## Not yet guaranteed
 
 - **Writes after the last commit are lost on a crash or a close.** `open`
@@ -1538,8 +1708,11 @@ repeated runs.
   them.
 - **The file never shrinks.** Between checkpoints, a leaf written through
   `n` times holds `n + 1` pages. Only checkpoint frequency bounds growth.
-- **Open reads every page.** Open is `O(pages)`. A persisted fence list
-  for faster open is deferred.
+- **Open reads every page.** Open is `O(pages)`, in runs of 64 pages. A
+  persisted fence list for faster open is deferred.
+- **Direct I/O is Linux only.** `Io::Direct` needs Linux and 4096-byte
+  pages. Its benefit for data larger than memory is not yet measured
+  ([Direct I/O](#direct-io)).
 - **Leaves are never reclaimed.** An empty leaf keeps its fences and its
   page.
 
@@ -1573,10 +1746,12 @@ rejected (plan 0017, resolved question 2).
 - **Parallel apply (deferred)** would need caller-provided per-key order
   and a contiguous-prefix applied watermark instead of `fetch_max`. The
   `Entry` and `Log` types would not change.
-- **Plan 0023 (direct I/O and measurements)** adds an I/O mode to
-  `FileStore`, and measures checkpoint cost against dirty leaves and open
-  cost against the page count. The 4096-byte copies, full-copy writes, and
-  the 8192-byte page origin are already aligned.
+- **Plan 0023 (direct I/O and measurements)** added `Io` to `FileStore`
+  and `PageStore::read_run`, without a change to the format or to the
+  existing trait methods, and measured checkpoint and open costs
+  ([Direct I/O](#direct-io)). `Io` gains variants only if a new safe
+  mechanism appears, for example a safe `io_uring` wrapper.
+  `read_run` can also serve a future persisted leaf selection.
 - **Leaf reclamation (deferred)** must erase, or otherwise fence, every
   stored page of a reclaimed leaf before it commits. Freed pages keep old
   copies, and selection would otherwise bring the leaf back.
@@ -1595,6 +1770,10 @@ rejected (plan 0017, resolved question 2).
 - [Plan 0019](../plans/0019-bf-tree-apply.md): the log contract, the
   sequence rules, the pre-commit hook, snapshots, its verification
   outcomes, and its discoveries.
+- [Plan 0023](../plans/0023-bf-tree-io-perf.md): direct I/O, batched open
+  reads, and the measurements.
+- Linux `open(2)`, section "O_DIRECT": the alignment rules, and the absence
+  of a durability guarantee without `fsync`.
 - [BF-Tree paper](../references.md#bf-tree-paper), §3.3 (base pages and the
   mapping table) and §5.7 (logging, snapshots, and recovery). peppydb's
   checkpoint is fuzzy and does not pause writers, unlike the paper's online

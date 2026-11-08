@@ -92,7 +92,7 @@ rate, its §6.11 evaluation uses 20 percent, and upstream defaults to 30
 percent in release builds (`src/config.rs`). With rate `p`, a hot key is
 cached after about `1/p` base reads. A higher rate also caches more keys
 that are read only once; reference bits limit that pollution. peppydb uses
-20 percent. Plan 0023 measures the choice.
+20 percent. Plan 0023 did not measure the choice; it remains open.
 
 ## Reads
 
@@ -176,7 +176,7 @@ Each hint is valid because of the version rule:
 the read under S, and once in `promote` under X. A scan promotion costs the
 same. `a_promoting_read_keeps_the_page_and_the_next_read_loads_nothing`
 records the two reads. A later change can carry the loaded page into the
-hint; plan 0023 measures it.
+hint. Plan 0023 did not measure this cost; it remains open.
 
 ## Record and negative caching
 

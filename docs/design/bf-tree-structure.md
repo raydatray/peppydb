@@ -68,9 +68,13 @@ contain it. A descent takes no lock: it reads each frame optimistically and
 validates the node above it. Under concurrency a route becomes stale if the
 routed leaf splits between the descent and the leaf lock. The
 [route, lock, validate, retry protocol](bf-tree-concurrency.md#route-lock-validate-retry)
-detects this and routes again. A point read that loads the base page calls
-`Page::check_key` on it, and a failure surfaces as the internal
-`TreeError::Page` error rather than as wrong data. Blind writes load no
+detects this and routes again. A point read looks the key up in the base
+page or a full page with `Page::get_routed`, which checks the fences only
+in debug builds: a validated route puts the key inside them by
+construction (plan 0023; see
+[shared pages](bf-tree-pages.md#routed-lookups)). A misrouted read
+therefore panics in debug builds. Before plan 0023 the read called
+`Page::check_key` in every build. Blind writes load no
 base page, so they make no such check; `check_invariants` instead checks
 that every buffered key lies within its leaf's fences.
 

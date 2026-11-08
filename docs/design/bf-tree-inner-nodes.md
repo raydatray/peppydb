@@ -134,10 +134,22 @@ so its owner must keep child ranges, heights, and parent separators consistent.
 ### Search
 
 Routing is one binary search over the slot directory. Each probe compares the
-meaningful inline bytes first and reads the tail only on a tie, so most
-comparisons stay inside the slot directory. The comparison is
-`KeyRef::cmp_bytes` over the separator's inline and tail parts, which gives
-full lexicographic order, including zero bytes and keys shorter than four bytes.
+slot's four zero-padded inline bytes, read as a big-endian `u32`, with a query
+word that `route` computes once from the key's first four bytes
+(`inline_word` in `crates/bf-tree-inner/src/read.rs`). Only when the words are
+equal does it compare the full separator with `KeyRef::cmp_bytes` over the
+inline and tail parts. Most comparisons therefore stay inside the slot
+directory and make no out-of-line `memcmp` call. A strict inequality of
+zero-padded big-endian words is the lexicographic order of the full keys, and
+equal words fall back to the byte comparison, so routing keeps full
+lexicographic order, including zero bytes and keys shorter than four bytes
+([shared pages](bf-tree-pages.md#preview-first-search) gives the argument).
+[Plan 0023](../plans/0023-bf-tree-io-perf.md) replaced the earlier slice
+comparison of the inline bytes. Together with the short-part comparison in
+`KeyRef::cmp_bytes` (`cmp_short`), it reduced the descent benchmark from 134.6 to 140.3 ns to 83.2 to 85.2 ns
+(Docker on macOS (aarch64), indicative; release; `baseline_components`;
+1,000,000 keys of 8 bytes, 16-byte values, 32 MiB circular buffer; four
+alternating runs).
 
 ### Borrowed reads
 

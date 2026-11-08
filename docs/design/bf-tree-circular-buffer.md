@@ -230,8 +230,32 @@ without gaining room, until every live block is claimed and they see
 `Busy`. The protocol stays live, because the holder of the head claim
 locks at most one leaf and no waiting thread holds a leaf lock. The cost is
 extra evictions, bounded by the number of live blocks, and only while a
-head eviction is stalled. Plan 0023 can add room accounting for in-flight
-evictions if measurements show a problem.
+head eviction is stalled.
+
+Plan 0014 left open whether the tree needs room accounting for in-flight
+evictions (`has_room_after_claims`) and a `Condvar` wait for the head to
+move. Plan 0023 measured it with `bench_head_stall`
+(`crates/bf-tree/src/tests/bench_io.rs`): 12 threads of replacing puts on
+an in-memory tree with 1,000,000 keys of 8 bytes, 16-byte values, and a
+4 MiB circular buffer, for 1 s. In the stalled case, a test-only hook
+(`evict::EVICT_STALL_MICROS`, `cfg(test)` only) makes one eviction stall
+for 20 ms every 100 ms while it holds the head claim and its owner's leaf
+lock. Environment: Docker on macOS (aarch64), indicative (Docker Desktop
+29.2.1 on macOS 27.0.1, Apple M4 Pro host, Linux VM with 12 CPUs, 8 GB of
+RAM, kernel 6.12.72-linuxkit); release build.
+
+| Case | M puts/s | Evictions per 1000 puts | p50 (µs) | p99 (µs) | Max (µs) |
+| --- | --- | --- | --- | --- | --- |
+| No stall | 1.95 | 82.3 | 1.0 | 53.0 | 39,587 |
+| Stalled head | 1.71 | 88.6 | 1.0 | 60.1 | 53,230 |
+
+**Answer.** With the stall, evictions per put rose by about 8 percent and
+p99 latency by about 13 percent. That is no evidence that
+`has_room_after_claims` and a `Condvar` wait are needed now, so the tree
+keeps the current protocol. The benchmark counts evictions per 1000 puts,
+not per allocation failure, because a failure counter would put a shared
+counter on the put path. The question can return if the reference device
+shows longer stalls, for example from slow device writes.
 
 ### Evicting one victim
 
@@ -343,7 +367,8 @@ relocation, and `free` then never tombstones for the region. The default
 of 10 follows upstream (`cb_copy_on_access_ratio = 0.1` in `src/config.rs`).
 Values near 100 relocate on almost every access and make `free` tombstone
 almost every block, which costs a copy per access and fills the buffer
-with dead space faster. Plan 0023 measures this cost.
+with dead space faster. Plan 0023 did not measure this cost; it remains
+open.
 
 ### Guarantees
 
@@ -370,8 +395,43 @@ with dead space faster. Plan 0023 measures this cost.
 one `alloc` plus one `free` with 10,000, 100,000, and 300,000 live blocks
 of classes 64 to 512 bytes costs 37, 81, and 123 ns. In that workload about
 99.9 percent of allocations reuse a hole: reuse does not move the tail, so
-with spare capacity few holes age into the second-chance region. Plan 0023
-compares free lists with tombstone-on-free under eviction pressure.
+with spare capacity few holes age into the second-chance region.
+
+The Linux measurements below are from plan 0023. Environment: *Docker on
+macOS (aarch64), indicative*: Docker Desktop 29.2.1 on macOS 27.0.1, Apple
+M4 Pro host; a Linux VM with 12 CPUs, 8 GB of RAM, and kernel
+6.12.72-linuxkit; release builds; one thread.
+
+`circular_buffer_cost` (the same workload as above): 31.7, 69.5, and
+106.9 ns per `alloc` plus `free` with 10,000, 100,000, and 300,000 live
+blocks.
+
+`bench_circular_buffer_free` (`crates/bf-tree-circular-buffer/src/tests/bench.rs`)
+compares size-class free lists with tombstone-on-free, a crate-private
+switch (`without_holes`) that only this benchmark uses. The trace is
+synthetic and seeded: 50,000 owners, 80 percent of steps on 20 percent of
+them, classes 256 to 4096 bytes, a 16 MiB buffer, and 3,000,000 steps. A
+step on an owner without a block allocates the smallest class; otherwise
+the block grows by one class, and a block at the largest class is freed,
+as a merge frees it. A failed allocation evicts the oldest block, as the
+tree does. Utilisation is live bytes over capacity, sampled every 1024
+steps.
+
+| Variant | ns per step | Evictions | Utilisation |
+| --- | --- | --- | --- |
+| Free lists | 70.2 to 72.1 | 426,599 | 96.3% |
+| Tombstone-on-free | 74.8 to 76.4 | 967,219 | 54.0% |
+
+With tombstone-on-free, a freed block keeps its space until the head
+passes it, so the buffer holds about half as many live bytes and evicts
+about 2.3 times as often. Free lists also cost slightly less per step.
+Plan 0010 keeps free lists to stay faithful to the paper and upstream;
+this measurement supports that choice. The trace is synthetic, not
+recorded from the tree, so it shows the direction of the effect rather
+than the tree's exact numbers.
+
+The circular-buffer mutex does not limit put scaling in plan 0023's
+measurement ([concurrency](bf-tree-concurrency.md#the-circular-buffer-mutex)).
 
 ## Sources
 

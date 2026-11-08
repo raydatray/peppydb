@@ -16,9 +16,15 @@ covers two crates:
   `Db` driven by another log, the replication contract, `Db::apply`,
   owner-driven checkpoints, and snapshot installation.
 
+The last part, [Measurements](#measurements), records the write, append,
+and recovery benchmarks of both crates, and answers the questions about the
+flush interval and fsync interference.
+
 [Plan 0020](../plans/0020-engine-wal.md) built the WAL,
-[plan 0021](../plans/0021-engine-db.md) built the `Db`, and
-[plan 0022](../plans/0022-engine-external.md) added the external-log mode.
+[plan 0021](../plans/0021-engine-db.md) built the `Db`,
+[plan 0022](../plans/0022-engine-external.md) added the external-log mode,
+and [plan 0023](../plans/0023-bf-tree-io-perf.md) added the store I/O
+option and the measurements.
 Related documents:
 [architecture](architecture.md) (components and phases),
 [persistence](bf-tree-persistence.md#logs-and-sequenced-writes) (the tree's
@@ -279,8 +285,10 @@ timer.
 **Why the default interval is zero.** A positive interval adds its whole
 length to the latency of every write. Under concurrency the groups form
 anyway, during the previous fsync. An interval helps only when fsync is so
-cheap that groups stay small. The option stays for such devices. Plan 0023
-measures both settings.
+cheap that groups stay small. The option stays for such devices. Plan
+0023 measured both settings on Linux: 0 was 8 to 11 times faster at every
+thread count, so the default stays 0
+([Measurements](#measurements)).
 
 ### Waiting and lock rules
 
@@ -604,8 +612,9 @@ the sync), and that segment creation syncs the file and the directory.
   record format, the naming scheme, or the replay rules. See
   [The `Db`](#the-db).
 - **Plan 0022** (external-log mode) does not use the WAL.
-- **Plan 0023** measures append cost, group sizes, interval settings, and
-  replay rate. Possible additions, each additive: segment preallocation
+- **Plan 0023** measured append cost, group sizes, interval settings, and
+  replay rate ([Measurements](#measurements)). Possible additions, each
+  additive: segment preallocation
   (the decoder already treats zeros as a torn tail; preallocation would make
   zeros after the last record the normal end of a segment), a group-size
   metric, and a backpressure limit on the pending buffer.
@@ -626,7 +635,9 @@ in order.
 The code is in `crates/engine/src/lib.rs`. The tests are in
 `crates/engine/src/tests/`: `open.rs` (open, recovery, and reads),
 `write.rs` (single writes), `batch.rs` (batches), `checkpoint.rs`
-(checkpoints, policy, and snapshots), and `crash.rs` (simulated crashes).
+(checkpoints, policy, and snapshots), `crash.rs` (simulated crashes), and
+`io.rs` (the store I/O mode). The benchmarks are in `bench.rs`
+([Measurements](#measurements)).
 
 ```mermaid
 flowchart TB
@@ -697,8 +708,9 @@ peppy_rust_library(
   is visible only to `//crates/engine:`. Plan 0021 checked both rules with
   local experiments; each failed with "is not visible".
 - **Re-exports.** `engine` re-exports, under their own names, the types
-  that appear in its public signatures: `LogError`, `Op` (for
-  `Db::apply`), `Scan`, `TreeConfig`, and `TreeError` from `bf-tree`, and
+  that appear in its public signatures: `Io` (for `Options::io`),
+  `LogError`, `Op` (for `Db::apply`), `Scan`, `TreeConfig`, and
+  `TreeError` from `bf-tree`, and
   `WalError` from `engine-wal`.
   `Checkpoint` is the engine's own type, converted from `bf_tree::State`:
 
@@ -753,6 +765,7 @@ process is also `Locked` (`open.rs`: `a_second_open_is_locked`).
 pub struct Options {
     pub tree: TreeConfig,               // TreeConfig::default()
     pub mode: Mode,                     // Mode::Standalone
+    pub io: Io,                         // Io::Cached (plan 0023)
     pub flush_interval: Duration,       // 0
     pub segment_bytes: u64,             // 64 MiB
     pub checkpoint_wal_bytes: u64,      // 256 MiB
@@ -760,6 +773,16 @@ pub struct Options {
 }
 ```
 
+- `io` selects how the tree's store file is read and written. `open` passes
+  it to `FileStore::create_with` or `FileStore::open_with`. `Io::Cached`,
+  the default, goes through the page cache. `Io::Direct` bypasses it
+  (`O_DIRECT`), so the circular buffer's budget bounds the memory that the
+  data occupies. `Io::Direct` needs Linux and 4096-byte pages; elsewhere
+  `open` fails with `Error::Tree(TreeError::Store(StoreError::DirectIo(..)))`.
+  The mode is a runtime setting: the store format does not record it, and a
+  database opens in either mode
+  ([persistence](bf-tree-persistence.md#direct-io)). The WAL does not use
+  it; WAL segments always go through the page cache.
 - `flush_interval` and `segment_bytes` become the `WalOptions`.
 - `checkpoint_wal_bytes` is the policy's byte threshold, and
   `checkpoint_interval` its interval (see
@@ -1281,6 +1304,7 @@ Other behaviour with tests:
 | Batch semantics | `batch.rs`: `a_batch_round_trips_with_one_sequence`, `an_empty_batch_appends_nothing`, `an_invalid_operation_rejects_the_batch_before_logging`, `the_last_operation_per_key_wins` |
 | Checkpoints, truncation, policy, snapshots, writer latency | `checkpoint.rs`: all six tests |
 | A garbage page in `tree.bf` after a crash is released | `crash.rs`: `a_garbage_tree_page_after_a_crash_is_released` |
+| Writes, a batch, and a checkpoint work in both I/O modes, and a database written with `Io::Direct` reopens with either mode; `Io::Direct` is refused off Linux (plan 0023) | `io.rs`: `a_database_works_in_both_io_modes` |
 
 ### Read consistency
 
@@ -1373,8 +1397,10 @@ their own stack after plan 0023; the recommended design is MVCC.
   kick before the policy thread's handle is set does not unpark it; the
   thread sees the grown bytes at its next wakeup, at the latest one interval
   later.
-- **Measurements are from debug builds on macOS.** Plan 0023 measures the
-  engine on Linux.
+- **Measurements are indicative.** Plan 0023's engine measurements come
+  from a Linux VM under Docker on macOS, whose virtual disk sets the fsync
+  latency ([Measurements](#measurements)). Reference runs on a real device
+  are pending.
 
 ### Db extension points
 
@@ -1384,8 +1410,9 @@ their own stack after plan 0023; the recommended design is MVCC.
   the policy thread in external mode. It did not change the standalone
   write path, the policy, or the recovery order. See
   [External-log mode](#external-log-mode).
-- **Plan 0023** adds an I/O option for `FileStore::create` and `open`, and
-  engine benchmarks.
+- **Plan 0023** added `Options::io`, passed to `FileStore::create_with` and
+  `open_with`, and the engine benchmarks ([Measurements](#measurements)).
+  It changed no existing option or method.
 - **Phase 2** uses external mode. A `put` that returns its sequence,
   per-call durability options, or a read-after-durable option would be
   additive.
@@ -1836,6 +1863,132 @@ transfer (a second install method, resumable by offset), snapshot metadata
 follower reads, and metrics. Later plans must not need to change `apply`'s
 ordering rules, the snapshot format (the store format), or the standalone
 path.
+
+## Measurements
+
+[Plan 0023](../plans/0023-bf-tree-io-perf.md) added three informational
+benchmarks, not gates: `bench_engine_write` and `bench_wal_recovery` in
+`crates/engine/src/tests/bench.rs`, and `bench_wal_append` in
+`crates/engine-wal/src/tests/bench.rs`. Run them in release mode, for
+example:
+
+```sh
+tools/linux-run tools/buck2 run @build/mode/release //crates/engine:engine-unittest -- --ignored --nocapture tests::bench::
+tools/linux-run tools/buck2 run @build/mode/release //crates/engine-wal:engine-wal-unittest -- --ignored --nocapture tests::bench::
+```
+
+**Environment for every number in this section:** *Docker on macOS
+(aarch64), indicative*. Docker Desktop 29.2.1 on macOS 27.0.1, Apple M4
+Pro host; a Linux VM with 12 CPUs, 8 GB of RAM, and kernel
+6.12.72-linuxkit. Data is on the `/bench` named volume: ext4
+(`rw,relatime,discard`) on the VM's virtual disk `/dev/vda1`, which a file
+on the Mac's SSD backs. Release builds (`@build/mode/release`). The
+virtual disk sets the fsync latency, so the durable-write numbers are
+indicative only. The reference runs on WSL2 and on GCP with a Local SSD
+(plan 0023, environments 2 and 3) were not done.
+
+### Durable writes
+
+`bench_engine_write`: standalone mode; `Db::put` of 8-byte scrambled keys
+and 16-byte values, each waiting for its WAL sync; default tree settings
+with a 64 MiB circular buffer; no checkpoint during a measurement; 1 s per
+point. "Puts per group" is puts divided by WAL syncs.
+
+| `io`, `flush_interval` | Threads | Puts/s | p50 (µs) | p99 (µs) | Max (µs) | Puts per group |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Cached`, 0 | 1 | 4,612 | 181 | 1,597 | 4,884 | 1.0 |
+| `Cached`, 0 | 2 | 5,350 | 359 | 3,225 | 3,876 | 1.2 |
+| `Cached`, 0 | 4 | 10,624 | 374 | 3,362 | 4,848 | 2.5 |
+| `Cached`, 0 | 8 | 22,435 | 244 | 3,095 | 4,373 | 5.7 |
+| `Cached`, 0 | 12 | 36,512 | 248 | 702 | 5,004 | 9.8 |
+| `Cached`, 1 ms | 1 | 413 | 2,131 | 3,584 | 7,392 | 1.0 |
+| `Cached`, 1 ms | 2 | 695 | 2,867 | 3,911 | 25,115 | 2.0 |
+| `Cached`, 1 ms | 4 | 1,445 | 2,708 | 3,857 | 11,768 | 4.0 |
+| `Cached`, 1 ms | 8 | 2,859 | 2,748 | 3,841 | 13,903 | 8.0 |
+| `Cached`, 1 ms | 12 | 4,323 | 2,700 | 4,556 | 12,838 | 12.0 |
+| `Direct`, 0 | 1 | 3,552 | 203 | 1,605 | 128,986 | 1.0 |
+| `Direct`, 0 | 2 | 4,985 | 356 | 3,248 | 6,613 | 1.1 |
+| `Direct`, 0 | 4 | 10,919 | 354 | 3,311 | 4,596 | 2.5 |
+| `Direct`, 0 | 8 | 26,394 | 230 | 552 | 3,807 | 5.8 |
+| `Direct`, 0 | 12 | 38,238 | 254 | 611 | 15,899 | 9.8 |
+| `Direct`, 1 ms | 1 | 444 | 2,032 | 3,750 | 4,042 | 1.0 |
+| `Direct`, 1 ms | 2 | 645 | 2,993 | 5,497 | 23,093 | 2.0 |
+| `Direct`, 1 ms | 4 | 1,327 | 2,965 | 4,314 | 13,145 | 4.0 |
+| `Direct`, 1 ms | 8 | 2,684 | 2,968 | 3,921 | 22,198 | 8.0 |
+| `Direct`, 1 ms | 12 | 3,981 | 2,977 | 4,075 | 24,648 | 12.0 |
+
+**Does a positive `flush_interval` ever beat 0?** Not in this environment.
+With 0, durable puts are about 8 to 11 times faster at every thread count,
+in both I/O modes. Groups form anyway: with 0 and 12 threads, a group holds
+9.8 puts. The default stays 0.
+
+- **Observation, not explained.** With 1 ms, the p50 latency is 2.0 to
+  3.0 ms, more than the interval plus one sync (the p50 with 0 is about
+  0.2 to 0.4 ms). The cause was not investigated.
+- **Informational only, not a reference.** In a native macOS run, 1 ms beat
+  0 at 12 threads (2,252 against 1,557 puts/s); there one sync takes about
+  4 ms. A device with slow syncs may favour an interval, so the reference
+  device must decide whether the default changes.
+
+### Fsync interference
+
+The question: does store I/O through the page cache slow the WAL's fsync?
+The hypothesis was that on ext4 with `data=ordered`, an fsync that commits
+the journal (the WAL file grows, so its size changes) also forces out the
+store's dirty data. `bench_engine_write` measures one thread's durable put
+latency (`flush_interval` 0) alone, and then while a loader thread writes
+batches of 1000 puts and another thread checkpoints in a loop, for 1 s
+each:
+
+| `io` | Alone p50 / p99 / max (µs) | With load p50 / p99 / max (µs) | Loaded puts | Checkpoints |
+| --- | --- | --- | --- | --- |
+| `Cached` | 212 / 335 / 538 | 560 / 3,369 / 18,214 | 1,567,000 | 12 |
+| `Direct` | 179 / 294 / 3,971 | 1,986 / 7,380 / 9,720 | 421,000 | 5 |
+
+**Answer: the hypothesis is not confirmed here.** `Io::Direct` did not
+protect WAL latency: under load its p50 was 3.5 times and its p99 2.2 times
+those of `Cached`. With `Direct`, the store's evictions and checkpoints
+write synchronously to the device, and that slows every writer. The loader
+also did about 3.7 times less work with `Direct`, so the two rows are not
+comparable load for load: the comparison is confounded. The documents
+therefore do not recommend `Io::Direct` to protect the WAL. The reference
+device must repeat the test. The WAL on a separate file system was not
+measured. WAL segment preallocation stays a possible mitigation, not
+implemented.
+
+### WAL appends
+
+`bench_wal_append`: `Wal::append` of 8-byte keys with no waiting, split
+over the threads: 2,000,000 appends of 16-byte values, or 200,000 of 1 KiB
+values. The flusher writes and syncs concurrently. One thread gives the
+uncontended cost, an upper bound on the time inside the
+`pending` mutex; timing the critical section itself would need
+instrumentation inside it.
+
+| Value size | 1 thread | 12 threads, total |
+| --- | --- | --- |
+| 16 bytes | 162 ns per append (6.19 M/s) | 2.67 M appends/s |
+| 1 KiB | 314 ns per append (3.19 M/s) | 1.34 M appends/s |
+
+The `pending` mutex is contended at 12 threads: the total rate falls below
+one thread's rate. Appends still exceed the durable put rate (about
+38,000 puts/s at 12 threads) by far, so the mutex is not the write
+bottleneck.
+
+### Recovery
+
+`bench_wal_recovery`: 32 threads write 200,000 single-put records (8-byte
+keys, 16-byte values) with no checkpoint; the database is dropped without
+a checkpoint (the WAL drains), and the reopen is timed. Replay goes through
+`Tree::apply`.
+
+| `io` | Open with replay | Records/s |
+| --- | --- | --- |
+| `Cached` | 138 ms | 1,454,195 |
+| `Direct` | 480 ms | 417,095 |
+
+Replay onto a `Direct` store is about 3.5 times slower here. The cause was
+not investigated.
 
 ## Relationship to sources
 

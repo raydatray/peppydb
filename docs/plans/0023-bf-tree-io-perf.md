@@ -1,6 +1,6 @@
 # 0023: Direct I/O and performance
 
-**Status:** Agreed
+**Status:** Complete (reference measurements pending)
 
 **Design references:** [persistence](../design/bf-tree-persistence.md),
 [concurrency](../design/bf-tree-concurrency.md),
@@ -284,8 +284,12 @@ counter in a lock path can halve a contended rate.
   rule out guaranteed 4096-byte alignment, so a `Full` page's write-back
   normally goes through the bounce buffer.
 - **`Cached` stays the default.** Portable and fast for data that fits in RAM.
-  The design documents recommend `Direct` on Linux when data exceeds memory
-  or when the WAL shares a file system with the store.
+  `Direct` is for data larger than memory on Linux, to be confirmed on the
+  reference device. An earlier draft also recommended `Direct` when the WAL
+  shares a file system with the store. The measurements do not support that
+  in this environment: under load, `Direct` made WAL latency worse, not
+  better ([engine](../design/engine.md#fsync-interference)). The documents
+  make no such recommendation, pending the reference run.
 - **Measurement gates each fast path.** Several of these optimisations depend
   on the CPU's cache behaviour. Code that does not pay for itself on the
   target platform is not merged.
@@ -453,8 +457,34 @@ Resolved (review, 2026-11-08):
 - [x] Diff 7: integer comparisons.
 - [x] Diff 8: persistence and circular-buffer benchmarks.
 - [x] Diff 9: engine and WAL benchmarks.
-- [ ] Diff 10: measurements and milestone completion.
-- [ ] Stack-wide verification.
+- [x] Diff 10: measurements and milestone completion.
+- [x] Stack-wide verification.
+- [ ] Follow-up, outside this stack: reference runs on WSL2 (x86_64) and on
+  GCP with a Local SSD (environments 2 and 3), and a `perf` profile of put
+  scaling on the reference machine.
+
+## Verification outcomes (2026-11-08)
+
+Environment for every Linux result: *Docker on macOS (aarch64),
+indicative*. Docker Desktop 29.2.1 on macOS 27.0.1, Apple M4 Pro host; a
+Linux VM with 12 CPUs, 8 GB of RAM, and kernel 6.12.72-linuxkit; data on
+the `/bench` named volume, ext4 (`rw,relatime,discard`) on the VM's
+virtual disk `/dev/vda1`, which a file on the Mac's SSD backs; release
+builds (`@build/mode/release`); unless stated, 1,000,000 keys of 8 bytes,
+16-byte values, a 32 MiB circular buffer, and 1 s per point. I/O numbers
+come from a virtual disk and are indicative only.
+
+| Check | Outcome |
+| --- | --- |
+| Workspace | At every diff: `tools/fmt.sh`, `tools/clippy.sh` (clean), `tools/buck2 test //crates/... //bin/... //go/...` (21 targets on macOS), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (466 tests at the tip), and `go vet` and `go test` pass. |
+| Miri | `tools/buck2 test @build/mode/miri '//crates/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` at diff 8, which changed that crate (the tombstone-on-free switch): pass. |
+| Linux container | `tools/linux-run tools/buck2 test //crates/...`: 20 crate targets pass. |
+| Direct I/O correctness | In the container, the direct-I/O tests pass: `o_direct_is_in_effect` (a misaligned read fails with `EINVAL`), `direct_stores_need_4096_byte_pages`, `a_direct_store_behaves_like_a_cached_one` (reopen in both modes), `a_tree_over_a_direct_store_reopens_at_its_commit`, and `a_database_works_in_both_io_modes`. On macOS, `direct_io_is_refused_off_linux` passes and the `Direct` cases are refused with `DirectIo`. |
+| Batched open reads | `the_open_scan_selects_the_same_pages_with_any_run_length` (runs of 1, 7, and 64; a page count that is a multiple of neither) and `a_run_reads_the_same_bytes_as_single_pages` pass. |
+| Fast paths | Both landed with a measured gain (see Discoveries): routed lookups about 3 percent on hot-leaf `get_with`; integer comparisons cut the descent from 134.6–140.3 ns to 83.2–85.2 ns and hot-leaf `get_with` from 186.2–188.9 ns to 78.7–87.7 ns. Behaviour unchanged: page, inner-node, tree, and engine model tests pass; the exhaustive `cmp_short` test matches slice order. |
+| Measurements | Every benchmark in the table above ran in the container. Tables are in the design documents: [persistence](../design/bf-tree-persistence.md#measurements) (`bench_persistence`, `bench_eviction_io`), [concurrency](../design/bf-tree-concurrency.md#linux) (plan 0016's benchmarks, `bench_circular_buffer_lock`), [circular buffer](../design/bf-tree-circular-buffer.md#measurements) (`bench_circular_buffer_free`, `circular_buffer_cost`, and `bench_head_stall` under "Making room"), [shared pages](../design/bf-tree-pages.md#preview-first-search) (fast paths), and [engine](../design/engine.md#measurements) (`bench_engine_write`, `bench_wal_append`, `bench_wal_recovery`). |
+| Plan 0016 on Linux | Diff 2 and tip benchmarks, the 120 s soak (516 rounds, 12 threads, pass), and the container check; recorded in [plan 0016](0016-bf-tree-concurrency.md#verification-outcomes-2026-11-05). |
+| Pending | Reference runs on WSL2 and GCP Local SSD (environments 2 and 3) were not done. They are follow-up work and must confirm the `Direct` recommendation, the flush-interval answer, and the fsync-interference answer on a real device. |
 
 ## Discoveries and plan changes
 
@@ -519,6 +549,45 @@ Resolved (review, 2026-11-08):
   put latency alone, and while a loader writes 1000-put batches and another
   thread checkpoints in a loop, for each I/O mode. The WAL on a different
   file system was not measured.
+- **Answers to the measurement questions (diff 10, Docker on macOS,
+  indicative; details and tables in the linked design documents).**
+  - *Flush interval:* a positive `flush_interval` never beat 0. With 0,
+    durable puts were 8 to 11 times faster at every thread count; the
+    default stays 0. With 1 ms the p50 was 2.0 to 3.0 ms, more than the
+    interval plus one sync; this is observed, not explained. On native
+    macOS (not a reference), 1 ms beat 0 at 12 threads (2,252 against
+    1,557 puts/s), where one sync takes about 4 ms
+    ([engine](../design/engine.md#durable-writes)).
+  - *Fsync interference:* the ext4 `data=ordered` hypothesis is not
+    confirmed. Under load, `Direct` raised one writer's WAL latency more
+    than `Cached` did (p50 1,986 µs against 560 µs), because the store's
+    synchronous writes slow every writer, and the loader did about 3.7
+    times less work, so the comparison is confounded. The plan's
+    conditional recommendation of `Direct` for the WAL therefore does not
+    apply; the decision bullet is corrected
+    ([engine](../design/engine.md#fsync-interference)).
+  - *Circular-buffer mutex:* not the limit. Put scaling peaks at 4 threads
+    with a 32 MiB buffer (21,950 evictions) and with a 1 GiB buffer (no
+    evictions), and both reach 3.46 M ops/s at 12 threads. The real limit
+    is unknown; a `perf` profile on the reference machine is follow-up
+    work ([concurrency](../design/bf-tree-concurrency.md#the-circular-buffer-mutex)).
+  - *Free lists:* they keep 96.3 percent utilisation against 54.0 percent
+    for tombstone-on-free, with 426,599 against 967,219 evictions, and
+    cost slightly less per step (70.2 to 72.1 ns against 74.8 to 76.4 ns).
+    Free lists stay
+    ([circular buffer](../design/bf-tree-circular-buffer.md#measurements)).
+  - *Head stall:* a 20 ms stall every 100 ms raised evictions per put by
+    about 8 percent and p99 by about 13 percent. No evidence that plan
+    0014's `has_room_after_claims` and `Condvar` wait are needed
+    ([circular buffer](../design/bf-tree-circular-buffer.md#making-room)).
+  - *Direct against cached:* with the whole file in the VM's page cache,
+    `Direct` was slower everywhere: load 0.40 against 1.39 M puts/s, full
+    checkpoint 818 against 118 ms, random `get` at 12 threads 0.11 against
+    5.23 M ops/s. `Cached` stays the default; data larger than memory was
+    not tested ([persistence](../design/bf-tree-persistence.md#measurements)).
+- **Plan 0016's Linux results were recorded here.** The diff-2 build used
+  plan 0016's archived diff-2 sources with the current container files,
+  because the diff-2 Dockerfile lacked `clang`.
 
 ## Agent notes
 
