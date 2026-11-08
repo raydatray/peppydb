@@ -2,6 +2,7 @@ use super::*;
 
 mod contract;
 mod crc;
+mod direct;
 mod file;
 mod superblock;
 

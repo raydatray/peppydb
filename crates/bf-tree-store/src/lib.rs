@@ -36,7 +36,7 @@ mod file;
 mod mem;
 mod superblock;
 
-pub use file::FileStore;
+pub use file::{FileStore, Io};
 pub use mem::MemStore;
 #[cfg(test)]
 use superblock::ENCODED_BYTES;
@@ -87,6 +87,9 @@ pub enum StoreError {
     TruncatedFile,
     #[error("neither superblock copy is intact")]
     NoSuperblock,
+    /// Direct I/O was requested where it is unavailable.
+    #[error("direct I/O unavailable: {0}")]
+    DirectIo(&'static str),
     #[error("commit of checkpoint {got} does not follow checkpoint {current}")]
     CommitOrder { current: u64, got: u64 },
     #[error("I/O error during {op}: {kind}{}", .code.map(|code| format!(" (os error {code})")).unwrap_or_default())]

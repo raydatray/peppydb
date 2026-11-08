@@ -107,6 +107,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "crc32c",
+ "libc",
  "tempfile",
  "thiserror",
  "zerocopy",

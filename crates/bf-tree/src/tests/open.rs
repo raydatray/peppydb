@@ -509,3 +509,52 @@ fn open_rejects_configurations_the_pages_do_not_respect() {
         ))
     );
 }
+
+/// A tree over a direct-I/O store (plan 0023): writes, checkpoints, an
+/// uncommitted tail, and reopens in both modes. Linux only; skipped where
+/// the file system rejects `O_DIRECT`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tree_over_a_direct_store_reopens_at_its_commit() {
+    use bf_tree_store::Io;
+    let dir = match std::env::var_os("PEPPYDB_BENCH_DIR") {
+        Some(base) => tempfile::tempdir_in(base).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
+    let path = dir.path().join("direct-tree.bf");
+    let config = TreeConfig {
+        circular_buffer_bytes: 256 << 10,
+        ..TreeConfig::default()
+    };
+    let store = match FileStore::create_with(&path, Superblock::from(&config), Io::Direct) {
+        Ok(store) => store,
+        Err(StoreError::Io { kind, .. }) if kind == std::io::ErrorKind::InvalidInput => {
+            eprintln!("skipped: {} rejects O_DIRECT", dir.path().display());
+            return;
+        }
+        Err(error) => panic!("{error:?}"),
+    };
+    let tree = Tree::create(config, Box::new(store)).unwrap();
+    let mut model = std::collections::BTreeMap::new();
+    for i in 0..20_000u32 {
+        let key = i.wrapping_mul(2_654_435_761).to_be_bytes();
+        tree.put(&key, &[i as u8; 40]).unwrap();
+        model.insert(key.to_vec(), vec![i as u8; 40]);
+        if i % 7_000 == 6_999 {
+            tree.checkpoint().unwrap();
+        }
+    }
+    tree.checkpoint().unwrap();
+    // Uncommitted: lost on reopen.
+    for i in 0..500u32 {
+        tree.put(&(1_000_000 + i).to_be_bytes(), b"lost").unwrap();
+    }
+    drop(tree);
+    for io in [Io::Direct, Io::Cached] {
+        let store = FileStore::open_with(&path, io).unwrap();
+        let tree = Tree::open_with(config, Box::new(store)).unwrap();
+        let all: std::collections::BTreeMap<_, _> = tree.iter().map(Result::unwrap).collect();
+        assert_eq!(all, model, "{io:?}");
+        assert_eq!(tree.check_invariants(), Ok(()));
+    }
+}
