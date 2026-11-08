@@ -1,0 +1,49 @@
+// Off-CPU time of one command's threads (plan 0024). Run as:
+//
+//   bpftrace -q -o OUT -c 'COMMAND ARGS' offcpu.bt
+//
+// For each thread of the command that leaves the CPU, record its kernel
+// and user stacks; when the thread runs again, add the time it was off the
+// CPU, in microseconds, to those stacks. Blocking on a lock, I/O, fsync,
+// and sleeping all show up here; time spent runnable but waiting for a CPU
+// shows up too (see `perf sched` for run-queue delay alone).
+//
+// User stacks are symbolized when they are printed, which needs the process
+// to be alive, so the map is printed and cleared every second.
+// tools/gcp/fold-stacks.py sums the prints into folded stacks.
+//
+// Uses the args-> syntax of bpftrace 0.20 (Ubuntu 24.04).
+
+tracepoint:sched:sched_switch
+/args->prev_pid != 0 && pid == cpid/
+{
+    // In sched_switch, the current task is the one leaving the CPU.
+    @start[tid] = nsecs;
+    @kernel[tid] = kstack;
+    @user[tid] = ustack;
+}
+
+tracepoint:sched:sched_switch
+/@start[args->next_pid]/
+{
+    $tid = args->next_pid;
+    @offcpu_us[@kernel[$tid], @user[$tid]] = sum((nsecs - @start[$tid]) / 1000);
+    delete(@start[$tid]);
+    delete(@kernel[$tid]);
+    delete(@user[$tid]);
+}
+
+interval:s:1
+{
+    print(@offcpu_us);
+    clear(@offcpu_us);
+}
+
+END
+{
+    print(@offcpu_us);
+    clear(@offcpu_us);
+    clear(@start);
+    clear(@kernel);
+    clear(@user);
+}

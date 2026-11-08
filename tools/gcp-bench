@@ -12,7 +12,9 @@
 #   --bucket B        default: $PEPPYDB_GCS_BUCKET; must be in us-east1
 #   --suite S         default: bf-io-perf (tools/gcp/suites/S.txt, or a path)
 #   --step NAME       run only this step, plus the preflight steps (repeatable)
-#   --profile P,...   profilers (default: none)
+#   --profile P,...   profilers: none, stat, record, record-dwarf, offcpu,
+#                     sched (default: none). Any profiler selects the
+#                     profile build mode.
 #   --zone Z          try only this zone (repeatable; us-east1 only)
 #   --machine-type M  default: c4d-standard-8-lssd
 #   --image NAME      an exact ubuntu-os-cloud image (default: newest ubuntu-2404-lts-amd64)
@@ -293,9 +295,33 @@ stage() {
     say "staged $STAGE"
 }
 
-# Profiling hook (plan 0024 diff 5): extra files for the stage directory.
-stage_extra() { :; }
-check_profile() { [ "$PROFILE" = none ] || die "unknown profiler list: $PROFILE"; }
+PROFILERS="none stat record record-dwarf offcpu sched"
+
+# stage_extra: the off-CPU script and the stack folder, for profiled runs.
+stage_extra() {
+    [ "$PROFILE" = none ] && return 0
+    cp "$GCP/offcpu.bt" "$GCP/fold-stacks.py" "$STAGE/"
+}
+
+# check_profile: a comma-separated list of known profilers, each once.
+check_profile() {
+    seen=
+    for profiler in $(echo "$PROFILE" | tr , ' '); do
+        case " $PROFILERS " in
+            *" $profiler "*) ;;
+            *) die "unknown profiler $profiler (known: $PROFILERS)" ;;
+        esac
+        case " $seen " in
+            *" $profiler "*) die "profiler $profiler listed twice" ;;
+        esac
+        seen="$seen $profiler"
+    done
+    [ -n "$seen" ] || die "empty --profile"
+    case "$PROFILE" in
+        none) ;;
+        *none*) say "warning: with profilers, unprofiled steps use the profile build; they are not reference numbers" ;;
+    esac
+}
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
