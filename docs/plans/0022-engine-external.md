@@ -1,6 +1,6 @@
 # 0022: External-log mode
 
-**Status:** Draft
+**Status:** Agreed
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md), [persistence](../design/bf-tree-persistence.md).
@@ -318,12 +318,20 @@ Five diffs.
 
 ## Open questions
 
-- **Interval checkpoints in external mode.** Proposed: none. Alternative: an
-  optional `Options::external_checkpoint_interval` as a safety net against
-  file growth when the owner forgets. Decide before diff 2.
-- **Snapshot reader shape.** `&mut dyn Read` is proposed. Phase 2 may prefer
-  chunks with offsets for resumable transfer; that would add a second
-  method, not change this one.
+None.
+
+Resolved (review, 2026-11-07):
+
+- **Interval checkpoints in external mode: none.** The owner is fully
+  responsible for checkpointing: the checkpoint's `applied_seq` is where
+  its log may be truncated and a follower resumes, and an engine-driven
+  checkpoint would have no owner hook. The design document states that the
+  store file grows between checkpoints, so the owner must checkpoint
+  periodically.
+- **Snapshot reader shape: `&mut dyn Read`; chunked transfer deferred.**
+  A resumable, offset-based transfer can be added later as a second
+  method; the snapshot is a store file with fixed offsets, so this is
+  additive.
 
 ## Verification strategy
 
@@ -338,7 +346,7 @@ Five diffs.
 
 ## Progress
 
-- [ ] Agree on the design and commit stack with the user.
+- [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: external mode and `apply`.
 - [ ] Diff 3: snapshot install.
 - [ ] Diff 4: leader/follower tests.
