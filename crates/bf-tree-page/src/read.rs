@@ -93,25 +93,42 @@ impl Page {
     pub(super) fn search(&self, key: &[u8]) -> Result<usize, usize> {
         let prefix = self.prefix();
         match key.strip_prefix(prefix) {
-            Some(query) => self
-                .record_slots()
-                .binary_search_by(|slot| self.compare_suffix(slot, query)),
+            Some(query) => {
+                let query_word = preview_word(query);
+                self.record_slots()
+                    .binary_search_by(|slot| self.compare_preview(slot, query, query_word))
+            }
             None if key < prefix => Err(0),
             None => Err(self.len()),
         }
     }
 
-    /// Compare previews first; load the stored suffix only on a tie.
-    pub(super) fn compare_suffix(&self, slot: &Slot, query: &[u8]) -> Ordering {
-        let stored_len = slot.key_len() - self.prefix_len();
-        let stored_preview = &slot.preview[..stored_len.min(PREVIEW_BYTES)];
-        let query_preview = &query[..query.len().min(PREVIEW_BYTES)];
-
-        stored_preview.cmp(query_preview).then_with(|| {
-            let stored = &self.as_bytes()[self.suffix_range(slot)];
-            stored.cmp(query)
-        })
+    /// Compare a slot's stored suffix with `query`, whose preview word is
+    /// `query_word`, computed once per search. Compares the zero-padded
+    /// previews as integers and loads the stored suffix only on a tie. See
+    /// [`padded_word`] for why a strict inequality orders the full suffixes.
+    ///
+    /// [`padded_word`]: crate::key::padded_word
+    fn compare_preview(&self, slot: &Slot, query: &[u8], query_word: u16) -> Ordering {
+        u16::from_be_bytes(slot.preview)
+            .cmp(&query_word)
+            .then_with(|| self.as_bytes()[self.suffix_range(slot)].cmp(query))
     }
+
+    /// [`Page::compare_preview`] for one comparison.
+    #[cfg(test)]
+    pub(super) fn compare_suffix(&self, slot: &Slot, query: &[u8]) -> Ordering {
+        self.compare_preview(slot, query, preview_word(query))
+    }
+}
+
+/// A suffix's first `PREVIEW_BYTES` bytes, zero-padded, as a slot stores
+/// them, read as a big-endian integer.
+fn preview_word(suffix: &[u8]) -> u16 {
+    let mut preview = [0; PREVIEW_BYTES];
+    let len = suffix.len().min(PREVIEW_BYTES);
+    preview[..len].copy_from_slice(&suffix[..len]);
+    u16::from_be_bytes(preview)
 }
 
 impl<'p> IntoIterator for &'p Page {

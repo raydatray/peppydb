@@ -106,3 +106,46 @@ fn different_segmentations_of_one_key_are_equal() {
     assert_eq!(KeyRef::new(b"ab", b"").cmp_bytes(b""), Ordering::Greater);
     assert_eq!(KeyRef::new(b"", b"").cmp_bytes(b""), Ordering::Equal);
 }
+
+/// Every pair of strings up to length 3 over {0, 1, 255}, plus pseudo-random
+/// longer pairs, orders the same under `cmp_short` as under slice order.
+#[test]
+fn cmp_short_matches_slice_order() {
+    let alphabet = [0u8, 1, 255];
+    let mut strings = vec![Vec::new()];
+    for len in 1..=3u32 {
+        strings.extend((0..alphabet.len().pow(len)).map(|mut n| {
+            (0..len)
+                .map(|_| {
+                    let byte = alphabet[n % alphabet.len()];
+                    n /= alphabet.len();
+                    byte
+                })
+                .collect()
+        }));
+    }
+    for a in &strings {
+        for b in &strings {
+            assert_eq!(crate::key::cmp_short(a, b), a.cmp(b), "{a:?} {b:?}");
+        }
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..20_000 {
+        let mut string = || -> Vec<u8> {
+            let len = (next() % 20) as usize;
+            // A small alphabet makes long common prefixes likely.
+            (0..len).map(|_| alphabet[(next() % 3) as usize]).collect()
+        };
+        let (a, b) = (string(), string());
+        assert_eq!(crate::key::cmp_short(&a, &b), a.cmp(&b), "{a:?} {b:?}");
+        let split = (next() as usize) % (a.len() + 1);
+        let key = KeyRef::new(&a[..split], &a[split..]);
+        assert_eq!(key.cmp_bytes(&b), a.cmp(&b), "{a:?} split {split} vs {b:?}");
+    }
+}

@@ -450,7 +450,7 @@ Resolved (review, 2026-11-08):
 - [x] Diff 4: batched open reads.
 - [x] Diff 5: engine I/O option.
 - [x] Diff 6: routed lookups.
-- [ ] Diff 7: integer comparisons.
+- [x] Diff 7: integer comparisons.
 - [ ] Diff 8: persistence and circular-buffer benchmarks.
 - [ ] Diff 9: engine and WAL benchmarks.
 - [ ] Diff 10: measurements and milestone completion.
@@ -487,6 +487,18 @@ Resolved (review, 2026-11-08):
   185.1 ns after (about 3%); the descent, unchanged, stayed at 133.6 to
   135.0 ns. Only `get_routed` landed; `find_index_routed` had no caller
   on a routed path.
+- **Integer comparisons: the largest gain of the pass.** Diff 7 compares
+  leaf previews as `u16`, inner inline bytes as `u32`, and short `KeyRef`
+  parts as `u64`, each against a query word computed once per search.
+  Before, each probe made out-of-line `memcmp` calls for 2- and 4-byte
+  slices. Container A/B against diff 6 (Docker on macOS, aarch64, release,
+  four alternating runs, default shape): descent 134.6 to 140.3 ns before,
+  83.2 to 85.2 ns after; hot-leaf `get_with` 186.2 to 188.9 ns before,
+  78.7 to 87.7 ns after; random `put` 606 to 663 ns before, 538 to 574 ns
+  after. With 64-byte keys: descent about 198 to 133 ns, `get_with` about
+  209 to 86 ns, `put` unchanged at about 1.6 µs. The benchmark keys are
+  hashed, so previews decide most probes; keys with long shared prefixes
+  gain less.
 
 ## Agent notes
 
