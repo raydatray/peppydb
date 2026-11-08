@@ -4,10 +4,10 @@
 # on a machine you care about: it formats the Local SSD.
 #
 # On boot it:
-#   1. exits if this VM already started a run (startup scripts run on every
-#      boot);
-#   2. reads peppydb-bucket and peppydb-run-id from the metadata server and
-#      uploads results/RUN/started;
+#   1. reads peppydb-bucket and peppydb-run-id from the metadata server;
+#   2. exits if this VM already started a run (startup scripts run on every
+#      boot; after a reboot in the middle of a run it reports the run as
+#      failed), and otherwise uploads results/RUN/started;
 #   3. installs tools from the Ubuntu archive (the only thing that comes
 #      from the internet);
 #   4. formats the Local SSD as ext4 and mounts it at /mnt/bench;
@@ -316,12 +316,6 @@ run_suite() {
 }
 
 main() {
-    if [ -e "$STATE/started" ]; then
-        log "this VM already started a run; nothing to do"
-        return 0
-    fi
-    mkdir -p "$STATE" "$RESULTS" && date -u +%Y-%m-%dT%H:%M:%SZ >"$STATE/started" || return 1
-
     BUCKET=$(metadata instance/attributes/peppydb-bucket)
     RUN_ID=$(metadata instance/attributes/peppydb-run-id)
     if [ -z "$BUCKET" ] || [ -z "$RUN_ID" ]; then
@@ -330,6 +324,20 @@ main() {
     fi
     REMOTE_ARTIFACTS=gs://$BUCKET/peppydb-bench/artifacts/$RUN_ID
     REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID
+
+    # Startup scripts run on every boot. After a reboot in the middle of a
+    # run (for example, a host error), report the run as failed instead of
+    # leaving the driver waiting.
+    if [ -e "$STATE/started" ]; then
+        if [ -e "$RESULTS/DONE" ]; then
+            log "this VM already finished its run; nothing to do"
+        else
+            log "the VM rebooted during the run"
+            finish failed "the VM rebooted during the run"
+        fi
+        return 0
+    fi
+    mkdir -p "$RESULTS" && date -u +%Y-%m-%dT%H:%M:%SZ >"$STATE/started" || return 1
     cp "$STATE/started" "$RESULTS/started"
     upload "$RESULTS/started"
     log "run $RUN_ID, bucket $BUCKET"
