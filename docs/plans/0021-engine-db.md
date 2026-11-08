@@ -610,7 +610,7 @@ by plans 0019 and 0013.
 - [x] Diff 3: durable writes.
 - [x] Diff 4: write batches.
 - [x] Diff 5: checkpoint policy.
-- [ ] Diff 6: crash tests.
+- [x] Diff 6: crash tests.
 - [ ] Diff 7: documentation.
 - [ ] Stack-wide verification.
 

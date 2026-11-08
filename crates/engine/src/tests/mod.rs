@@ -1,5 +1,6 @@
 mod batch;
 mod checkpoint;
+mod crash;
 mod open;
 mod write;
 
