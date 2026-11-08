@@ -287,6 +287,27 @@ impl PageStore for FileStore {
             .map_err(|error| io_error("read", error))
     }
 
+    fn read_run(&self, first: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
+        let page_size = self.superblock.page_size;
+        if !buf.len().is_multiple_of(page_size) {
+            return Err(StoreError::BufferLength {
+                expected: buf.len().next_multiple_of(page_size),
+                actual: buf.len(),
+            });
+        }
+        let count = (buf.len() / page_size) as u64;
+        let end = first
+            .raw()
+            .checked_add(count)
+            .ok_or(StoreError::UnknownPage(first))?;
+        if end > self.page_count() {
+            let past = PageNumber::new(self.page_count().max(first.raw())).unwrap_or(first);
+            return Err(StoreError::UnknownPage(past));
+        }
+        read_at(&self.file, self.io, self.offset(first.raw()), buf)
+            .map_err(|error| io_error("read run", error))
+    }
+
     fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
         let (index, freed) = self.page(page_number)?;
         check_buffer(self.superblock.page_size, buf)?;
