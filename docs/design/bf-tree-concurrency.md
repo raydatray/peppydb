@@ -692,9 +692,14 @@ the [caching design](bf-tree-caching.md#deferral).
 A split that wrote its pages but has not yet published its separator still
 holds X on the left leaf, so no thread observes the intermediate state.
 
-As a guard against protocol bugs, `get_with` calls `page.check_key(key)`
-when it loads the base page. A failure surfaces as the internal error
-`TreeError::Page(PageError::KeyOutOfRange)`, never as wrong data. Scans
+As a guard against protocol bugs, `get_with` looks a key up in the base
+page or a full page with `Page::get_routed`, which asserts in debug builds
+that the key lies within the page's fences. A failure is a panic in debug
+builds. Release builds skip the check: a key that reached the leaf by a
+validated route is within the fences by construction (plan 0023; see
+[shared pages](bf-tree-pages.md#routed-lookups)). Before plan 0023,
+`get_with` checked the fences in every build and returned the internal
+error `TreeError::Page(PageError::KeyOutOfRange)`. Scans
 apply the cursor as the lower bound in every leaf instead. A blind write
 loads no base page, so a misrouted record is caught when its leaf merges:
 the merge's batch check rejects a key outside the base page's fences with
@@ -811,6 +816,7 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
     fn free(&self, page_number: PageNumber) -> Result<(), StoreError>;
     fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>;
     fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
+    fn read_run(&self, first: PageNumber, buf: &mut [u8]) -> Result<(), StoreError>; // plan 0023
     fn sync(&self) -> Result<(), StoreError>;
     fn superblock(&self) -> &Superblock;
     fn state(&self) -> State;
@@ -831,8 +837,10 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
   `freed` flag; it allocates the page box before it takes the free-list
   mutex. `FileStore` uses positioned I/O through `&File`, keeps its freed
   flags in a `Table<AtomicBool>` whose length is the page count, and takes
-  no store-wide lock for reads and writes. Its `alloc` holds the free-list
-  mutex while it extends the file.
+  no store-wide lock for reads and writes. With `Io::Direct`, an unaligned
+  transfer goes through a thread-local bounce buffer, which needs no lock
+  either ([persistence](bf-tree-persistence.md#direct-io)). Its `alloc`
+  holds the free-list mutex while it extends the file.
 - Commits are serialized: `FileStore` holds a commit mutex across the copy
   write and its sync, and keeps the state in a separate short-held mutex,
   so `state()` never waits for a sync. A commit whose `checkpoint_id` does
@@ -919,7 +927,9 @@ their own bytes back.
   times in release builds without a failure. Plan 0016 ran the concurrent,
   route, frames, and contention suites 30 of 30 and 20 of 20 times in
   release builds, and 48 of 48 times in debug builds with 12 copies in
-  parallel. The soak test ran 30 s on macOS (125 rounds, 12 threads).
+  parallel. The soak test ran 30 s on macOS (125 rounds, 12 threads), and
+  120 s on Linux during plan 0023 (516 rounds, 12 threads; see
+  [Linux](#linux)).
   Plan 0018 ran the concurrent, contention, checkpoint, buffered, and
   crash suites 20 of 20 times in release builds.
 - The `bf-tree-sync` tests check that a lock stays usable after a panic
@@ -931,7 +941,9 @@ their own bytes back.
 The benchmarks in `crates/bf-tree/src/tests/bench.rs` are informational,
 not gates. Plan 0016 ran the same harness before the frames (at diff 2,
 under the interim inner `RwLock` and global version) and after them (at
-the tip of the stack).
+the tip of the stack) on macOS. Plan 0023 ran it on Linux, in a container,
+at plan 0016's diff 2 and at the tip of plan 0023
+([Linux](#linux)). Each table names its environment.
 
 ### macOS
 
@@ -942,8 +954,8 @@ point.
 
 **Caution.** The macOS standard `RwLock` parks readers under
 reader-reader contention. Contended macOS numbers therefore understate how
-well leaf locks scale; a hot single leaf is bound by that lock. The Linux
-numbers below are the reference for contended paths once they exist.
+well leaf locks scale; a hot single leaf is bound by that lock. Use the
+[Linux](#linux) numbers for contended paths.
 
 Single-thread components (`baseline_components`), in ns per operation:
 
@@ -1003,31 +1015,129 @@ Interpretation:
   `arc-swap` load per level, each with a `SeqCst` read-modify-write. It
   shows only when the whole descent is cached; the descent component, which
   spreads keys over the tree, is dominated by cache misses and did not
-  change. This is not confirmed. It is recorded as a follow-up for
-  [plan 0023](../plans/0023-bf-tree-io-perf.md), for example a cheaper
-  per-level load such as a cached `arc-swap` load.
+  change. This is not confirmed. It was recorded as a follow-up for
+  [plan 0023](../plans/0023-bf-tree-io-perf.md). Plan 0023 did not change
+  the per-level load. Its integer comparisons and routed lookups reduced
+  the hot-leaf `get_with` component on Linux from 172.0 ns (plan 0016's
+  diff 2) to 90.3 ns (the tip of plan 0023), so the tip is now well below
+  the interim design ([Linux](#linux)). The `arc-swap` cost itself was not
+  isolated.
 
-### Linux measurements: pending
+### Linux
 
-The local Docker engine was unavailable while plan 0016 was implemented,
-so no Linux numbers exist yet. To record them, run the benchmarks at diff 2
-of plan 0016 and at its tip:
+Environment: *Docker on macOS (aarch64), indicative*. Docker Desktop
+29.2.1 on macOS 27.0.1, Apple M4 Pro host; a Linux VM with 12 CPUs, 8 GB
+of RAM, and kernel 6.12.72-linuxkit. Release builds
+(`@build/mode/release`). 1,000,000 keys of 8 bytes, 16-byte values, a
+32 MiB circular buffer, 1 s per point. The benchmarks read and write no
+store file, so the virtual disk does not affect them. The threads run on
+the VM's 12 virtual CPUs, so contended numbers include virtualisation
+effects. The reference runs on WSL2
+and on GCP (plan 0023) were not done.
+
+Commands, from the repository root:
 
 ```sh
 tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
+PEPPYDB_SOAK_SECS=120 tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
 ```
 
-and the soak test:
+"Diff 2" is plan 0016's diff 2: the interim inner `RwLock` and global
+version. Plan 0023 built it from the archived diff-2 sources with the
+current container files, because the diff-2 Dockerfile lacked `clang`.
+"Tip" is the tip of plan 0023: frames plus plan 0023's routed lookups and
+integer comparisons. The single-thread component costs at the tip
+therefore include those fast paths, and the comparison is not a pure
+measure of the frames.
 
-```sh
-tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
-```
+Single-thread components (`baseline_components`), in ns per operation:
 
-`tools/linux-run` forwards the `PEPPYDB_BENCH_*` variables and
-`PEPPYDB_SOAK_SECS`, so `PEPPYDB_SOAK_SECS=600 tools/linux-run tools/buck2 ...`
-runs a ten-minute soak.
-Contended benchmarks in the container see the CPUs of Docker's virtual
-machine; record them with the results.
+| Component | Diff 2 | Tip |
+| --- | --- | --- |
+| Descent (`route`) | 121.3 | 83.1 |
+| Leaf S lock and unlock | 3.8 | 3.7 |
+| Leaf X lock and unlock | 3.0 | 3.0 |
+| `get_with`, one hot leaf | 172.0 | 90.3 |
+| `put`, random leaves | 600.3 | 548.5 |
+
+Uniform keys by thread count (`baseline_threads`), in M ops/s:
+
+| Caching | Mix | | 1t | 2t | 4t | 8t | 12t |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Record | get | diff 2 | 1.32 | 2.68 | 4.81 | 4.34 | 3.05 |
+| Record | get | tip | 1.28 | 2.81 | 5.96 | 12.09 | 14.27 |
+| Record | put | diff 2 | 1.42 | 3.15 | 5.19 | 4.53 | 3.13 |
+| Record | put | tip | 1.53 | 3.31 | 5.10 | 6.56 | 6.16 |
+| Record | 50/50 | diff 2 | 1.54 | 3.16 | 5.02 | 4.39 | 3.08 |
+| Record | 50/50 | tip | 1.70 | 3.38 | 6.24 | 10.18 | 10.47 |
+| Page | get | diff 2 | 1.50 | 3.01 | 4.95 | 4.26 | 3.58 |
+| Page | get | tip | 1.45 | 3.11 | 6.19 | 9.67 | 7.76 |
+| Page | put | diff 2 | 1.36 | 2.93 | 4.92 | 3.97 | 3.39 |
+| Page | put | tip | 1.57 | 3.31 | 5.15 | 6.64 | 5.92 |
+| Page | 50/50 | diff 2 | 1.44 | 2.99 | 4.88 | 4.44 | 3.13 |
+| Page | 50/50 | tip | 1.40 | 2.92 | 5.35 | 7.38 | 8.06 |
+
+Hot sets with record caching (`baseline_hot_set`), in M ops/s:
+
+| Hot set | Mix | | 1t | 2t | 4t | 8t | 12t |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 leaf (117 keys) | get | diff 2 | 5.31 | 7.16 | 5.37 | 4.40 | 2.83 |
+| 1 leaf (117 keys) | get | tip | 10.87 | 11.69 | 6.31 | 4.33 | 2.79 |
+| 1 leaf (117 keys) | 90/10 | diff 2 | 5.30 | 7.27 | 6.48 | 2.78 | 2.77 |
+| 1 leaf (117 keys) | 90/10 | tip | 10.07 | 10.61 | 5.59 | 3.54 | 3.59 |
+| 32 leaves (3945 keys) | get | diff 2 | 4.83 | 8.08 | 6.13 | 4.49 | 2.79 |
+| 32 leaves (3945 keys) | get | tip | 8.82 | 15.55 | 24.97 | 42.90 | 46.29 |
+| 32 leaves (3945 keys) | 90/10 | diff 2 | 4.86 | 8.52 | 5.97 | 4.50 | 2.82 |
+| 32 leaves (3945 keys) | 90/10 | tip | 8.56 | 13.08 | 19.29 | 25.86 | 23.03 |
+
+Interpretation:
+
+- **Single thread.** Uniform single-thread rates at the tip are within
+  about 10 percent of diff 2, which meets plan 0016's criterion. None is
+  more than about 3 percent slower; page-caching `put` is about 15
+  percent faster. The hot
+  sets are faster at the tip on one thread (for example, 1-leaf `get` 5.31
+  to 10.87 M ops/s), mostly from plan 0023's integer comparisons.
+- **Reads scale far better with frames.** Record-caching `get` at 12
+  threads rises from 3.05 to 14.27 M ops/s, and `get` on a 32-leaf hot set
+  from 2.79 to 46.29 M ops/s. At diff 2 every curve peaks at 4 threads,
+  because every descent writes the cache line of the one inner `RwLock`.
+- **A single hot leaf does not scale in either design.** It reaches about
+  2.8 M ops/s at 12 threads in both. Every reader of that leaf writes its
+  leaf lock word, which is then the shared cache line.
+- **Page-caching `get` falls from 8 to 12 threads** (9.67 to 7.76 M ops/s)
+  on Linux too, so macOS reader parking does not explain it alone. It was
+  not investigated.
+- **Puts scale less than gets.** Record-caching `put` at the tip peaks at
+  6.56 M ops/s at 8 threads. The circular-buffer measurement below shows
+  that the buffer's mutex is not the limit. The cause was not profiled.
+
+Soak: `concurrent_soak` with `PEPPYDB_SOAK_SECS=120` in the container ran
+516 rounds in 120 s on 12 threads and passed. The container check
+(`tools/linux-run tools/buck2 test //crates/...`) passes since plan 0023's
+diff 2, which added `clang` and `lld` to the image.
+
+#### The circular-buffer mutex
+
+`bench_circular_buffer_lock` (`crates/bf-tree/src/tests/bench_io.rs`,
+same environment and shape) measures random `put` throughput with a
+32 MiB circular buffer, which evicts, and with a 1024 MiB buffer, which
+never evicts. Plan 0023 planned a `perf` profile instead, but the container
+has no `perf`, and Docker's default seccomp profile blocks
+`perf_event_open`.
+
+| Circular buffer | Evictions | 1t | 2t | 4t | 8t | 12t |
+| --- | --- | --- | --- | --- | --- | --- |
+| 32 MiB | 21,950 | 1.61 | 3.37 | 4.52 | 4.06 | 3.46 |
+| 1024 MiB | 0 | 1.76 | 4.24 | 4.89 | 4.09 | 3.46 |
+
+Values are M ops/s. Put scaling peaks at 4 threads with both budgets and
+falls to the same 3.46 M ops/s at 12 threads. The circular-buffer mutex
+therefore does not limit put scaling here; the limit is elsewhere. The
+benchmark runs on an in-memory tree (`MemStore`), so no store I/O is
+involved. A `perf` profile on the reference machine should find
+the limit; that is follow-up work. Spin wrappers around the locks are not
+an option ([`bf-tree-sync`](#bf-tree-sync)).
 
 ## References
 

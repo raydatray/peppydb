@@ -142,6 +142,26 @@ It rejects empty and out-of-range keys as `get` does. Indices exclude fence
 slots. `record_at(index)` returns the record at an index in key order and
 panics if `index >= len()`.
 
+### Routed lookups
+
+`get` calls `check_key`, which decodes both fences and compares the key with
+them, on every call. `get_routed(key)` returns the same result as `get` for a
+key that a validated route brought to this page, without that check: such a
+key is nonempty and inside the fences by construction. A `debug_assert`
+keeps the check in debug builds, so debug test runs still catch routing bugs.
+The checked methods stay for callers whose keys did not come from a route.
+[Plan 0023](../plans/0023-bf-tree-io-perf.md) added it.
+
+`Tree::get_with` uses `get_routed` on the base page and on a full page. Before
+plan 0023 it called `check_key` and then `get`, so it checked the fences
+twice. Measured A/B (Docker on macOS (aarch64), indicative: Docker Desktop
+29.2.1 on macOS 27.0.1, Apple M4 Pro host, Linux VM with 12 CPUs, kernel
+6.12.72-linuxkit; release build; `baseline_components`; 1,000,000 keys of
+8 bytes, 16-byte values, 32 MiB circular buffer; four alternating runs):
+`get_with` on a hot leaf took 189.7 to 192.3 ns before and 184.2 to
+185.1 ns after, about 3 percent less. `find_index_routed`, also planned, had
+no caller on a routed path and was not added.
+
 ### Logical keys
 
 `RecordRef::key` is a `KeyRef`: a borrowed logical key made of a prefix slice
@@ -176,11 +196,38 @@ All point paths and range endpoints use one binary search. It returns
 `Ok(index)` for a stored key and `Err(index)` with the insertion position
 otherwise. Point operations decide hit or miss from that result without a second
 key comparison; range endpoints use the index from either variant. Each probe
-compares the meaningful first one or two preview bytes as slices, then loads the complete
-key only on a tie. Zero padding is excluded for short keys. This preserves full
-lexicographic byte ordering, including embedded zero bytes and preview collisions,
-without relying on native integer ordering. Unequal previews avoid payload access.
-This is a search fast path; no throughput claim is made without a workload.
+compares the slot's two-byte zero-padded preview, read as a big-endian `u16`,
+with a query word that the search computes once from the query suffix
+(`preview_word`). It loads the stored suffix and compares slices only when the
+words are equal (`compare_preview` in `crates/bf-tree-page/src/read.rs`).
+Unequal previews avoid payload access and out-of-line `memcmp` calls.
+
+**Why integer order is safe.** For two byte strings, a strict inequality of
+their zero-padded big-endian words is their lexicographic order. At the first
+differing byte, either both bytes are real, or the zero-padded byte ends a
+shorter string that is a prefix of the other, which therefore sorts first. Equal
+words decide nothing: an embedded zero byte and padding look the same, so the
+search then compares the stored bytes. This preserves full lexicographic order,
+including embedded zero bytes, short keys, and preview collisions.
+
+`KeyRef::cmp_bytes` uses the same rule through `cmp_short`
+(`crates/bf-tree-page/src/key.rs`). It compares the prefix and the suffix parts
+in turn. When the common length of two parts is at most 8, it compares them as
+zero-padded big-endian `u64` words (`padded_word`) and then by length; longer
+parts use slice order. Inner-node routing uses the same rule for its 4-byte
+inline bytes ([inner nodes](bf-tree-inner-nodes.md#search)).
+
+Plan 0023 measured the change against the previous slice comparisons (Docker on
+macOS (aarch64), indicative, as above; release builds; `baseline_components`;
+1,000,000 keys of 8 bytes, 16-byte values, 32 MiB circular buffer; four
+alternating runs): descent 134.6 to 140.3 ns before and 83.2 to 85.2 ns after;
+`get_with` on a hot leaf 186.2 to 188.9 ns before and 78.7 to 87.7 ns after;
+random `put` 606 to 663 ns before and 538 to 574 ns after. With 64-byte keys:
+descent about 198 ns to about 133 ns, `get_with` about 209 ns to about 86 ns,
+and `put` unchanged at about 1.6 µs. The benchmark keys are hashed, so previews
+decide most probes. Keys with long shared prefixes should gain less, because
+more probes can tie on the preview and compare the stored bytes; this case was
+not measured.
 
 On a page with a nonzero prefix, the search first classifies the full query
 against the prefix. A query that diverges inside the prefix, or ends within it,
@@ -268,8 +315,10 @@ remaining fields zero. Decoding never infers infinity from key length. Compactio
 packs finite fence payloads and preserves infinity tags.
 
 Finite bounds must satisfy `lower < upper`. The domain is `[lower, upper)`.
-Every point operation checks membership, returning `KeyOutOfRange` for incorrect
-routing and the normal miss result for an in-range miss. Empty ordinary keys
+Every checked point operation checks membership, returning `KeyOutOfRange` for
+incorrect routing and the normal miss result for an in-range miss.
+`get_routed` asserts membership only in debug builds
+([Routed lookups](#routed-lookups)). Empty ordinary keys
 still return `EmptyKey` first. Fence initialization checks capacity, ordering,
 then storage size; all failures preserve the supplied buffer. Writes budget
 the fences when deciding `RecordTooLarge`, before checking duplicates or space.
@@ -548,7 +597,10 @@ Callers must protect borrowed results against relocation.
   describes upstream's stored logical lengths, full low fence, suffix-only high
   fence and records, and suffix previews, which peppydb follows. peppydb differs
   by keeping finite empty fences distinct from infinity, checking fence
-  membership on every point operation, and returning segmented `KeyRef` views.
+  membership on every checked point operation (`get_routed` checks it only in
+  debug builds), and returning segmented `KeyRef` views.
+- [Plan 0023](../plans/0023-bf-tree-io-perf.md): routed lookups and integer
+  comparisons, with their measurements.
 - Figure 3 of the paper shows a 14-bit value length and a separate fence bit.
   peppydb follows upstream's current slot packing, except for the reserved bit.
 - [Plan 0011](../plans/0011-bf-tree-mini-page.md) retired the in-slot
