@@ -594,7 +594,7 @@ Resolved:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: crate and record format.
+- [x] Diff 2: crate and record format.
 - [ ] Diff 3: replay and torn-tail repair.
 - [ ] Diff 4: append and group commit.
 - [ ] Diff 5: truncation and simulated crashes.

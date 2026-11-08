@@ -1,0 +1,13 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The engine's write-ahead log. Internal crate of the engine component:
+# only the engine entry crate (plan 0021) may depend on it.
+peppy_rust_library(
+    name = "engine-wal",
+    deps = [
+        "//third-party/rust:crc32c",
+        "//third-party/rust:thiserror",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["//crates/engine:"],
+)
