@@ -9,9 +9,11 @@
 //! std::fs::remove_dir_all(&dir).unwrap();
 //! ```
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 use std::time::Duration;
 
 use bf_tree::{Entry, FileStore, Superblock, Tree};
@@ -170,11 +172,67 @@ fn to_tree_op<'a>(op: &engine_wal::Op<'a>) -> bf_tree::Op<'a> {
     }
 }
 
+/// Several writes that become durable together: after any crash, all or
+/// none of them are present. Not isolated: a concurrent reader may see some
+/// of them before others.
+#[derive(Clone, Debug, Default)]
+pub struct WriteBatch {
+    ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+impl WriteBatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace `key`.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> &mut Self {
+        self.ops.push((key.to_vec(), Some(value.to_vec())));
+        self
+    }
+
+    /// Remove `key`.
+    pub fn delete(&mut self, key: &[u8]) -> &mut Self {
+        self.ops.push((key.to_vec(), None));
+        self
+    }
+
+    /// Operations added, duplicates included.
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// The batch's effect: sorted by key, the last operation per key. Its
+    /// meaning then does not depend on the order in which `apply` writes.
+    fn normalize(self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let last: BTreeMap<_, _> = self.ops.into_iter().collect();
+        last.into_iter().collect()
+    }
+}
+
+fn tree_ops(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<bf_tree::Op<'_>> {
+    ops.iter()
+        .map(|(key, value)| match value {
+            Some(value) => bf_tree::Op::Put { key, value },
+            None => bf_tree::Op::Delete { key },
+        })
+        .collect()
+}
+
 /// The embedded database.
 pub struct Db {
     path: PathBuf,
     tree: Tree,
     wal: Wal,
+    /// Single writes hold it shared; a batch holds it exclusively from its
+    /// WAL append until it is applied, so no single write to one of its
+    /// keys can take a later sequence and apply first. Readers and
+    /// checkpoints never take it.
+    gate: RwLock<()>,
     /// Held for the database's lifetime; dropping it releases the lock.
     _lock: File,
 }
@@ -211,6 +269,7 @@ impl Db {
             path,
             tree,
             wal,
+            gate: RwLock::new(()),
             _lock: lock,
         })
     }
@@ -220,7 +279,10 @@ impl Db {
     /// before it is durable; a crash before the sync loses it, and this call
     /// never returned `Ok`.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
-        let seq = self.tree.put_logged(&WalLog(&self.wal), key, value)?;
+        let seq = {
+            let _single = self.gate.read().unwrap_or_else(PoisonError::into_inner);
+            self.tree.put_logged(&WalLog(&self.wal), key, value)?
+        };
         // After the leaf lock is released: a slow sync holds no lock.
         self.wal.wait_durable(seq)?;
         Ok(())
@@ -228,7 +290,35 @@ impl Db {
 
     /// Remove `key` if present. Returns once the removal is durable.
     pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
-        let seq = self.tree.remove_logged(&WalLog(&self.wal), key)?;
+        let seq = {
+            let _single = self.gate.read().unwrap_or_else(PoisonError::into_inner);
+            self.tree.remove_logged(&WalLog(&self.wal), key)?
+        };
+        self.wal.wait_durable(seq)?;
+        Ok(())
+    }
+
+    /// Apply a batch atomically: one WAL record with one sequence, then
+    /// every operation. Every operation is checked against the tree's limits
+    /// first, because a logged batch that the tree rejects would fail every
+    /// later replay. Returns once the batch is durable.
+    pub fn write(&self, batch: WriteBatch) -> Result<(), Error> {
+        let ops = batch.normalize();
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let tree_ops = tree_ops(&ops);
+        tree_ops.iter().try_for_each(|op| self.tree.check_op(op))?;
+        let wal_ops: Vec<_> = tree_ops.iter().map(to_wal_op).collect();
+        let seq = {
+            let _exclusive = self.gate.write().unwrap_or_else(PoisonError::into_inner);
+            let seq = self.wal.append_batch(&wal_ops)?;
+            self.tree.apply(Entry {
+                seq,
+                ops: &tree_ops,
+            })?;
+            seq
+        };
         self.wal.wait_durable(seq)?;
         Ok(())
     }
