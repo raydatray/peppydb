@@ -44,7 +44,7 @@ pub use bf_tree_inner::InnerError;
 pub use bf_tree_node_id::LeafId;
 pub use bf_tree_page::PageError;
 pub use bf_tree_store::{
-    FileStore, MemStore, PageNumber, PageStore, State, StoreError, Superblock,
+    FileStore, Io, MemStore, PageNumber, PageStore, State, StoreError, Superblock,
 };
 
 mod apply;
