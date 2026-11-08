@@ -267,3 +267,27 @@ fn commits_must_follow_the_current_checkpoint() {
         assert_eq!(store.state(), first, "a rejected commit changes nothing");
     });
 }
+
+#[test]
+fn a_run_reads_the_same_bytes_as_single_pages() {
+    for_each_backend(|store| {
+        let pages: Vec<_> = (0..10).map(|_| store.alloc().unwrap()).collect();
+        for (fill, &page_number) in (1u8..).zip(&pages) {
+            store.write(page_number, &page_image(PAGE, fill)).unwrap();
+        }
+        store.free(pages[4]).unwrap();
+        let mut run = vec![0; 7 * PAGE];
+        store.read_run(pages[2], &mut run).unwrap();
+        for (i, chunk) in run.chunks(PAGE).enumerate() {
+            let mut single = vec![0; PAGE];
+            store.read(pages[2 + i], &mut single).unwrap();
+            assert_eq!(chunk, single, "page {}", 2 + i);
+        }
+        // Past the end, and a length that is not whole pages, are errors.
+        assert!(store.read_run(pages[5], &mut vec![0; 6 * PAGE]).is_err());
+        assert!(matches!(
+            store.read_run(pages[0], &mut [0; PAGE + 1]),
+            Err(StoreError::BufferLength { .. })
+        ));
+    });
+}

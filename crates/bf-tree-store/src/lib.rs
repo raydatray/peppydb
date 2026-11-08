@@ -130,6 +130,26 @@ pub trait PageStore: Send + Sync + std::fmt::Debug {
     /// Replace a live page's bytes with `buf`.
     fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError>;
 
+    /// Read `buf.len() / page_size()` consecutive pages starting at
+    /// `first`, live or freed. `buf.len()` must be a multiple of the page
+    /// size. The default reads one page at a time; a file store reads the
+    /// run with one positioned read.
+    fn read_run(&self, first: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
+        let page_size = self.page_size();
+        if !buf.len().is_multiple_of(page_size) {
+            return Err(StoreError::BufferLength {
+                expected: buf.len().next_multiple_of(page_size),
+                actual: buf.len(),
+            });
+        }
+        buf.chunks_mut(page_size)
+            .zip(first.raw()..)
+            .try_for_each(|(page, raw)| {
+                let page_number = PageNumber::new(raw).ok_or(StoreError::UnknownPage(first))?;
+                self.read(page_number, page)
+            })
+    }
+
     /// Make every completed write durable.
     fn sync(&self) -> Result<(), StoreError>;
 

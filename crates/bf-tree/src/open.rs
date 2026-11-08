@@ -112,13 +112,13 @@ pub(super) struct Selection {
     pub(super) chosen: HashMap<LeafId, Chosen>,
     /// Pages to free: older copies of a leaf, and pages that fail their
     /// checksum in a way a crash explains.
-    released: Vec<PageNumber>,
+    pub(super) released: Vec<PageNumber>,
     /// All-zero pages: allocated, never written.
-    zero: Vec<PageNumber>,
+    pub(super) zero: Vec<PageNumber>,
     /// Pages written after the committed write watermark, to zero and free.
-    erased: Vec<PageNumber>,
+    pub(super) erased: Vec<PageNumber>,
     /// The largest write sequence in any page.
-    max_seen: u64,
+    pub(super) max_seen: u64,
 }
 
 /// Read every page and keep the newest committed page of each leaf: the one
@@ -130,7 +130,22 @@ pub(super) fn select(
     config: &TreeConfig,
     written: u64,
 ) -> Result<Selection, TreeError> {
+    select_in_runs(store, config, written, OPEN_RUN_PAGES)
+}
+
+/// Pages that open reads with one store call: 256 KiB of 4096-byte pages,
+/// so a direct-I/O store does not pay one device round trip per page.
+const OPEN_RUN_PAGES: u64 = 64;
+
+/// [`select`], reading `run` pages per store call.
+pub(super) fn select_in_runs(
+    store: &dyn PageStore,
+    config: &TreeConfig,
+    written: u64,
+    run: u64,
+) -> Result<Selection, TreeError> {
     let page_count = store.page_count();
+    let page_size = store.page_size();
     // Leaf IDs from disk are bounded before any table grows, so a damaged
     // stamp cannot make open allocate a huge table. IDs can exceed the page
     // count (a discarded split half uses an ID, and its page is reused), but
@@ -145,52 +160,56 @@ pub(super) fn select(
     };
     // Pages that fail their checksum, with their raw header claims.
     let mut suspects = Vec::new();
-    let mut bytes = vec![0; store.page_size()];
-    for raw in 0..page_count {
-        let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
-        store.read(page_number, &mut bytes)?;
-        if bytes.iter().all(|&byte| byte == 0) {
-            // A page allocated but never written.
-            selection.zero.push(page_number);
-            continue;
-        }
-        let (write_seq, _) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
-        selection.max_seen = selection.max_seen.max(write_seq);
-        if write_seq > written {
-            // Written after the checkpoint; whatever it holds, a crash can
-            // have torn it.
-            selection.erased.push(page_number);
-            continue;
-        }
-        if !bf_tree_page::verify_stored_checksum(&bytes) {
-            // Decided after the scan, once every leaf's newest page is known.
-            let (_, leaf) = bf_tree_page::raw_header_stamps(&bytes).expect("a whole page");
-            suspects.push((page_number, write_seq, leaf));
-            continue;
-        }
-        let (id, bounds) = check_page(&bytes, page_number, config, max_leaf)?;
-        let candidate = Chosen {
-            write_seq,
-            page_number,
-            bounds,
-        };
-        match selection.chosen.entry(id) {
-            Slot::Vacant(entry) => {
-                entry.insert(candidate);
+    let mut buf = vec![0; page_size * run as usize];
+    for start in (0..page_count).step_by(run as usize) {
+        let pages = run.min(page_count - start) as usize;
+        let first = PageNumber::new(start).expect("page counts stay below u64::MAX");
+        store.read_run(first, &mut buf[..pages * page_size])?;
+        for (raw, bytes) in (start..).zip(buf[..pages * page_size].chunks(page_size)) {
+            let page_number = PageNumber::new(raw).expect("page counts stay below u64::MAX");
+            if bytes.iter().all(|&byte| byte == 0) {
+                // A page allocated but never written.
+                selection.zero.push(page_number);
+                continue;
             }
-            Slot::Occupied(mut entry) => {
-                let current = entry.get().write_seq;
-                if current == write_seq {
-                    return Err(TreeError::InconsistentLeaves(
-                        "two stored pages name the same leaf",
-                    ));
+            let (write_seq, _) = bf_tree_page::raw_header_stamps(bytes).expect("a whole page");
+            selection.max_seen = selection.max_seen.max(write_seq);
+            if write_seq > written {
+                // Written after the checkpoint; whatever it holds, a crash can
+                // have torn it.
+                selection.erased.push(page_number);
+                continue;
+            }
+            if !bf_tree_page::verify_stored_checksum(bytes) {
+                // Decided after the scan, once every leaf's newest page is known.
+                let (_, leaf) = bf_tree_page::raw_header_stamps(bytes).expect("a whole page");
+                suspects.push((page_number, write_seq, leaf));
+                continue;
+            }
+            let (id, bounds) = check_page(bytes, page_number, config, max_leaf)?;
+            let candidate = Chosen {
+                write_seq,
+                page_number,
+                bounds,
+            };
+            match selection.chosen.entry(id) {
+                Slot::Vacant(entry) => {
+                    entry.insert(candidate);
                 }
-                let older = if write_seq > current {
-                    entry.insert(candidate)
-                } else {
-                    candidate
-                };
-                selection.released.push(older.page_number);
+                Slot::Occupied(mut entry) => {
+                    let current = entry.get().write_seq;
+                    if current == write_seq {
+                        return Err(TreeError::InconsistentLeaves(
+                            "two stored pages name the same leaf",
+                        ));
+                    }
+                    let older = if write_seq > current {
+                        entry.insert(candidate)
+                    } else {
+                        candidate
+                    };
+                    selection.released.push(older.page_number);
+                }
             }
         }
     }

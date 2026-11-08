@@ -558,3 +558,48 @@ fn a_tree_over_a_direct_store_reopens_at_its_commit() {
         assert_eq!(tree.check_invariants(), Ok(()));
     }
 }
+
+/// Open reads pages in runs; the selection does not depend on the run
+/// length, including a page count that is not a multiple of it.
+#[test]
+fn the_open_scan_selects_the_same_pages_with_any_run_length() {
+    use crate::open::select_in_runs;
+    let config = config(256, 128, 8, 16);
+    let tree = Tree::in_memory(config).unwrap();
+    for i in 0..3000u32 {
+        tree.put(&i.wrapping_mul(2_654_435_761).to_be_bytes(), &[i as u8; 12])
+            .unwrap();
+        if i % 900 == 0 {
+            tree.checkpoint().unwrap();
+        }
+    }
+    tree.checkpoint().unwrap();
+    // Uncommitted pages, to be erased.
+    for i in 0..300u32 {
+        tree.put(&i.to_be_bytes(), b"late").unwrap();
+    }
+    let written = tree.committed().write_seq;
+    let store = tree.store();
+    let page_count = store.page_count();
+    assert!(
+        !page_count.is_multiple_of(64) && !page_count.is_multiple_of(7),
+        "{page_count}"
+    );
+    let summary = |run| {
+        let selection = select_in_runs(store, &config, written, run).unwrap();
+        let mut chosen: Vec<_> = selection
+            .chosen
+            .iter()
+            .map(|(id, chosen)| (id.raw(), chosen.page_number))
+            .collect();
+        chosen.sort_unstable();
+        let mut others = [selection.released, selection.zero, selection.erased];
+        others.iter_mut().for_each(|pages| pages.sort_unstable());
+        (chosen, others, selection.max_seen)
+    };
+    let one = summary(1);
+    assert!(!one.0.is_empty());
+    assert_eq!(summary(7), one);
+    assert_eq!(summary(64), one);
+    assert_eq!(summary(page_count + 5), one);
+}

@@ -447,7 +447,7 @@ Resolved (review, 2026-11-08):
 - [x] Agree on the design and commit stack with the user.
 - [x] Diff 2: Linux container and benchmark volume.
 - [x] Diff 3: direct I/O.
-- [ ] Diff 4: batched open reads.
+- [x] Diff 4: batched open reads.
 - [ ] Diff 5: engine I/O option.
 - [ ] Diff 6: routed lookups.
 - [ ] Diff 7: integer comparisons.
