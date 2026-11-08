@@ -1,6 +1,33 @@
 //! The embedded database (plan 0021): the BF-Tree and its write-ahead log
 //! composed into [`Db`].
 //!
+//! # Consistency
+//!
+//! - **Single keys are linearizable.** A `get` returns the latest applied
+//!   write to its key, and writes to one key apply in their log order.
+//! - **Batches are atomic for durability, not for visibility.** After any
+//!   crash a [`WriteBatch`] is wholly present or wholly absent. While it is
+//!   being applied, a concurrent reader can see part of it: with `a` and
+//!   `b` both 1, a reader of a batch that sets both to 2 can see `a = 2`
+//!   and `b = 1`, a state no history contains.
+//! - **Scans are consistent per leaf, not across leaves.** [`Db::range`]
+//!   and [`Db::scan_with`] read one leaf at a time, and writes run between
+//!   leaves. A scan can see a later write to one key and miss an earlier
+//!   write to another: if a writer sets `x = 1` and then `y = 1` while a
+//!   scan is between `x`'s leaf and `y`'s leaf, the scan returns `x = 0`
+//!   and `y = 1`. It can also see part of a batch. Keys still come out in
+//!   order, and each leaf's records are a consistent picture.
+//! - **Reads can see writes that are not yet durable.** A write is applied
+//!   before its log sync; if the process crashes first, a reader may have
+//!   seen a value that recovery does not restore. Its writer never received
+//!   `Ok`.
+//!
+//! This is weaker than RocksDB and LevelDB, whose batches become visible
+//! all at once and whose iterators read from an implicit snapshot. Code
+//! that keeps an invariant across keys (an index and its record, a move
+//! between two keys) or that scans while writing must not rely on either.
+//! [`Db::write_snapshot`] gives a consistent point-in-time copy.
+//!
 //! ```
 //! let dir = std::env::temp_dir().join(format!("engine-doc-{}", std::process::id()));
 //! let db = engine::Db::open(&dir, engine::Options::default()).unwrap();
