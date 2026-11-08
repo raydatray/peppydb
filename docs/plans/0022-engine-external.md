@@ -347,7 +347,7 @@ Resolved (review, 2026-11-07):
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: external mode and `apply`.
+- [x] Diff 2: external mode and `apply`.
 - [ ] Diff 3: snapshot install.
 - [ ] Diff 4: leader/follower tests.
 - [ ] Diff 5: documentation.
@@ -355,7 +355,16 @@ Resolved (review, 2026-11-07):
 
 ## Discoveries and plan changes
 
-None yet.
+- **A hook error returns the owner's own error.** The plan converted it to
+  `LogError::Other("external hook")`, which loses the owner's error. The
+  engine keeps the boxed error from the hook and returns it as the new
+  `Error::Hook`; the tree still sees `LogError::Other("external hook")`
+  and commits nothing.
+- **`Db::apply` takes `engine::Op`, a re-export of `bf_tree::Op`.** The
+  plan's `Op` was unqualified; the engine re-exports the tree's type, so
+  an owner needs no other crate.
+- **`apply` normalizes by key after the redelivery check.** A redelivered
+  entry is skipped before its operations are examined.
 
 ## Agent notes
 
