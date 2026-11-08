@@ -461,7 +461,8 @@ Resolved (review, 2026-11-08):
 - [x] Stack-wide verification.
 - [ ] Follow-up, outside this stack: reference runs on WSL2 (x86_64) and on
   GCP with a Local SSD (environments 2 and 3), and a `perf` profile of put
-  scaling on the reference machine.
+  scaling on the reference machine. The tool for the GCP runs is planned
+  in [0024](0024-gcp-remote-bench.md).
 
 ## Verification outcomes (2026-11-08)
 
