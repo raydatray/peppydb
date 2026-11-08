@@ -125,6 +125,43 @@ fn io(op: &'static str) -> impl FnOnce(std::io::Error) -> Error {
     move |source| Error::Io { op, source }
 }
 
+/// The WAL as the tree's log. A local newtype: neither the trait nor `Wal`
+/// belongs to this crate.
+struct WalLog<'a>(&'a Wal);
+
+impl bf_tree::Log for WalLog<'_> {
+    /// Runs under the tree's leaf lock: the WAL's append does no I/O.
+    fn append(&self, op: bf_tree::Op<'_>) -> Result<u64, LogError> {
+        self.0
+            .append(to_wal_op(&op))
+            .map_err(|error| to_log_error(&error))
+    }
+}
+
+/// The WAL's errors cross the tree as `LogError`, which is `Copy` like
+/// `TreeError`. The mapping is lossless for the variants an append or a
+/// sync produces: the WAL's sticky failure is only an operation name and an
+/// `ErrorKind`.
+fn to_log_error(error: &WalError) -> LogError {
+    match *error {
+        WalError::Closed => LogError::Closed,
+        WalError::Failed { op, kind } => LogError::Io {
+            op,
+            kind,
+            code: None,
+        },
+        _ => LogError::Other("wal"),
+    }
+}
+
+/// The WAL's operation for a tree operation.
+fn to_wal_op<'a>(op: &bf_tree::Op<'a>) -> engine_wal::Op<'a> {
+    match *op {
+        bf_tree::Op::Put { key, value } => engine_wal::Op::Put { key, value },
+        bf_tree::Op::Delete { key } => engine_wal::Op::Delete { key },
+    }
+}
+
 /// The tree's operation for a WAL operation.
 fn to_tree_op<'a>(op: &engine_wal::Op<'a>) -> bf_tree::Op<'a> {
     match *op {
@@ -176,6 +213,24 @@ impl Db {
             wal,
             _lock: lock,
         })
+    }
+
+    /// Insert or replace `key`. Returns once the write is durable in the
+    /// WAL. The write is applied first, so a concurrent reader can see it
+    /// before it is durable; a crash before the sync loses it, and this call
+    /// never returned `Ok`.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        let seq = self.tree.put_logged(&WalLog(&self.wal), key, value)?;
+        // After the leaf lock is released: a slow sync holds no lock.
+        self.wal.wait_durable(seq)?;
+        Ok(())
+    }
+
+    /// Remove `key` if present. Returns once the removal is durable.
+    pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
+        let seq = self.tree.remove_logged(&WalLog(&self.wal), key)?;
+        self.wal.wait_durable(seq)?;
+        Ok(())
     }
 
     /// The value stored for `key`, or `None`.

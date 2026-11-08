@@ -607,7 +607,7 @@ by plans 0019 and 0013.
 
 - [x] Agree on the design and commit stack with the user.
 - [ ] Diff 2: crate, open, recovery, reads.
-- [ ] Diff 3: durable writes.
+- [x] Diff 3: durable writes.
 - [ ] Diff 4: write batches.
 - [ ] Diff 5: checkpoint policy.
 - [ ] Diff 6: crash tests.

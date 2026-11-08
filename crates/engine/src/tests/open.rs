@@ -1,24 +1,9 @@
 //! Open, recovery, and reads.
 
+use super::small;
 use crate::*;
 use engine_wal::{Wal, WalOptions};
 use std::ops::ControlFlow;
-
-fn small() -> Options {
-    Options {
-        tree: TreeConfig {
-            circular_buffer_bytes: 64 << 10,
-            ..TreeConfig {
-                leaf_capacity: 256,
-                inner_capacity: 128,
-                max_key_len: 8,
-                max_value_len: 16,
-                ..TreeConfig::default()
-            }
-        },
-        ..Options::default()
-    }
-}
 
 #[test]
 fn create_close_and_reopen() {
