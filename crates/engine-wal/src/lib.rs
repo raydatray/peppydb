@@ -6,14 +6,25 @@
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "used by replay and the writer from diffs 3 and 4")
+    expect(dead_code, reason = "the writer uses it from diff 4")
 )]
 mod record;
+mod replay;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the writer uses it from diff 4")
+)]
+mod segment;
 
 #[cfg(test)]
 mod tests;
 
 pub use record::MAX_RECORD_BYTES;
+pub use replay::Replayed;
+
+/// The write-ahead log. Diff 4 adds the writer.
+#[derive(Debug)]
+pub struct Wal {}
 
 /// One logged change. Keys and values borrow the caller's bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
