@@ -24,7 +24,8 @@ The tree stays log-agnostic: it persists no log. For the engine
 `remove_logged` for sequenced writes, `checkpoint_with` for a pre-commit
 hook that syncs the log, and `write_snapshot` for a copy that a follower
 can install. The [persistence design](bf-tree-persistence.md#logs-and-sequenced-writes)
-records the contract.
+records the contract. The engine's [write-ahead log](engine.md)
+(plan 0020) is the first log that will meet it.
 
 ## Code layout
 
@@ -33,6 +34,7 @@ The repository is one [Buck2](build-system.md) build for Rust and Go.
 | Component | Crates | Role |
 | --- | --- | --- |
 | BF-Tree | `bf-tree` (entry), `bf-tree-node-id`, `bf-tree-page`, `bf-tree-inner`, `bf-tree-store` | node identifiers, the shared page format, inner nodes, the page store, and the tree that composes them |
+| Engine | `engine-wal` (internal; the entry crate `engine` arrives in plan 0021) | the [write-ahead log](engine.md): segment files, group commit, replay, and truncation |
 | Executable | `bin/peppydb` | thin wiring |
 | Go services | `go/` | the planned gateway and placement driver; a hello-world program for now |
 
