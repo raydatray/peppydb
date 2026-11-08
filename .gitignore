@@ -1,2 +1,4 @@
+/.zed
 /target
 /buck-out
+/rust-project.json
