@@ -462,7 +462,8 @@ Resolved (review, 2026-11-08):
 - [ ] Follow-up, outside this stack: reference runs on WSL2 (x86_64) and on
   GCP with a Local SSD (environments 2 and 3), and a `perf` profile of put
   scaling on the reference machine. The tool for the GCP runs is planned
-  in [0024](0024-gcp-remote-bench.md).
+  in [0024](0024-gcp-remote-bench.md) and described in
+  [remote benchmarks](../design/remote-benchmarks.md).
 
 ## Verification outcomes (2026-11-08)
 
