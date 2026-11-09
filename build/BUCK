@@ -19,6 +19,14 @@ constraint_value(
     visibility = ["PUBLIC"],
 )
 
+# Release flags plus debug line tables and frame pointers, for profiles with
+# readable stacks (plan 0024). Reference measurements use mode-release.
+constraint_value(
+    name = "mode-profile",
+    constraint_setting = ":build_mode",
+    visibility = ["PUBLIC"],
+)
+
 # Debug flags with the pinned nightly toolchain and its Miri driver. Every
 # rust_test gets a `[miri]` sub-target in this mode.
 constraint_value(
@@ -33,6 +41,14 @@ constraint_value(
 platform(
     name = "release",
     constraint_values = [":mode-release"],
+    deps = ["prelude//platforms:default"],
+    visibility = ["PUBLIC"],
+)
+
+# The host platform with profile flags: `buck2 ... @build/mode/profile`.
+platform(
+    name = "profile",
+    constraint_values = [":mode-profile"],
     deps = ["prelude//platforms:default"],
     visibility = ["PUBLIC"],
 )
