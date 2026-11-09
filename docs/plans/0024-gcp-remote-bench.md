@@ -1,6 +1,6 @@
 # 0024: Remote benchmarks and profiling on GCP
 
-**Status:** Agreed
+**Status:** Complete (WSL2 and live checks pending, by the user)
 
 **Design references:** [build system](../design/build-system.md),
 [persistence](../design/bf-tree-persistence.md#measurements),
@@ -733,12 +733,30 @@ The first live runs (by the user) should check:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: remote suite runner and offline stub test.
-- [ ] Diff 3: driver.
-- [ ] Diff 4: profile build mode.
-- [ ] Diff 5: profilers.
-- [ ] Diff 6: design document.
-- [ ] Stack-wide verification.
+- [x] Diff 2: remote suite runner and offline stub test.
+- [x] Diff 3: driver.
+- [x] Diff 4: profile build mode.
+- [x] Diff 5: profilers.
+- [x] Diff 6: design document ([remote benchmarks](../design/remote-benchmarks.md)).
+- [x] Stack-wide verification (offline).
+- [ ] On WSL2: the x86_64 build checks (by the user).
+- [ ] First live runs (by the user; see "Verification strategy").
+
+## Verification outcomes (2026-11-08)
+
+No command contacted GCP. Local checks ran on macOS (arm64) and in the
+Linux container (`tools/linux-run`, aarch64 Ubuntu 24.04).
+
+| Check | Outcome |
+| --- | --- |
+| Remote runner | `tools/linux-run sh tools/gcp/testing/test-remote.sh`: all cases pass (passing run, rerun guard, reboot during a run, failing step, failing and skipping preflight, no tests matched, checksum, failed install with and without profiling, bad `bench.env`, bad suite line, missing metadata, every profiler, a failing test under `bpftrace`, missing off-CPU script, unknown profiler). |
+| Driver | `tools/linux-run sh tools/gcp/testing/test-driver.sh`: all cases pass (end to end with the stand-in VM, `--step`, failing step, zone fallback, no capacity, other create errors, leaked create, missing time limit, VM gone with preemption, VM stopped, no boot, deadline, signal during the wait, `--keep`, bucket region, zone guard, `cleanup`, dry run, profiled run, bad profilers, profiled dry run, host check, and `check-bucket.py` rule comparisons). |
+| Real binaries | In the container, `tools/gcp-bench run --step wal-bench` against the stand-in `gcloud` built the release targets with Buck2, and the stand-in VM ran the three preflight steps and `wal-bench` on the ext4 `/bench` volume: all passed, `o_direct_is_in_effect` included, and the results were downloaded. |
+| `offcpu.bt` | In a privileged local Docker container with `--pid=host` (Ubuntu 24.04, bpftrace 0.20.2): four 0.4 s sleeps produced about 1.6 s of off-CPU time, and `fold-stacks.py` produced folded stacks. |
+| Profile mode | In the container, the `profile` build of `engine-wal-unittest` has line tables for `crates/engine-wal` (60 compile units); the release build has none. The release output path on macOS did not change (no rebuild). |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (21 pass), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (466 pass), `go vet` and `go test`: all pass. No crate on the `unsafe` allowlist changed, so Miri was not rerun. |
+| Pending (WSL2) | `tools/gcp-bench build` and `--profile record` on x86_64: `file` reports x86-64 ELF, `readelf -d` lists only libraries in the stock image, `objdump -d` shows frame-pointer prologues in `profile` builds. A full `profile` build of all suite targets in the container was stopped because it took too long; diff 4's single-target check stands. |
+| Pending (live) | The first live runs listed in "Verification strategy". |
 
 ## Discoveries and plan changes
 
@@ -757,6 +775,37 @@ The first live runs (by the user) should check:
   boots, installs tools from the Ubuntu archive, and then downloads the
   locally built artifacts from GCS. This replaced the custom image and the
   Private Google Access setting. The stack went from seven diffs to six.
+- **Implementation details (2026-11-08).**
+  - The runner reads metadata with `curl` from the metadata server; tests
+    point `PEPPYDB_REMOTE_METADATA` at a directory of fake answers instead
+    of faking them in the `gcloud` stand-in.
+  - `tools/gcp/targets.txt` maps suite binary names to Buck2 targets.
+  - The driver gained `--prebuilt DIR` (stage existing binaries), `--suite`
+    accepts a path, and `PEPPYDB_GCP_BENCH_OUT` and
+    `PEPPYDB_GCP_BENCH_TEST` serve the tests.
+  - After a reboot in the middle of a run, the startup script writes a
+    failed `DONE` instead of leaving the driver waiting until the deadline.
+  - Every step fails on `test result: FAILED` in its output, because
+    `bpftrace -c` exits 0 whatever the command returns.
+  - The stand-in `gcloud` simulates Compute Engine, and its "VM" runs the
+    real startup script, so the driver tests are end to end.
+  - The signal test sends `TERM`: a non-interactive shell starts
+    background jobs with `INT` ignored, and an ignored signal cannot be
+    trapped. `INT` and `TERM` share the exit path.
+  - `bpftrace`'s `pid == cpid` filter matched nothing in a container with
+    its own PID namespace; with `--pid=host` it works. The VM has no PID
+    namespace.
+  - Diff 3 is about 1,300 changed lines, above the 300-line guideline: the
+    driver and its end-to-end tests belong together.
+- **First live run (2026-11-09): invalid JSON from `echo`.** The time-limit
+  read-back failed with "Invalid control character", and the driver deleted
+  the VM, as designed. The cause: `gcloud --format=json` escapes the
+  startup script's newlines as `\n`, and dash's `echo` (WSL's `/bin/sh`)
+  turns `\n` back into real newlines. The driver now passes JSON on with
+  `printf '%s\n'`. The stand-in `gcloud` now prints the startup script in
+  its `describe` output, as the real one does, so the driver tests fail with
+  the old `echo`. `.buckconfig` also ignores `.peppydb-bench/`, whose staged
+  binaries had reset Buck2's file watcher on every run.
 - **Review fixes (2026-11-08).** The bucket is in `us-east1`, so VMs are
   restricted to `us-east1` zones. The wait loop gained exit conditions for
   a VM that disappears, stops, or never boots, and an absolute deadline.
