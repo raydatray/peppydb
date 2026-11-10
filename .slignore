@@ -3,3 +3,4 @@ target/**
 buck-out/**
 .zed/**
 /rust-project.json
+.peppydb-bench/**

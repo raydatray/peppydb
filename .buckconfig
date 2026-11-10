@@ -26,5 +26,7 @@
   execution_platforms = root//build:execution-platforms
 
 [project]
-  # Cargo's output directory; never part of the Buck2 graph.
-  ignore = target
+  # Cargo's output directory, and tools/gcp-bench's runs (plan 0024); never
+  # part of the Buck2 graph. Without the second, every run's staged binaries
+  # reset Buck2's file watcher.
+  ignore = target, .peppydb-bench
