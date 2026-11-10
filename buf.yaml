@@ -1,0 +1,11 @@
+# buf module and lint rules for proto/ (plan 0026). tools/gen-proto runs
+# buf from the pinned Go distribution; see docs/design/server.md.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,14 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# Generated code for proto/: prost messages and tonic clients and servers.
+# tools/gen-proto writes src/generated/; do not edit it. Internal to the
+# server component.
+peppy_rust_library(
+    name = "server-proto",
+    deps = [
+        "//third-party/rust:prost",
+        "//third-party/rust:tonic",
+        "//third-party/rust:tonic-prost",
+    ],
+    visibility = ["//crates/server:"],
+)

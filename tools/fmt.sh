@@ -11,9 +11,9 @@ status=0
 # Rust. rustfmt follows `mod` declarations from each crate root, so this
 # covers every Rust file without needing Cargo.
 if $fix; then
-    rustfmt crates/*/src/lib.rs bin/*/src/main.rs
+    rustfmt crates/*/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs
 else
-    rustfmt --check crates/*/src/lib.rs bin/*/src/main.rs || status=1
+    rustfmt --check crates/*/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs || status=1
 fi
 
 # Go, with gofmt from the pinned Go distribution (not from PATH).
