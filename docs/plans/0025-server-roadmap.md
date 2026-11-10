@@ -1,6 +1,6 @@
 # 0025: Server implementation roadmap
 
-**Status:** Agreed
+**Status:** In progress
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md) (especially
@@ -96,12 +96,12 @@ sequenceDiagram
     participant F as followers
     participant E as leader engine
 
-    C->>L: Put(key, value)
-    L->>LL: append entry at index i (fsync)
-    L->>F: AppendEntries(i)
+    C->>L: Put key and value
+    L->>LL: append entry at index i, fsync
+    L->>F: AppendEntries with entry i
     F-->>L: durable through i
-    Note over L: majority durable: commit index >= i
-    L->>E: apply(i, ops), no fsync
+    Note over L: a majority is durable, so the commit index reaches i
+    L->>E: apply entry i, no fsync
     L-->>C: OK
 ```
 
@@ -489,7 +489,9 @@ next to the engine's numbers.
   build order.
 - [x] Draft and agree on [the single-node server](0026-server-grpc-kv.md)
   (S1).
-- [ ] Implement and verify the single-node server stack, completing S1.
+- [x] Implement and verify the single-node server stack, completing S1
+  ([plan 0026](0026-server-grpc-kv.md), recorded in the
+  [server design](../design/server.md)).
 - [x] Agree on the namespace byte in stored keys (decision 8) and the
   phase 3 shape: one Raft group per server, placement manager on etcd.
 - [x] Agree on the Raft log crate (decision 13) and the threading model
@@ -498,7 +500,7 @@ next to the engine's numbers.
   leader discovery and preference (decision 11), `iptables` for network
   faults (decision 12), and system keys for the Raft applied state.
 
-The next step is implementing plan 0026; the S4 plan (Raft core) follows.
+The next step is the S4 plan: the Raft core on openraft.
 
 ## Sources
 

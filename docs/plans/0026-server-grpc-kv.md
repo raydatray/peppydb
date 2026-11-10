@@ -1,6 +1,6 @@
 # 0026: Single-node gRPC server
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md), [build system](../design/build-system.md).
@@ -455,8 +455,8 @@ sequenceDiagram
     T-->>V: in-flight RPCs drained, or shutdown_grace expired
     V->>B: close the semaphore, acquire all max_inflight permits
     Note over B: every engine call has returned
-    V->>D: Arc::try_unwrap, then close (checkpoint) on Clean
-    V-->>S: Exit
+    V->>D: take the only reference, then close with a checkpoint if clean
+    V-->>S: return Exit
 ```
 
 - **Every engine call ends before `close`.** Acquiring all permits waits
@@ -805,22 +805,87 @@ None.
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] 2/11 Rust dependencies.
-- [ ] 3/11 Go tools and libraries.
-- [ ] 4/11 proto and code generation.
-- [ ] 5/11 point RPCs.
-- [ ] 6/11 scans.
-- [ ] 7/11 fault-injection feature.
-- [ ] 8/11 admin, health, shutdown, fail-stop.
-- [ ] 9/11 binary and `SIGKILL` test.
-- [ ] 10/11 load generator.
-- [ ] 11/11 design document; stack-wide verification.
+- [x] 2/11 Rust dependencies.
+- [x] 3/11 Go tools and libraries.
+- [x] 4/11 proto and code generation.
+- [x] 5/11 point RPCs.
+- [x] 6/11 scans.
+- [x] 7/11 fault-injection feature.
+- [x] 8/11 admin, health, shutdown, fail-stop.
+- [x] 9/11 binary and `SIGKILL` test.
+- [x] 10/11 load generator.
+- [x] 11/11 design document; stack-wide verification.
+
+## Verification outcomes (2026-11-10)
+
+All on macOS (Apple M4 Pro); Docker was not available, so no Linux run.
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` | Pass; 28 Rust targets clean |
+| `tools/buck2 test //crates/... //bin/... //go/...` | Pass: 28 targets |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check` | Up to date |
+| `tools/gen-proto --check` | Up to date; lint and breaking checks pass. A deliberate `uint32` to `uint64` change of `page_size` was reported as breaking |
+| `cargo test --workspace --locked` | Pass |
+| `cargo test -p engine --features fault-injection` | Pass |
+| `(cd go && go vet ./... && go test ./...)`, `go test -race ./internal/load/` | Pass |
+| Miri: `bf-tree-circular-buffer` | Pass (unchanged crate) |
+| Server unit tests under load | 8 runs in a row pass with two engine test binaries running beside them |
+| `peppy-load` against `peppydb serve` | Recorded in [server design](../design/server.md#measurements) |
 
 ## Discoveries and plan changes
 
-- During planning, the API dropped a multi-key `Write` RPC, `Scan` became
-  unary and paginated, and the proto toolchain moved from `protox` to buf.
-  The reasons are under [Decisions and trade-offs](#decisions-and-trade-offs).
+- **During planning,** the API dropped a multi-key `Write` RPC, `Scan`
+  became unary and paginated, and the proto toolchain moved from `protox`
+  to buf. The reasons are under
+  [Decisions and trade-offs](#decisions-and-trade-offs).
+- **buf cannot be built by Buck2.** buf panics at startup unless its
+  binary carries Go module build information, which only the `go` command
+  embeds (`buf.build/go/bufprivateusage`). buf and the Go plugins stay
+  pinned by `tool` directives in `go/go.mod`, and `tools/gen-proto` builds
+  them with the Go distribution that Buck2 downloads. `gobuckify-remote` is
+  unchanged and generates no targets for them. Pinning and hermeticity are
+  as planned; only the builder differs.
+- **buf pins a protobuf runtime pre-release.** buf 1.75.0 requires
+  `google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e`,
+  which `go/go.mod` now uses (the newest tag, `v1.37.0-rc.1`, was avoided).
+- **Service names.** buf's `STANDARD` lint rules require the `Service`
+  suffix, so the services are `KvService` and `AdminService`.
+- **The CLI lives in `server::cli`,** not in `bin/peppydb`, so the process
+  tests run exactly the binary's code; `bin/peppydb` only calls it. `clap`
+  and `tracing-subscriber` are therefore dependencies of `server`.
+- **`page_size`,** not `limit`, names the per-page record count, after
+  Google's API guidelines (AIP-158).
+- **Feature variants in Buck2.** `peppy_rust_library` gained
+  `feature_variants`, and a `test_deps` entry naming a variant replaces the
+  plain dependency in the unit tests; `tools/autocargo` emits `[features]`
+  and feature-enabled dev-dependencies. There is no Buck2 unit-test target
+  for the engine with the feature; its test runs under Cargo, and the
+  server's fail-stop test exercises it under Buck2.
+- **Lock files and forked children.** Under load, in-process tests failed
+  with `Locked` on a reopen: the process tests' children inherit the test
+  process's open files until they exec, including other tests' `LOCK`
+  files. Test databases open through a helper that retries `Locked` for up
+  to 5 s ([server design](../design/server.md#guarantees-and-tests)).
+- **Health watchers.** An open `grpc.health.v1` `Watch` would hold up the
+  graceful drain until the grace period. Shutdown clears the health
+  statuses after setting `NOT_SERVING`, which ends the streams.
+- **One blocking thread per in-flight engine call crashed macOS.** A
+  manual load run after the stack started `peppydb serve --max-inflight
+  8192` and drove it with up to 8,192 concurrent writers. Each write waits
+  for its fsync on a blocking-pool thread, so the server reached 7,067
+  threads, and the macOS kernel panicked (a spinlock timeout in the
+  pthread extension). The default `max_inflight` of 1024 bounds the
+  threads; nothing caps the flag. This is the model RocksDB's callers use
+  (a blocking `Write` on a bounded thread pool). Distributed servers such
+  as TiKV and etcd instead await a callback while a few dedicated threads
+  batch and sync the log, which is the shape the server takes in roadmap
+  S7: writes await openraft's `client_write`, and the Raft log reports
+  durability through `IOFlushed`. An async durability wait in `engine-wal`
+  would only help the standalone server, so it is not planned. High-
+  concurrency load runs belong on Linux (roadmap S2), not on a laptop.
+- **Measurements are from native macOS,** where one fsync takes about
+  4 ms, not from the Linux container; reference runs remain for roadmap S2.
 
 ## Agent notes
 
@@ -830,7 +895,7 @@ None.
   (`peppy_rust_library`); `go/go.mod` and `go/internal/greet/BUCK` (the
   Go package pattern).
 - **Sapling** is at `/opt/homebrew/bin/sl` and may be missing from `PATH`.
-- `tonic-prost-build` 0.14 has `Builder::compile_fds`; confirm the
-  version pinned at implementation time. Go `tool` directives need the Go
-  version in `go/go.mod` to support them; confirm `gobuckify-remote`
-  generates targets for tool packages, or add a blank-import stub.
+- Put rustup's `~/.cargo/bin` and `/opt/homebrew/bin` (Sapling, Go for
+  `go mod`) on `PATH`; the shell's default `PATH` has neither.
+- `tools/gen-proto` builds buf with `go -C go build`; the first run
+  downloads buf's module graph.

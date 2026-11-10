@@ -71,8 +71,41 @@ from how each language records dependencies.
   vendored, so repository size and dependency-upgrade diffs stay small.
 - **Limit.** Cargo and `go` do not see Buck2-only behavior: visibility,
   release mode, and denied warnings. They also cannot see code that Buck2
-  generates into `buck-out`. When protobuf code generation arrives, the
-  generated sources must be copied into the tree for them.
+  generates into `buck-out`. Generated protobuf code is therefore checked
+  into the tree ([Protobuf code generation](#protobuf-code-generation)).
+- **Feature variants.** A test-only switch that a dependent crate's tests
+  need (such as the engine's `fault-injection`, plan 0026) cannot be
+  `cfg(test)`, which applies only to the crate under test.
+  `peppy_rust_library`'s `feature_variants` defines `:<name>-<feature>`,
+  the same crate built with that Cargo feature, visible only to the tests
+  that use it. A `test_deps` entry naming a variant replaces the plain
+  dependency in the unit tests. `tools/autocargo` turns each variant into
+  a `[features]` entry and a feature-enabled dev-dependency.
+
+## Protobuf code generation
+
+The API lives in `proto/`. `tools/gen-proto` lints it, checks it for
+breaking changes, and writes Rust (`crates/server-proto/src/generated/`)
+and Go (`go/kvpb/`) code, which is checked in
+([plan 0026](../plans/0026-server-grpc-kv.md)).
+
+- **buf for every language.** buf parses once for Rust and Go, and runs
+  `buf lint` and `buf breaking`. The Go plugins (`protoc-gen-go`,
+  `protoc-gen-go-grpc`) write Go. Rust comes from `tonic-prost-build`
+  (`//tools/protogen`), fed buf's descriptor set, so the generated code and
+  the tonic runtime are pinned together in `Cargo.lock`. buf's own Rust
+  plugins lag tonic's releases and are not used.
+- **Pinned by `go/go.mod`.** buf and the Go plugins are `tool` directives.
+  `tools/gen-proto` builds them with the Go distribution that Buck2
+  downloads. Buck2 cannot build buf itself: buf refuses to run without the
+  module build information that only the `go` command embeds. Normal
+  builds never run code generation.
+- **No network services.** No Buf Schema Registry dependency and no remote
+  plugin. A third-party `.proto` file is vendored under
+  `proto/third_party/` with its source recorded.
+- **The breaking-change baseline** is `proto/` at the parent revision,
+  read with `sl cat`, because the working copy is a Sapling checkout, not
+  a git one.
 
 ## Every tool is pinned
 
