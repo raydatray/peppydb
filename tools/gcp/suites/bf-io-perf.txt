@@ -1,0 +1,17 @@
+# The benchmarks of plan 0023, preceded by direct-I/O checks on the Local SSD.
+#
+# Each line is: NAME BINARY ARGS... (split on whitespace; no quoting).
+# BINARY is the name of a staged binary, one of the names in
+# tools/gcp/targets.txt, which maps it to its Buck2 target.
+# Steps run in order, one at a time. A failing "preflight-" step stops the
+# run, and so does a preflight test that reports "skipped:". Filters are
+# module paths, never bare substrings: "baseline_" alone would also match
+# tests::model::baseline_* and disk_baseline.
+preflight-store   bf-tree-store-unittest           --nocapture --test-threads=1 tests::direct::
+preflight-tree    bf-tree-unittest                 --nocapture --test-threads=1 tests::open::a_tree_over_a_direct_store_reopens_at_its_commit
+preflight-engine  engine-unittest                  --nocapture --test-threads=1 tests::io::
+bf-tree-bench     bf-tree-unittest                 --ignored --nocapture --test-threads=1 tests::bench::
+bf-tree-bench-io  bf-tree-unittest                 --ignored --nocapture --test-threads=1 tests::bench_io::
+cb-bench          bf-tree-circular-buffer-unittest --ignored --nocapture --test-threads=1 tests::bench::
+engine-bench      engine-unittest                  --ignored --nocapture --test-threads=1 tests::bench::
+wal-bench         engine-wal-unittest              --ignored --nocapture --test-threads=1 tests::bench::

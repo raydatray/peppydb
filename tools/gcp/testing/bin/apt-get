@@ -1,0 +1,6 @@
+#!/bin/sh
+# A stand-in for apt-get in offline tests (plan 0024): records its arguments
+# in $PEPPYDB_FAKE_LOG, and fails when PEPPYDB_FAKE_APT_FAIL=1.
+echo "apt-get $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+[ "${PEPPYDB_FAKE_APT_FAIL:-}" = 1 ] && exit 100
+exit 0
