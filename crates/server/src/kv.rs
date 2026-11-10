@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use server_proto::kv::v1::kv_service_server::KvService;
 use server_proto::kv::v1::{
-    DeleteRequest, DeleteResponse, GetRequest, GetResponse, PutRequest, PutResponse, ScanRequest,
-    ScanResponse,
+    DeleteRequest, DeleteResponse, GetRequest, GetResponse, KeyValue, PutRequest, PutResponse,
+    ScanRequest, ScanResponse,
 };
 use tonic::{Request, Response, Status};
 
 use crate::bridge::Inner;
-use crate::keys::user_key;
+use crate::keys::{strip, user_key, user_range};
 
 pub(crate) struct Kv {
     pub(crate) inner: Arc<Inner>,
@@ -40,7 +40,44 @@ impl KvService for Kv {
         Ok(Response::new(DeleteResponse {}))
     }
 
-    async fn scan(&self, _request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
-        Err(Status::unimplemented("scans arrive in the next diff"))
+    /// One page of `[start, end)`: at most `page_size` records (the server
+    /// maximum if 0 or larger), and no more once the page reaches
+    /// `scan_max_bytes`. `next_start` is the first key not returned.
+    async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
+        let ScanRequest {
+            start,
+            end,
+            page_size,
+        } = request.into_inner();
+        let config = self.inner.config;
+        let limit = match usize::try_from(page_size).unwrap_or(usize::MAX) {
+            0 => config.scan_max_records,
+            n => n.min(config.scan_max_records),
+        };
+        let page = self
+            .inner
+            .blocking(move |db| {
+                let (start, end) = user_range(start.as_deref(), end.as_deref());
+                let mut records = Vec::new();
+                let mut bytes = 0;
+                for record in db.range(Some(&start), Some(&end))? {
+                    let (key, value) = record?;
+                    if records.len() == limit || bytes >= config.scan_max_bytes {
+                        return Ok(ScanResponse {
+                            records,
+                            next_start: Some(strip(&key)),
+                        });
+                    }
+                    let key = strip(&key);
+                    bytes += key.len() + value.len();
+                    records.push(KeyValue { key, value });
+                }
+                Ok(ScanResponse {
+                    records,
+                    next_start: None,
+                })
+            })
+            .await?;
+        Ok(Response::new(page))
     }
 }
