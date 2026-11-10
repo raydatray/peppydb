@@ -1,6 +1,6 @@
 # 0024: Remote benchmarks and profiling on GCP
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [build system](../design/build-system.md),
 [persistence](../design/bf-tree-persistence.md#measurements),
@@ -733,12 +733,327 @@ The first live runs (by the user) should check:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] Diff 2: remote suite runner and offline stub test.
-- [ ] Diff 3: driver.
-- [ ] Diff 4: profile build mode.
-- [ ] Diff 5: profilers.
-- [ ] Diff 6: design document.
-- [ ] Stack-wide verification.
+- [x] Diff 2: remote suite runner and offline stub test.
+- [x] Diff 3: driver.
+- [x] Diff 4: profile build mode.
+- [x] Diff 5: profilers.
+- [x] Diff 6: design document ([remote benchmarks](../design/remote-benchmarks.md)).
+- [x] Stack-wide verification (offline).
+- [x] On WSL2: the x86_64 build checks (by the user, 2026-11-08).
+- [x] First live runs (by the user; see "Verification strategy").
+  - [x] Unprofiled `release` run (by the user, 2026-11-08).
+  - [x] Profiled run of the whole suite (2026-11-09; see "First profiled
+    live run"). It found three profiler defects.
+  - [x] Fix the profiler defects (2026-11-09, in diff 6).
+  - [x] Repeat the profiled run and check the fixes (by the user,
+    2026-11-10; see "Second profiled live run").
+
+## Verification outcomes (2026-11-08)
+
+No command contacted GCP. Local checks ran on macOS (arm64) and in the
+Linux container (`tools/linux-run`, aarch64 Ubuntu 24.04).
+
+| Check | Outcome |
+| --- | --- |
+| Remote runner | `tools/linux-run sh tools/gcp/testing/test-remote.sh`: all cases pass (passing run, rerun guard, reboot during a run, failing step, failing and skipping preflight, no tests matched, checksum, failed install with and without profiling, bad `bench.env`, bad suite line, missing metadata, every profiler, a failing test under `bpftrace`, missing off-CPU script, unknown profiler). |
+| Driver | `tools/linux-run sh tools/gcp/testing/test-driver.sh`: all cases pass (end to end with the stand-in VM, `--step`, failing step, zone fallback, no capacity, other create errors, leaked create, missing time limit, VM gone with preemption, VM stopped, no boot, deadline, signal during the wait, `--keep`, bucket region, zone guard, `cleanup`, dry run, profiled run, bad profilers, profiled dry run, host check, and `check-bucket.py` rule comparisons). |
+| Real binaries | In the container, `tools/gcp-bench run --step wal-bench` against the stand-in `gcloud` built the release targets with Buck2, and the stand-in VM ran the three preflight steps and `wal-bench` on the ext4 `/bench` volume: all passed, `o_direct_is_in_effect` included, and the results were downloaded. |
+| `offcpu.bt` | In a privileged local Docker container with `--pid=host` (Ubuntu 24.04, bpftrace 0.20.2): four 0.4 s sleeps produced about 1.6 s of off-CPU time, and `fold-stacks.py` produced folded stacks. |
+| Profile mode | In the container, the `profile` build of `engine-wal-unittest` has line tables for `crates/engine-wal` (60 compile units); the release build has none. The release output path on macOS did not change (no rebuild). |
+| Workspace | `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //crates/... //bin/... //go/...` (21 pass), `tools/autocargo --check`, `tools/gobuckify-remote --check`, `cargo test --workspace --locked` (466 pass), `go vet` and `go test`: all pass. No crate on the `unsafe` allowlist changed, so Miri was not rerun. |
+| WSL2 | The user built the suite on WSL2 (x86_64 Ubuntu 24.04), and the binaries ran on the VM in both modes. |
+| Live, unprofiled | The user's `release` run of the suite completed (2026-11-08). |
+| Live, profiled | See "First profiled live run" and "Second profiled live run". The second run confirms the profiler fixes. |
+| Profiler fixes (2026-11-09) | `tools/gcp/testing/test-remote.sh` and `test-driver.sh` pass on macOS with a stand-in `zstd` (Docker was not available for `tools/linux-run`), including the new `perf-addr2line` and `fold-stacks` cases. `fold-stacks.py` on this run's `engine-bench` output demangles the Rust names. |
+
+## First profiled live run (2026-11-09)
+
+The user ran the whole `bf-io-perf` suite with
+`--profile stat,record,offcpu,sched`. The results archive was analyzed
+offline; no agent contacted GCP.
+
+**Run identity.** Run `20261109-010042-c8dd7947`, revision `c8dd7947`
+(dirty working copy), `profile` build mode, rustc 1.98.1, Spot
+`c4d-standard-8-lssd` in `us-east1-b`, image
+`ubuntu-2404-noble-amd64-v20261105`, kernel `7.0.0-1017-gcp`, AMD EPYC 9B45
+(4 cores, 8 SMT threads), 30 GB RAM, Local SSD `/dev/nvme0n1` (375 GB, 4 KiB
+format) as ext4 on `/mnt/bench`. Tools: perf 7.0.14, bpftrace 0.20.2.
+`pmu=unavailable`, as expected for C4D.
+
+**What worked.**
+
+- The VM booted, installed the tools in seconds (most packages were already
+  in the image), passed the three preflight steps (`o_direct_is_in_effect`
+  included, no `skipped:`), and ran 5 steps × 4 profilers. All 23 entries in
+  `status` are `ok`, and `DONE` reports `status=ok`. The run took about
+  10 minutes from `started` (01:01:45Z) to `DONE` (01:12:02Z).
+- `stat`, `sched`, and `offcpu` produced complete outputs for every step.
+- `record` produced complete, symbolized reports with inlined frames for
+  the two small binaries (`cb-bench`, `wal-bench`). Frame-pointer stacks
+  walk through the Rust code; they stop at libc frames (`[unknown]` in
+  `libc.so.6`), as "Profile build mode" predicted.
+
+**Defects found.** All three are fixed in diff 6 (2026-11-09). The second
+profiled run confirmed the fixes.
+
+1. **`perf report` and `perf script` fail on the large test binaries.** For
+   `bf-tree-unittest` (steps `bf-tree-bench` and `bf-tree-bench-io`) and
+   `engine-unittest`, `report.txt` contains only
+   `cmd_addr2line_configure …: addr2line configuration failed` and a few
+   bytes of garbage. `perf-script.txt` stops in the middle of a line: 614
+   samples for `bf-tree-bench`, where about 150,000 were expected
+   (154.6 s of task clock at 999 Hz). The runner sends `perf script`'s
+   stderr to `/dev/null`, so the cause is not recorded. Probable cause: perf
+   resolves inlined frames and source lines with an external `addr2line`,
+   and `binutils` is not installed (`--no-install-recommends`). The CPU
+   profiles of these three steps are not usable from this run.
+   *Fix:* the runner installs `binutils`, writes the errors of
+   `perf report` and `perf script` to `<step>.record.perf.log`, and
+   repeats either command with `--no-inline` if it fails or prints the
+   `addr2line` error.
+2. **`perf.data` files are missing from the results.** Neither
+   `<step>.record.perf.data.zst` nor `<step>.sched.perf.data.zst` is in the
+   archive, although the runner compresses and lists them. The run log
+   reports no failed copies, so the archive probably excluded them; check
+   the bucket. Without them, defect 1 cannot be repaired offline.
+   *Fix:* the runner uploads `files.txt`, a listing of its result files
+   with sizes, logs a missing output, and uploads the uncompressed file if
+   `zstd` fails. The next run shows where such files are lost.
+3. **Off-CPU stacks are only partly symbolized.**
+   - Rust frames use v0 mangling (`_RNv…`), which bpftrace 0.20 does not
+     demangle. `fold-stacks.py` should demangle them (for example with
+     `rustfilt`, or by symbolizing addresses offline).
+   - About 30 % of off-CPU time in `bf-tree-bench` and `wal-bench` has user
+     frames that are only hexadecimal addresses. bpftrace symbolizes user
+     stacks when it prints the map (once per second); a thread that exits
+     before then is not symbolized. These stacks include the longest
+     waits, which end when the test ends.
+   - *Fix:* while the step runs, the runner copies the process's
+     `/proc/PID/maps` to `<step>.offcpu.maps`. `fold-stacks.py --maps`
+     resolves raw addresses with `addr2line` (inlined frames included) and
+     demangles names with `c++filt`, dropping crate hashes.
+
+Also: one archive held `bf-tree-bench-io.offcpu.bpftrace.txt` both
+uncompressed (2.1 MB) and compressed, although `compress` uses `--rm`. This
+is minor; check it with defect 2.
+
+**Measurements (profile build; not reference numbers).** These numbers come
+from a `profile` build under `perf stat`, so they are labelled "profile" and
+must not replace 0023's numbers. They show that the steps run correctly on
+the VM and give a first idea of scale.
+
+| Step | Result (8 threads unless stated) |
+| --- | --- |
+| `bf-tree-bench` | `baseline_threads`, page caching: get 8.11, put 10.21, 50/50 8.93 M ops/s; record caching: about 7.1 to 7.9 M ops/s. Scaling from 1 to 8 threads is close to linear (about 10×) for random keys. `baseline_hot_set`, one leaf, 90/10: 3.89 (1t), 6.15 (2t), 4.82 (4t), 4.00 (8t) M ops/s. |
+| `bf-tree-bench-io` | `bench_eviction_io` 8t: cached 1.82, direct 0.66 M puts/s. `bench_persistence`: direct random get 1t 0.02, 8t 0.12 M ops/s, against cached 0.80 and 4.62. Checkpoint of 8,258 leaves: cached 466 ms, direct 784 ms. |
+| `cb-bench` | `circular_buffer_cost`: 43.0 ns (10,000 live) to 220.5 ns (300,000 live) per alloc and free. |
+| `engine-bench` | Group commit, `flush_interval` 0: cached 1t 15,239, 8t 63,958 puts/s (p50 64 to 129 µs); direct 14,411 and 59,240. With a 1 ms interval, every configuration is about 880 puts/s per thread (p50 about 1.13 ms). fsync interference: cached p99 2.5 ms, max 33.5 ms; direct p99 7.1 ms, max 10.1 ms. Recovery: 632k (cached) and 406k (direct) records/s. |
+| `wal-bench` | 16-byte values: 1t 8.33, 8t 3.91 M appends/s in total. 1024-byte values: 1t 2.59, 8t 1.59. |
+
+**What the profiles show.**
+
+- **WAL appends with 8 threads are dominated by lock contention.** In
+  `wal-bench.record.report.txt`, about 40 % of samples are in the lock and
+  wake-up path: `Mutex::lock_contended` (11.6 %),
+  `native_queued_spin_lock_slowpath` (10.4 %), `_raw_spin_unlock_irqrestore`
+  (11.7 %), `futex_wake` (3.5 %), and `Condvar::notify_one` (2.6 %).
+  `Wal::append` itself is 13.1 %, and CRC32C is about 6 %. The stack under
+  `Wal::append` shows the unlock of the `flusher::Pending` mutex. This
+  explains why 8 threads append fewer records than one. A follow-up should
+  measure a design that does not take the mutex and notify the flusher on
+  every append.
+- **Group-commit waiting dominates off-CPU time in `engine-bench`.**
+  `Wal::wait_durable` accounts for 40 % of off-CPU time and the flusher's
+  `flush_loop` for about 10 %. File reads and writes are below 1 % each.
+  This is the expected behavior of a synchronous commit.
+- **Leaf lock waits are small in `bf-tree-bench`.** `LeafMap::read` and
+  `LeafMap::write` futex waits are 2.7 % and 0.6 % of off-CPU time. The
+  remaining off-CPU time is the test harness (main thread waiting for the
+  test, timer threads in `thread::sleep`) and unsymbolized stacks (defect
+  3). The hot-set drop at 4 and 8 threads (90/10, one leaf) needs a CPU
+  profile, which defect 1 prevented.
+- **Off-CPU time in `bf-tree-bench-io`** includes file reads (7.1 %) and
+  writes (5.8 %) through `FileExt`, and `FileStore` page I/O (1.5 %).
+- **Circular buffer.** `CircularBuffer::free` and `alloc` take about 50 %
+  of `cb-bench` samples; page faults at start-up are about 3 %.
+- **Scheduling delay is not a factor.** In every step, the benchmark
+  threads have an average run-queue delay of 1 to 2 µs and a maximum of
+  about 3 ms. The 3 ms maxima appear in kernel workers too, at the same
+  timestamps, so they are probably host-side (hypervisor) pauses, not
+  contention between benchmark threads.
+- **Context switches.** `engine-bench` makes 1.5 million context switches
+  and 160,802 CPU migrations in 8.5 s of task clock, from the hand-off
+  between committing threads and the flusher. `bf-tree-bench` makes
+  1.37 million in 154.6 s.
+
+## Second profiled live run (2026-11-10)
+
+The user repeated the profiled run after the fixes. The results archive was
+analyzed offline.
+
+**Run identity.** Run `20261110-030118-76daad03`, revision `76daad03` (clean
+working copy), `profile` build mode. Zone, image, kernel, and CPU model are
+the same as in the first run (`us-east1-b`,
+`ubuntu-2404-noble-amd64-v20261105`, `7.0.0-1017-gcp`, AMD EPYC 9B45). All
+23 entries in `status` are `ok`. The run took about 10 minutes from
+`started` (03:03:14Z) to `DONE` (03:13:29Z).
+
+### Profiler fixes confirmed
+
+| Defect | Outcome |
+| --- | --- |
+| 1. `perf report` and `perf script` | Complete reports for all five steps: 151K samples for `bf-tree-bench` (614 in the first run), 81K for `bf-tree-bench-io`, 7K for `engine-bench`. Every `.record.perf.log` lists only the two perf commands: `binutils` alone fixed it, and the `--no-inline` retry was not needed, so inlined frames are present. |
+| 2. Missing `perf.data` | `files.txt` lists every `.record.perf.data.zst` and `.sched.perf.data.zst` on the VM (the `sched` files are 14 to 50 MB), and the log reports no failed copies. They are missing only from the user's archive, so the runner is not at fault. They stay in the bucket for 14 days. |
+| 3. Off-CPU symbols | No unresolved hexadecimal frames remain in any `.offcpu.folded` file, and Rust names are demangled. |
+
+One gap remains: libc has no symbols on the VM, so libc frames show as
+offsets (for example `libc.so.6 0x1986a5`). They are probably `memcmp` or
+`memmove`. Installing `libc6-dbg` on the VM would name them; this is a
+possible follow-up, not a defect.
+
+### Reproducibility between the two runs
+
+Results that repeated closely (profile build, both runs):
+
+| Result | Run 1 | Run 2 |
+| --- | --- | --- |
+| Hot leaf, 90/10, 1/2/4/8 threads (M ops/s) | 3.89 / 6.15 / 4.82 / 4.00 | 3.82 / 6.23 / 4.96 / 3.89 |
+| WAL append, 16-byte values, 1t / 8t total (M/s) | 8.33 / 3.91 | 8.67 / 3.98 |
+| Engine write, `flush_interval` 1 ms, 1t (puts/s) | 885 | 882 |
+| fsync interference, cached, p50 alone / with load (µs) | 68 / 561 | 74 / 541 |
+| Descent, leaf lock, `get_with` hot leaf (ns) | 82.2, 17.3, 234.7 | 82.2, 17.3, 235.5 |
+| Direct random get, 1t / 8t (M ops/s) | 0.02 / 0.12 | 0.01 / 0.12 |
+
+Results that moved:
+
+| Result | Run 1 | Run 2 |
+| --- | --- | --- |
+| Put, random leaves (ns) | 1,444.9 | 702.0 |
+| Record caching get, 1t / 8t (M ops/s) | 0.70 / 7.10 | 1.42 / 10.78 |
+| Circular-buffer lock, 32 MiB, put 1t (M ops/s) | 0.63 | 1.36 |
+| Eviction I/O, cached, put p50 (µs) | 1.0 | 0.4 |
+| Circular-buffer cost, 100,000 live (ns) | 83.2 | 154.9 |
+| Engine write, cached, `flush_interval` 0, 8t (puts/s) | 63,958 | 55,141 |
+
+**Interpretation.** The code did not cause the change:
+`sl diff -r c8dd7947 -r 76daad03` changes no benchmarked code. The pattern
+points to the memory system of the host, not to CPU speed:
+
+- Benchmarks whose data stays in the private caches are identical to
+  within 1 %: descent, leaf locks, `get_with` on a hot leaf, and the hot
+  set.
+- Benchmarks that touch random leaves across the whole tree moved by up to
+  2×. Their working set (8,192 leaves of 4 KiB, about 32 MiB, plus a 32 MiB
+  circular buffer) is about the size of the 32 MiB L3 cache. On C4D the
+  VM's L3 is probably shared with other tenants on the same core complex,
+  so a neighbor that uses the L3 changes the miss rate of exactly these
+  benchmarks.
+- One memory-bound result became slower in run 2 (circular-buffer cost at
+  100,000 live entries), so the change is noise between hosts, not a
+  one-way improvement.
+
+This is a hypothesis: C4D has no hardware counters, so L3 misses cannot be
+measured. Consequences for reference numbers:
+
+- Numbers for random-leaf workloads, single-threaded or not, need several
+  runs on different VMs before they are cited. Report the spread.
+- Numbers that stay in the private caches, ratios between configurations,
+  and I/O-bound numbers (fsync, direct reads) repeat well from one run.
+
+### What the profiles show about the system
+
+**1. The tree's CPU time goes to searching, not to locking.** In
+`bf-tree-bench` (151K samples), `Page::search` takes 16.2 % and
+`InnerNode::route` 10.2 %. Unsymbolized libc functions take 24.5 % of
+samples; 9.5 % come from `Page::get_routed` and 3.3 % from
+`Page::upsert_indexed`, which suggests key comparison or record copying
+in libc. Latch work is small: `LeafMap::read` 4.9 %, `RwLock::read_contended`
+1.2 %, and `arc_swap` 3.1 %.
+
+**2. "`swap_bytes`" is cache-miss time in binary search.** About 12 % of
+samples land in `u64::swap_bytes`, inlined in `from_be_bytes`. The stacks
+show where: `compare_preview` in the leaf's binary search (7.3 %), the
+inner node's `route` (3.2 %), and `cmp_short` (1.8 %). A byte swap costs
+one cycle. The samples land there because the swap is the first
+instruction that uses a slot value just loaded from memory, and
+timer-based samples are charged to the instruction that waits. The real
+cost is the cache misses of the binary search over slots. Ways to reduce
+it are fewer probes (for example, an Eytzinger or B-tree-shaped slot
+layout, or a small per-page search index) or prefetching, not a cheaper
+comparison.
+
+**3. The hot-leaf drop is contention on cache lines, not blocking.** The
+90/10 workload on one leaf peaks at 2 threads and falls to 3.89 M ops/s
+at 8 threads, in both runs. Off-CPU time in `LeafMap::read` and `write`
+is only 4.1 % and 1.1 % of `bf-tree-bench`'s off-CPU time, so threads
+rarely sleep on the leaf lock. The probable cause is that the lock word
+and the page move between cores on every write, at 10 % writes. A leaf
+with 32 hot pages scales to 31.8 M ops/s at 8 threads, so the limit is
+per leaf, not global.
+
+**4. The durable write path is bounded by fdatasync latency and by how
+commits form groups.**
+
+- With `flush_interval` 0 and one thread, each put waits for one
+  fdatasync. 13,529 puts/s means about 74 µs per sync, the Local SSD's
+  flush latency.
+- Group size is about half the thread count: 1.0 at 2 threads, 2.0 at 4,
+  4.4 at 8. A commit that arrives during a sync waits for the next sync,
+  so about half the threads are in each group. This is why 2 threads are
+  no faster than one.
+- With `flush_interval` 1 ms, throughput per thread is about
+  1 / (1 ms + sync) ≈ 880 puts/s, and the group size equals the thread
+  count. The interval is longer than the sync itself, so it only adds
+  latency on this device. A useful interval here is on the order of the
+  sync time (tens of µs), or a rule that flushes when the group stops
+  growing.
+- Off-CPU time in `engine-bench` confirms this: `Wal::wait_durable` is
+  53 % of it, and the flusher's fsync is 5.5 %.
+
+**5. WAL appends from many threads are limited by one mutex.** In
+`wal-bench`, `Mutex::lock_contended` (13.5 %), the kernel's futex
+spin locks (`_raw_spin_unlock_irqrestore` 12.6 %,
+`native_queued_spin_lock_slowpath` 10.6 %), and `futex_wake` are together
+about 40 % of samples. `Wal::append` itself is 12.7 % and CRC32C about
+6 %. Off-CPU, 23 % of the time is threads that sleep on that lock. 8
+threads append about half as much in total as one. A design where
+appenders reserve space with an atomic operation and wake the flusher
+only when needed, not on every append, should remove most of this cost.
+
+**6. Checkpoints and fsync interfere with foreground commits.** Under load
+with checkpoints, a single committing thread's p50 rises from about 74 µs
+to 541 µs (cached) or 654 µs (direct), and p99 to 4 to 10 ms, in both runs.
+Commits share the device and the file system journal with checkpoint
+writes. Limiting the rate of checkpoint I/O, or giving the WAL its own
+device, are the obvious options.
+
+**7. Direct I/O reads have no cache in front of them.** Direct random gets
+reach 0.01 M ops/s with one thread (about 100 µs each, one device read)
+and 0.12 M ops/s with 8 threads, against 0.91 and 5.35 M ops/s with the
+page cache. In `bf-tree-bench-io`, 29 % of off-CPU time is reads in
+I/O wait. Throughput rises with the number of outstanding reads, so the
+device is not the limit; the latency of one read is. Direct mode needs
+its own read cache, or asynchronous reads, to be competitive for reads.
+
+**8. Scheduling is not a factor.** Benchmark threads wait 1 to 3 µs on
+average for a CPU, with maxima of 0.8 to 3.1 ms, as in the first run.
+`engine-bench` makes 1.36 million context switches and 162,695 CPU
+migrations in 7.6 s of CPU time, from the hand-off between committing
+threads and the flusher. Each hand-off is a sleep and a wake-up, which
+adds latency to every commit.
+
+### Follow-ups
+
+These are proposals for later plans, not part of this stack:
+
+- Record the 2026-11-08 `release` run as the reference numbers, and run
+  the release suite on two or three VMs to measure the spread between
+  hosts.
+- Install `libc6-dbg` on the VM so that libc frames have names.
+- Run `bf-tree-bench` with `--profile record-dwarf` to see which callers
+  of libc account for the 24.5 %.
+- Measure a leaf search with fewer cache misses, a WAL append path without
+  the mutex, and a shorter or adaptive flush interval.
 
 ## Discoveries and plan changes
 
@@ -757,6 +1072,37 @@ The first live runs (by the user) should check:
   boots, installs tools from the Ubuntu archive, and then downloads the
   locally built artifacts from GCS. This replaced the custom image and the
   Private Google Access setting. The stack went from seven diffs to six.
+- **Implementation details (2026-11-08).**
+  - The runner reads metadata with `curl` from the metadata server; tests
+    point `PEPPYDB_REMOTE_METADATA` at a directory of fake answers instead
+    of faking them in the `gcloud` stand-in.
+  - `tools/gcp/targets.txt` maps suite binary names to Buck2 targets.
+  - The driver gained `--prebuilt DIR` (stage existing binaries), `--suite`
+    accepts a path, and `PEPPYDB_GCP_BENCH_OUT` and
+    `PEPPYDB_GCP_BENCH_TEST` serve the tests.
+  - After a reboot in the middle of a run, the startup script writes a
+    failed `DONE` instead of leaving the driver waiting until the deadline.
+  - Every step fails on `test result: FAILED` in its output, because
+    `bpftrace -c` exits 0 whatever the command returns.
+  - The stand-in `gcloud` simulates Compute Engine, and its "VM" runs the
+    real startup script, so the driver tests are end to end.
+  - The signal test sends `TERM`: a non-interactive shell starts
+    background jobs with `INT` ignored, and an ignored signal cannot be
+    trapped. `INT` and `TERM` share the exit path.
+  - `bpftrace`'s `pid == cpid` filter matched nothing in a container with
+    its own PID namespace; with `--pid=host` it works. The VM has no PID
+    namespace.
+  - Diff 3 is about 1,300 changed lines, above the 300-line guideline: the
+    driver and its end-to-end tests belong together.
+- **First live run (2026-11-09): invalid JSON from `echo`.** The time-limit
+  read-back failed with "Invalid control character", and the driver deleted
+  the VM, as designed. The cause: `gcloud --format=json` escapes the
+  startup script's newlines as `\n`, and dash's `echo` (WSL's `/bin/sh`)
+  turns `\n` back into real newlines. The driver now passes JSON on with
+  `printf '%s\n'`. The stand-in `gcloud` now prints the startup script in
+  its `describe` output, as the real one does, so the driver tests fail with
+  the old `echo`. `.buckconfig` also ignores `.peppydb-bench/`, whose staged
+  binaries had reset Buck2's file watcher on every run.
 - **Review fixes (2026-11-08).** The bucket is in `us-east1`, so VMs are
   restricted to `us-east1` zones. The wait loop gained exit conditions for
   a VM that disappears, stops, or never boots, and an absolute deadline.

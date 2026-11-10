@@ -2,7 +2,9 @@
 # A stand-in for perf in offline tests (plan 0024). It records its arguments
 # in $PEPPYDB_FAKE_LOG, runs the command after "--", and writes fake output
 # files. Like C4D, it has no hardware counters: "stat -e cycles" reports
-# "<not supported>".
+# "<not supported>". With PEPPYDB_FAKE_PERF_ADDR2LINE=1, report and script
+# fail as perf 7.0 did on the VM without addr2line, unless --no-inline is
+# given.
 echo "perf $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
 
 # run_after_dashes ARGS...: find -o FILE, then run everything after "--".
@@ -37,8 +39,18 @@ case $1 in
         exit "$rc"
         ;;
     record) shift; run_after_dashes "$@" ;;
-    report) echo "# fake perf report" ;;
-    script) echo "fake perf script output" ;;
+    report | script)
+        case "$*" in
+            *--no-inline*) ;;
+            *)
+                if [ "${PEPPYDB_FAKE_PERF_ADDR2LINE:-}" = 1 ]; then
+                    echo "cmd_addr2line_configure /bin/x: addr2line configuration failed"
+                    exit 1
+                fi
+                ;;
+        esac
+        echo "fake perf $1 output"
+        ;;
     sched)
         shift
         if [ "$1" = record ]; then
