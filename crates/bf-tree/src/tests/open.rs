@@ -528,7 +528,10 @@ fn a_tree_over_a_direct_store_reopens_at_its_commit() {
     };
     let store = match FileStore::create_with(&path, Superblock::from(&config), Io::Direct) {
         Ok(store) => store,
-        Err(StoreError::Io { kind, .. }) if kind == std::io::ErrorKind::InvalidInput => {
+        Err(StoreError::Io {
+            kind: std::io::ErrorKind::InvalidInput,
+            ..
+        }) => {
             eprintln!("skipped: {} rejects O_DIRECT", dir.path().display());
             return;
         }
