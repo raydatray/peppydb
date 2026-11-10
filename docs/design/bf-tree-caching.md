@@ -14,7 +14,7 @@ growth, reference bits), [concurrency](bf-tree-concurrency.md) (locks and
 hint locking), and [leaf storage](bf-tree-leaf-store.md) (the leaf mapping
 table, `load_base`, `write_through`).
 
-The code is in `crates/bf-tree/src/`: `maintain.rs` (hints, promotion,
+The code is in `lib/bf-tree/src/`: `maintain.rs` (hints, promotion,
 deferral), `policy.rs` (the random generator), `write.rs` (direct writes
 into full pages), `leaf_map.rs` (the entry and its residency), `read.rs`,
 `scan.rs`, and `evict.rs`.
