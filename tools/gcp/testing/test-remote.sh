@@ -142,6 +142,9 @@ first_apt=$(grep -n '^apt-get' "$CASE_DIR/fake.log" | head -n 1 | cut -d: -f1)
 expect_log "unattended-upgrades"
 expect_log "snap refresh --hold"
 expect_log "linux-tools-$(uname -r)"
+expect_log "apt-get .*binutils"
+expect_file files.txt
+grep -q "bench-one.log" "$(results)/files.txt" || fail "files.txt lacks the step log"
 # started is uploaded before anything is installed.
 first_upload=$(grep -n 'results/run-1/started' "$CASE_DIR/fake.log" | head -n 1 | cut -d: -f1)
 [ -n "$first_upload" ] && [ "$first_upload" -lt "$first_apt" ] || fail "started not uploaded first"
@@ -255,6 +258,7 @@ done
 expect_status bench-one none 0
 for file in bench-one.log bench-one.stat.csv \
     bench-one.record.report.txt bench-one.record.perf-script.txt.zst bench-one.record.perf.data.zst \
+    bench-one.record.perf.log \
     bench-one.record-dwarf.report.txt bench-one.record-dwarf.perf.data.zst \
     bench-one.offcpu.folded bench-one.offcpu.bpftrace.txt.zst \
     bench-one.sched.txt bench-one.sched.perf.data.zst; do
@@ -271,6 +275,50 @@ grep -q "^pmu=unavailable$" "$(results)/env.txt" || fail "env.txt pmu"
 grep -q "^profile=none,stat,record,record-dwarf,offcpu,sched$" "$(results)/env.txt" || fail "env.txt profile"
 # The binaries ran under the profilers: one call per profiler, plus preflight.
 [ "$(grep -c "tree --ignored --nocapture tests::bench::" "$CASE_DIR/calls")" = 6 ] || fail "bench-one did not run 6 times"
+grep -q "no-inline" "$(results)/bench-one.record.perf.log" && fail "perf retried without a failure"
+
+# --- perf report and perf script fall back to --no-inline when addr2line
+# fails (first profiled live run).
+new_case perf-addr2line
+publish
+echo record >"$CASE_DIR/metadata/instance_attributes_peppydb-profile"
+run_remote PEPPYDB_FAKE_PERF_ADDR2LINE=1
+expect_done ok "all steps passed"
+grep -qx "fake perf report output" "$(results)/bench-one.record.report.txt" ||
+    fail "report not retried: $(cat "$(results)/bench-one.record.report.txt")"
+expect_log "perf report .*--no-inline"
+expect_log "perf script .*--no-inline"
+grep -q "no-inline" "$(results)/bench-one.record.perf.log" || fail "perf.log does not record the retry"
+
+# --- fold-stacks.py resolves bare addresses through a memory map and
+# addr2line, inlined frames included, and leaves other frames alone.
+CASE=fold-stacks
+CASE_DIR=$TMP/$CASE
+mkdir -p "$CASE_DIR/bin"
+# A minimal ELF64 header with one PT_LOAD: file offset 0x1000 at link-time
+# address 0x2000.
+python3 -c '
+import struct, sys
+header = bytearray(64)
+header[:6] = b"\x7fELF\x02\x01"
+struct.pack_into("<Q", header, 32, 64)
+struct.pack_into("<HH", header, 54, 56, 1)
+segment = struct.pack("<IIQQQQQQ", 1, 5, 0x1000, 0x2000, 0x2000, 0x4000, 0x4000, 0x1000)
+open(sys.argv[1], "wb").write(bytes(header) + segment)
+' "$CASE_DIR/prog"
+cat >"$CASE_DIR/bin/addr2line" <<'EOF'
+#!/bin/sh
+while read -r address; do
+    printf '0x%016x\n' "$address"
+    printf 'inner_%s\nf.rs:1\nouter_%s\nf.rs:2\n' "$address" "$address"
+done
+EOF
+chmod +x "$CASE_DIR/bin/addr2line"
+echo "5000-9000 r-xp 00001000 00:00 1 $CASE_DIR/prog" >"$CASE_DIR/maps"
+printf '@offcpu_us[\n    schedule+4\n,\n    0x5101\n    0xdead\n    main+3\n]: 7\n' >"$CASE_DIR/in"
+folded=$(PATH="$CASE_DIR/bin:$PATH" python3 "$ROOT/tools/gcp/fold-stacks.py" --maps "$CASE_DIR/maps" <"$CASE_DIR/in")
+[ "$folded" = "main;0xdead;outer_0x2100;inner_0x2100;schedule_[k] 7" ] ||
+    fail "fold-stacks address resolution: $folded"
 
 # --- A failing test under bpftrace (which exits 0) still fails the step.
 new_case offcpu-fails

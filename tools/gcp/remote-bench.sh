@@ -29,7 +29,9 @@ STATE=${PEPPYDB_REMOTE_STATE:-/var/lib/peppydb-bench}
 ARTIFACTS=$STATE/artifacts
 RESULTS=$STATE/results
 LOG=$STATE/startup-script.log
-PACKAGES="linux-tools-common bpftrace sysstat nvme-cli zstd"
+# binutils provides addr2line, which perf report and perf script need for
+# inlined frames and source lines, and which fold-stacks.py uses.
+PACKAGES="linux-tools-common binutils bpftrace sysstat nvme-cli zstd"
 
 log() {
     echo "remote-bench: $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
@@ -75,7 +77,10 @@ finish() {
     } >"$RESULTS/DONE"
     log "finished: status=$1 reason=$2"
     touch "$RESULTS/status"
-    upload "$RESULTS/env.txt" "$RESULTS/status" "$LOG"
+    # The local file list shows whether a missing result was never written
+    # or failed to upload (the copy failures are in the log).
+    ls -l "$RESULTS" >"$RESULTS/files.txt" 2>&1
+    upload "$RESULTS/env.txt" "$RESULTS/status" "$RESULTS/files.txt" "$LOG"
     upload "$RESULTS/DONE"
 }
 
@@ -279,9 +284,51 @@ prepare_profiling() {
     done
 }
 
-# compress FILE: FILE.zst in place of FILE; prints the new name.
+# compress FILE: FILE.zst in place of FILE; prints the name to upload.
+# If zstd fails, the uncompressed file is uploaded instead.
 compress() {
-    zstd -q -f --rm "$1" -o "$1.zst" && echo "$1.zst"
+    [ -f "$1" ] || {
+        log "missing output: $1"
+        return 0
+    }
+    if zstd -q -f --rm "$1" -o "$1.zst"; then
+        echo "$1.zst"
+    else
+        log "zstd failed on $1; uploading it uncompressed"
+        rm -f "$1.zst"
+        echo "$1"
+    fi
+}
+
+# perf_text OUT LOG ARGS...: run "perf ARGS" into OUT, with stderr in LOG.
+# perf report and perf script resolve inlined frames with addr2line; if
+# that fails, run again with --no-inline, which loses inlined frames but
+# keeps the samples.
+perf_text() {
+    out=$1 err=$2
+    shift 2
+    echo "perf $*" >>"$err"
+    if perf "$@" >"$out" 2>>"$err" && ! grep -q 'addr2line configuration failed' "$out"; then
+        return 0
+    fi
+    log "perf $1 failed; retrying with --no-inline (see $(basename "$err"))"
+    echo "perf $* --no-inline" >>"$err"
+    perf "$@" --no-inline >"$out" 2>>"$err"
+}
+
+# watch_maps PATTERN OUT: until killed, copy the memory map of the newest
+# process whose command line starts with PATTERN to OUT. fold-stacks.py
+# needs it to symbolize the addresses that bpftrace could not resolve
+# because the process had exited.
+watch_maps() {
+    while :; do
+        pid=$(pgrep -n -f "^$1" 2>/dev/null)
+        if [ -n "$pid" ] && cp "/proc/$pid/maps" "$2.tmp" 2>/dev/null &&
+            [ -s "$2.tmp" ]; then
+            mv "$2.tmp" "$2"
+        fi
+        sleep 1
+    done
 }
 
 # run_profiled PROFILER NAME BIN ARGS...: run one step under one profiler.
@@ -314,21 +361,37 @@ run_profiled() {
             perf record -q -e cpu-clock -F 999 --call-graph "$call_graph" -o "$data" \
                 -- "$exe" "$@" >"$log_file" 2>&1
             rc=$?
-            perf report -i "$data" --stdio --no-children --percent-limit 0.5 \
-                >"$base.$profiler.report.txt" 2>&1
-            perf script -i "$data" 2>/dev/null >"$base.$profiler.perf-script.txt"
+            perf_log=$base.$profiler.perf.log
+            : >"$perf_log"
+            perf_text "$base.$profiler.report.txt" "$perf_log" \
+                report -i "$data" --stdio --no-children --percent-limit 0.5
+            perf_text "$base.$profiler.perf-script.txt" "$perf_log" script -i "$data"
             echo "$base.$profiler.report.txt" >&3
+            echo "$perf_log" >&3
             compress "$base.$profiler.perf-script.txt" >&3
             compress "$data" >&3
             return "$rc"
             ;;
         offcpu)
             # bpftrace -c splits the command on spaces, as the suite does.
+            maps=$base.offcpu.maps
+            rm -f "$maps"
+            # Not on fd 3 or stdout: the caller reads them to the end.
+            watch_maps "$exe" "$maps" </dev/null >/dev/null 2>&1 3>&- &
+            watcher=$!
             bpftrace -q -o "$base.offcpu.bpftrace.txt" -c "$exe $*" "$ARTIFACTS/offcpu.bt" \
                 >"$log_file" 2>&1
             rc=$?
-            python3 "$ARTIFACTS/fold-stacks.py" <"$base.offcpu.bpftrace.txt" >"$base.offcpu.folded"
+            kill "$watcher" 2>/dev/null
+            wait "$watcher" 2>/dev/null
+            if [ -s "$maps" ]; then
+                python3 "$ARTIFACTS/fold-stacks.py" --maps "$maps"
+            else
+                log "no memory map for $exe; hexadecimal frames stay unresolved"
+                python3 "$ARTIFACTS/fold-stacks.py"
+            fi <"$base.offcpu.bpftrace.txt" >"$base.offcpu.folded" 2>>"$log_file"
             echo "$base.offcpu.folded" >&3
+            [ -f "$maps" ] && echo "$maps" >&3
             compress "$base.offcpu.bpftrace.txt" >&3
             return "$rc"
             ;;
