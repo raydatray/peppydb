@@ -16,6 +16,10 @@ Mapping:
     versions and features come from third-party/rust/Cargo.toml.
   - Dependencies that only the `<name>-unittest` target has become
     dev-dependencies.
+  - A feature variant (`peppy_rust_library`'s `feature_variants`) is a
+    `rust_library` with `features`. It becomes a `[features]` entry of its
+    package, which enables the same feature of each variant it depends on,
+    and a dependency on it becomes a path dependency with that feature.
   - The root Cargo.lock is derived from third-party/rust/Cargo.lock with
     `cargo update --workspace`, which changes only workspace entries. Cargo
     and Buck2 therefore build the same third-party versions.
@@ -46,7 +50,7 @@ def query():
         [
             str(ROOT / "tools" / "buck2"), "cquery",
             'kind("rust_(library|binary|test)", //crates/... + //bin/...)',
-            "--output-attribute", "buck.type|crate|crate_root|deps|name",
+            "--output-attribute", "buck.type|crate|crate_root|deps|features|name",
             "--json",
         ],
         cwd=ROOT, check=True, capture_output=True, text=True,
@@ -65,11 +69,12 @@ def query():
             "crate": attrs["crate"],
             "crate_root": attrs["crate_root"],
             "deps": deps,
+            "features": attrs.get("features") or [],
         }
     return targets
 
 
-def dependency_line(package, dep, third_party):
+def dependency_line(package, dep, third_party, targets):
     """The Cargo.toml line for one Buck2 dependency of `package`."""
     dep_package, dep_name = dep
     if dep_package == "third-party/rust":
@@ -78,8 +83,22 @@ def dependency_line(package, dep, third_party):
         return dep_name, f"{dep_name}.workspace = true"
     if dep_package.startswith(("crates/", "bin/")):
         rel = os.path.relpath(ROOT / dep_package, ROOT / package)
-        return dep_name, f'{dep_name} = {{ path = "{rel}" }}'
+        features = targets[dep]["features"]
+        name = base_name(dep, targets)
+        if features:
+            return name, f'{name} = {{ path = "{rel}", features = {toml_value(features)} }}'
+        return name, f'{name} = {{ path = "{rel}" }}'
     sys.exit(f"autocargo: unsupported dependency //{dep_package}:{dep_name} of {package}")
+
+
+def base_name(dep, targets):
+    """The package name of a library, or of the library a variant varies."""
+    package, name = dep
+    for feature in targets[dep]["features"]:
+        suffix = f"-{feature}"
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def toml_value(value):
@@ -101,7 +120,7 @@ def render(targets):
 
     packages = {}
     for (package, name), t in sorted(targets.items()):
-        if t["type"] == "rust_test":
+        if t["type"] == "rust_test" or t["features"]:
             continue
         packages.setdefault(package, []).append((name, t))
 
@@ -113,14 +132,26 @@ def render(targets):
             sys.exit(f"autocargo: //{package} must define one library or one binary")
         name, main = libs[0] if libs else bins[0]
 
-        deps = dict(dependency_line(package, d, third_party) for d in main["deps"])
+        deps = dict(dependency_line(package, d, third_party, targets) for d in main["deps"])
         test = targets.get((package, name + "-unittest"))
         dev = {}
         if test:
             for d in test["deps"]:
-                key, line = dependency_line(package, d, third_party)
-                if key not in deps:
+                key, line = dependency_line(package, d, third_party, targets)
+                if key not in deps or line != deps[key]:
                     dev[key] = line
+        features = {}
+        for (vpackage, vname), v in sorted(targets.items()):
+            if vpackage != package or v["type"] != "rust_library" or not v["features"]:
+                continue
+            for feature in v["features"]:
+                enables = sorted(
+                    f"{base_name(d, targets)}/{f}"
+                    for d in v["deps"]
+                    if d[0].startswith(("crates/", "bin/"))
+                    for f in targets[d]["features"]
+                )
+                features[feature] = enables
 
         lines = [
             f"# {MARKER} from {package}/BUCK. Do not edit.",
@@ -145,6 +176,10 @@ def render(targets):
             lines += ["", "[dependencies]"] + [deps[k] for k in sorted(deps)]
         if dev:
             lines += ["", "[dev-dependencies]"] + [dev[k] for k in sorted(dev)]
+        if features:
+            lines += ["", "[features]"] + [
+                f"{k} = {toml_value(v)}" for k, v in sorted(features.items())
+            ]
         lines += ["", "[lints]", "workspace = true", ""]
         files[f"{package}/Cargo.toml"] = "\n".join(lines)
 

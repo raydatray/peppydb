@@ -3,6 +3,8 @@ mod bench;
 mod checkpoint;
 mod crash;
 mod external;
+#[cfg(feature = "fault-injection")]
+mod fault;
 mod io;
 mod open;
 mod replica;

@@ -13,5 +13,8 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[features]
+fault-injection = []
+
 [lints]
 workspace = true

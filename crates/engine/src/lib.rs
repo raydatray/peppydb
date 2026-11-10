@@ -763,6 +763,18 @@ impl Db {
         &self.path
     }
 
+    /// Make the WAL's next sync fail, as a device error would: the waiting
+    /// writes and every later write return `Error::Wal`. Does nothing in
+    /// external mode, which has no WAL. For tests of callers only, with the
+    /// `fault-injection` feature (plan 0026).
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn fail_next_wal_sync(&self) {
+        if let Some(wal) = &self.shared.wal {
+            wal.fail_next_sync();
+        }
+    }
+
     /// Close the database: stop the policy thread, checkpoint, close the
     /// WAL, and release the lock. Returns the first error among the
     /// checkpoint, the WAL, and any earlier background checkpoint. A reopen

@@ -74,7 +74,7 @@ pub(crate) struct Shared {
     /// Groups synced; written by the flusher only.
     syncs: AtomicU64,
     /// Make the next group's sync fail, for tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     pub(crate) fail_sync: AtomicBool,
 }
 
@@ -130,7 +130,7 @@ impl Wal {
             failed: OnceLock::new(),
             first_error: Mutex::new(None),
             syncs: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             fail_sync: AtomicBool::new(false),
         });
         let flusher = {
@@ -286,8 +286,12 @@ impl Wal {
         self.shared.syncs.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_sync(&self) {
+    /// Make the next group's sync fail, as a device error would. The WAL
+    /// then fails every later call. For tests only: compiled in unit tests
+    /// and with the `fault-injection` feature.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn fail_next_sync(&self) {
         self.shared.fail_sync.store(true, Ordering::Relaxed);
     }
 
@@ -409,7 +413,7 @@ fn flush_loop(shared: &Shared, mut file: File) -> Option<File> {
                 active_bytes = HEADER_BYTES as u64;
             }
             file.write_all(&spare).map_err(io("write WAL group"))?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             if shared.fail_sync.swap(false, Ordering::Relaxed) {
                 return Err(io("sync WAL group")(std::io::Error::other("injected")));
             }

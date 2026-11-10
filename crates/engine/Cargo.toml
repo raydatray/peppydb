@@ -14,5 +14,8 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[features]
+fault-injection = ["engine-wal/fault-injection"]
+
 [lints]
 workspace = true
