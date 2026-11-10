@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 arc-swap.workspace = true
+clap.workspace = true
 engine = { path = "../engine" }
 server-proto = { path = "../server-proto" }
 thiserror.workspace = true
@@ -15,6 +16,7 @@ tokio.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 engine = { path = "../engine", features = ["fault-injection"] }

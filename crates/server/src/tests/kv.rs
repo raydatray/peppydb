@@ -89,7 +89,7 @@ async fn invalid_requests_write_nothing() {
     server.stop().await.unwrap();
 
     // Only the format marker and the one valid write reached the engine.
-    let db = engine::Db::open(dir.path(), engine::Options::default()).unwrap();
+    let db = super::open_db(dir.path());
     let stored: Vec<_> = db
         .range(None, None)
         .unwrap()
@@ -123,7 +123,7 @@ async fn user_keys_are_stored_under_the_user_prefix() {
     }
     server.stop().await.unwrap();
 
-    let db = engine::Db::open(dir.path(), engine::Options::default()).unwrap();
+    let db = super::open_db(dir.path());
     assert_eq!(db.get(FORMAT_KEY).unwrap().as_deref(), Some(FORMAT_VERSION));
     for key in [&b"\x00format"[..], b"\x00", b"\xff\xff", b"plain"] {
         let stored = [&[0x01], key].concat();
@@ -135,7 +135,7 @@ async fn user_keys_are_stored_under_the_user_prefix() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_database_without_the_format_marker_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let db = engine::Db::open(dir.path(), engine::Options::default()).unwrap();
+    let db = super::open_db(dir.path());
     db.put(b"written directly", b"v").unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -76,7 +76,7 @@ async fn shutdown_with_writes_in_flight_is_clean_and_keeps_every_acknowledged_wr
     }
     assert!(!acknowledged.is_empty());
     // The close released the lock, and every acknowledged write is durable.
-    let db = engine::Db::open(dir.path(), engine::Options::default()).unwrap();
+    let db = super::open_db(dir.path());
     for key in &acknowledged {
         let stored = [&[0x01], &key[..]].concat();
         assert!(db.get(&stored).unwrap().is_some(), "lost {key:?}");

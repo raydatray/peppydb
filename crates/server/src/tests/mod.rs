@@ -3,6 +3,7 @@
 
 mod admin;
 mod kv;
+mod process;
 mod scan;
 
 use std::net::SocketAddr;
@@ -31,11 +32,9 @@ impl Server {
     /// Open the database at `path` and serve it with `config`.
     pub(super) async fn start(path: &Path, config: Config) -> Self {
         let path = PathBuf::from(path);
-        let db =
-            tokio::task::spawn_blocking(move || engine::Db::open(path, engine::Options::default()))
-                .await
-                .unwrap()
-                .expect("open the database");
+        let db = tokio::task::spawn_blocking(move || open_db(&path))
+            .await
+            .unwrap();
         Self::start_with(db, config).await
     }
 
@@ -98,6 +97,24 @@ impl Server {
     pub(super) async fn stop(mut self) -> Result<Exit, ServeError> {
         let _ = self.stop.take().unwrap().send(());
         self.task.take().unwrap().await.unwrap()
+    }
+}
+
+/// Open the database at `path` with default options.
+///
+/// Retries `Locked` for up to 5 s. The process tests fork children from
+/// this test process, and a child holds copies of every open file until it
+/// execs, including another test's `LOCK` file: for that moment the lock
+/// outlives the database that took it. A real double open still fails.
+pub(super) fn open_db(path: &Path) -> engine::Db {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match engine::Db::open(path, engine::Options::default()) {
+            Err(engine::Error::Locked) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result.expect("open the database"),
+        }
     }
 }
 

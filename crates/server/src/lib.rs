@@ -30,6 +30,7 @@ use tonic_health::ServingStatus;
 
 mod admin;
 mod bridge;
+pub mod cli;
 mod keys;
 mod kv;
 mod status;
@@ -38,6 +39,13 @@ mod status;
 mod tests;
 
 pub use keys::FormatError;
+
+/// The server's version, as Cargo reports it; Buck2 builds report
+/// `unknown`.
+pub const VERSION: &str = match option_env!("CARGO_PKG_VERSION") {
+    Some(version) => version,
+    None => "unknown",
+};
 
 /// Server limits.
 #[derive(Clone, Copy, Debug)]
