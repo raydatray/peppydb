@@ -6,13 +6,8 @@ use server_proto::kv::v1::admin_service_server::AdminService;
 use server_proto::kv::v1::{CheckpointRequest, CheckpointResponse, StatusRequest, StatusResponse};
 use tonic::{Request, Response, Status};
 
+use crate::VERSION;
 use crate::bridge::Inner;
-
-/// The server's version, as Cargo or the build reports it.
-const VERSION: &str = match option_env!("CARGO_PKG_VERSION") {
-    Some(version) => version,
-    None => "unknown",
-};
 
 pub(crate) struct Admin {
     pub(crate) inner: Arc<Inner>,

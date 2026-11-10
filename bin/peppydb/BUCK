@@ -1,5 +1,7 @@
+# The peppydb executable: thin wiring over server::cli (plan 0026).
 rust_binary(
     name = "peppydb",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
+    deps = ["//crates/server:server"],
 )

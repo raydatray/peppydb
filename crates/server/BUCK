@@ -8,11 +8,13 @@ peppy_rust_library(
         "//crates/engine:engine",
         "//crates/server-proto:server-proto",
         "//third-party/rust:arc-swap",
+        "//third-party/rust:clap",
         "//third-party/rust:thiserror",
         "//third-party/rust:tokio",
         "//third-party/rust:tonic",
         "//third-party/rust:tonic-health",
         "//third-party/rust:tracing",
+        "//third-party/rust:tracing-subscriber",
     ],
     test_deps = [
         # Db::fail_next_wal_sync, for the fail-stop tests.
