@@ -1,0 +1,18 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The server component's entry crate: the gRPC services over engine::Db
+# (plan 0026). Other components depend on this crate only.
+peppy_rust_library(
+    name = "server",
+    deps = [
+        "//crates/engine:engine",
+        "//crates/server-proto:server-proto",
+        "//third-party/rust:arc-swap",
+        "//third-party/rust:thiserror",
+        "//third-party/rust:tokio",
+        "//third-party/rust:tonic",
+        "//third-party/rust:tracing",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["//bin/peppydb:"],
+)
