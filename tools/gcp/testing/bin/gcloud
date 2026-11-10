@@ -1,0 +1,57 @@
+#!/bin/sh
+# A stand-in for gcloud in offline tests (plan 0024). It never contacts GCP.
+#
+# Every call is appended to $PEPPYDB_FAKE_LOG. Objects live under
+# $PEPPYDB_FAKE_GCS: gs://BUCKET/PATH is $PEPPYDB_FAKE_GCS/BUCKET/PATH.
+# Supported: storage cp [--quiet] SRC DST, storage ls URL, storage cat URL.
+set -u
+echo "gcloud $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+
+local_path() {
+    case $1 in
+        gs://*) echo "$PEPPYDB_FAKE_GCS/${1#gs://}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+[ "${1:-}" = storage ] || {
+    echo "fake gcloud: unsupported command: $*" >&2
+    exit 2
+}
+shift
+command=$1
+shift
+args=
+for arg in "$@"; do
+    case $arg in
+        --*) ;;
+        *) args="$args $arg" ;;
+    esac
+done
+# shellcheck disable=SC2086 # paths have no spaces in these tests
+set -- $args
+
+case $command in
+    cp)
+        [ "${PEPPYDB_FAKE_GCS_FAIL:-}" = 1 ] && exit 1
+        src=$(local_path "$1")
+        dst=$(local_path "$2")
+        [ -f "$src" ] || {
+            echo "fake gcloud: no such object: $1" >&2
+            exit 1
+        }
+        mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+        ;;
+    ls)
+        path=$(local_path "$1")
+        [ -e "$path" ] || exit 1
+        echo "$1"
+        ;;
+    cat)
+        cat "$(local_path "$1")"
+        ;;
+    *)
+        echo "fake gcloud: unsupported storage command: $command" >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,5 @@
+#!/bin/sh
+# A stand-in for systemctl in offline tests (plan 0024): records its
+# arguments in $PEPPYDB_FAKE_LOG.
+echo "systemctl $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+exit 0
