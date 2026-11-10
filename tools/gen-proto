@@ -7,7 +7,7 @@
 #                             if lint or the breaking-change check fails
 #
 # Every tool is pinned. buf and the Go plugins come from the `tool`
-# directives in go/go.mod and run with the Go distribution that Buck2
+# directives in go.mod and run with the Go distribution that Buck2
 # downloads (GO_VERSION). Buck2 cannot build buf itself: buf refuses to run
 # without Go module build information, which only the go command embeds.
 # Rust code comes from //tools/protogen (tonic-prost-build, pinned in
@@ -37,7 +37,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # buf and the plugins, built once into a scratch directory.
-"$go" -C go build -o "$tmp/bin/" \
+"$go" build -o "$tmp/bin/" \
     github.com/bufbuild/buf/cmd/buf \
     google.golang.org/protobuf/cmd/protoc-gen-go \
     google.golang.org/grpc/cmd/protoc-gen-go-grpc

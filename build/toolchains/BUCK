@@ -157,7 +157,7 @@ noop_test_toolchain(
 )
 
 # Go: the official release for the host, downloaded and checked by sha256.
-# GO_VERSION must match go/go.mod; tools/check-tools checks it.
+# GO_VERSION must match go.mod; tools/check-tools checks it.
 GO_VERSION = "1.27.0"
 
 GO_RELEASES = {

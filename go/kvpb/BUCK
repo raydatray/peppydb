@@ -11,5 +11,5 @@ go_library(
         "//third-party/go:google.golang.org/protobuf/reflect/protoreflect",
         "//third-party/go:google.golang.org/protobuf/runtime/protoimpl",
     ],
-    visibility = ["//go/..."],
+    visibility = ["//bin/peppydb-load:"],
 )

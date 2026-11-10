@@ -104,8 +104,8 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 - Every tool is pinned. Buck2 downloads Go itself (`GO_VERSION` in
   `build/toolchains/BUCK`), and `tools/fmt.sh` uses its `gofmt`.
   `tools/check-tools` fails if `rustc` on `PATH` or `GO_VERSION` differ from
-  `rust-toolchain.toml` and `go/go.mod`. For the plain `go` command, use the
-  Go version in `go/go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
+  `rust-toolchain.toml` and `go.mod`. For the plain `go` command, use the
+  Go version in `go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
   on `PATH`.
 - After changing a `BUCK` file, run `tools/autocargo` and commit the result.
 - To add, change, or remove a crates.io dependency, edit
@@ -121,15 +121,18 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 - Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
 - Miri: `tools/buck2 test @build/mode/miri '<test target>[miri]'`. Buck2
   downloads the pinned nightly; `tools/update-miri` moves the pin.
-- Go code lives in the module at `go/` (`go/go.mod` is hand-written). Each
-  package directory has a `BUCK` file whose `package_name` is
-  `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
-  work directly in `go/`.
+- Go code is one module at the repository root (`go.mod`, hand-written,
+  module `peppydb`). Its `ignore` list keeps the `go` command out of
+  `buck-out/`, `target/`, and `third-party/`. A Go package can live in any
+  directory: executables under `bin/`, libraries under `lib/`. Each has a
+  `BUCK` file whose `package_name` is `peppydb/<dir>`; `tools/fmt.sh`
+  checks it. Buck2 `visibility`, not Go's `internal/`, limits importers.
+  The `go` command and gopls work from the root.
 - The API lives in `proto/`. After changing a `.proto` file, run
   `tools/gen-proto` and commit the generated Rust (`crates/server-proto`)
   and Go (`go/kvpb`) code. It lints with buf and checks for breaking
   changes against the parent revision.
-- To add a Go dependency, import it, run `go get` and `go mod tidy` in `go/`,
+- To add a Go dependency, import it, run `go get` and `go mod tidy`,
   run `tools/gobuckify-remote`, and add `//third-party/go:<import path>` to
   the `deps` of the packages that use it.
 
@@ -151,7 +154,7 @@ tools/autocargo --check
 tools/gobuckify-remote --check
 tools/gen-proto --check
 cargo test --workspace --locked
-(cd go && go vet ./... && go test ./...)
+go vet ./... && go test ./...
 ```
 
 For each crate allowed to contain `unsafe` code (the `tools/check-unsafe`
