@@ -153,7 +153,16 @@ uploads_before=$(wc -l <"$CASE_DIR/fake.log")
 run_remote
 uploads_after=$(wc -l <"$CASE_DIR/fake.log")
 [ "$uploads_before" = "$uploads_after" ] || fail "second start did work"
-grep -q "already started" "$CASE_DIR/output" || fail "second start did not report the guard"
+grep -q "already finished" "$CASE_DIR/output" || fail "second start did not report the guard"
+
+# --- A reboot in the middle of a run reports the run as failed.
+new_case reboot
+publish
+mkdir -p "$CASE_DIR/state/results"
+echo earlier >"$CASE_DIR/state/started"
+run_remote
+expect_done failed "rebooted"
+[ ! -f "$CASE_DIR/calls" ] || fail "a binary ran after a reboot"
 
 # --- A failing benchmark step is recorded, and the run continues.
 new_case step-fails

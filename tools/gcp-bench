@@ -1,0 +1,614 @@
+#!/bin/sh
+# Run a benchmark suite on a short-lived GCP VM (plan 0024; see
+# docs/design/remote-benchmarks.md).
+#
+#   tools/gcp-bench build   [options]   build and stage the artifacts; no GCP access
+#   tools/gcp-bench run     [options]   build, upload, create the VM, wait,
+#                                       download the results, delete the VM
+#   tools/gcp-bench cleanup [options]   delete leftover peppydb-bench VMs and disks
+#
+# Options:
+#   --project P       default: $PEPPYDB_GCP_PROJECT, then `gcloud config`
+#   --bucket B        default: $PEPPYDB_GCS_BUCKET; must be in us-east1
+#   --suite S         default: bf-io-perf (tools/gcp/suites/S.txt, or a path)
+#   --step NAME       run only this step, plus the preflight steps (repeatable)
+#   --profile P,...   profilers (default: none)
+#   --zone Z          try only this zone (repeatable; us-east1 only)
+#   --machine-type M  default: c4d-standard-8-lssd
+#   --image NAME      an exact ubuntu-os-cloud image (default: newest ubuntu-2404-lts-amd64)
+#   --max-run D       VM time limit, such as 90m or 3h (default: 3h)
+#   --on-demand       an on-demand VM instead of Spot
+#   --keep            do not delete the VM at the end (the time limit still applies)
+#   --prebuilt DIR    stage binaries from DIR/<name> instead of building
+#   --dry-run         print the gcloud commands instead of running them
+#
+# PEPPYDB_BENCH_* settings in the environment (except PEPPYDB_BENCH_DIR) are
+# passed to the benchmarks. Results go to .peppydb-bench/RUN_ID/results/.
+#
+# Builds must run on x86_64 Ubuntu 24.04 (the WSL2 development machine), the
+# same architecture and release as the VM image.
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+GCP=$ROOT/tools/gcp
+REGION=us-east1
+ZONES_DEFAULT="us-east1-b us-east1-c us-east1-d"
+LABEL=peppydb-bench
+
+# Where runs are staged and results downloaded.
+OUT=${PEPPYDB_GCP_BENCH_OUT:-$ROOT/.peppydb-bench}
+
+# Test settings (tools/gcp/testing/test-driver.sh). PEPPYDB_GCP_BENCH_TEST=1
+# allows any build host and short --max-run values.
+TEST=${PEPPYDB_GCP_BENCH_TEST:-}
+POLL=${PEPPYDB_GCP_BENCH_POLL:-30}
+BOOT_TIMEOUT=${PEPPYDB_GCP_BENCH_BOOT_TIMEOUT:-900}
+DEADLINE_MARGIN=${PEPPYDB_GCP_BENCH_DEADLINE_MARGIN:-600}
+
+die() {
+    echo "gcp-bench: $*" >&2
+    exit 2
+}
+
+say() {
+    echo "gcp-bench: $*" >&2
+}
+
+usage() {
+    sed -n '2,/^set -u/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+# --- Options.
+
+[ $# -ge 1 ] || usage
+COMMAND=$1
+shift
+case $COMMAND in
+    build | run | cleanup) ;;
+    -h | --help | help) usage ;;
+    *) die "unknown command: $COMMAND (build, run, or cleanup)" ;;
+esac
+
+PROJECT=${PEPPYDB_GCP_PROJECT:-}
+BUCKET=${PEPPYDB_GCS_BUCKET:-}
+SUITE=bf-io-perf
+STEPS=
+PROFILE=none
+ZONES=
+MACHINE_TYPE=c4d-standard-8-lssd
+IMAGE=
+MAX_RUN=3h
+PROVISIONING=SPOT
+KEEP=false
+PREBUILT=
+DRY=false
+
+need_value() {
+    [ $# -ge 2 ] || die "$1 needs a value"
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --project) need_value "$@"; PROJECT=$2; shift ;;
+        --bucket) need_value "$@"; BUCKET=$2; shift ;;
+        --suite) need_value "$@"; SUITE=$2; shift ;;
+        --step) need_value "$@"; STEPS="$STEPS $2"; shift ;;
+        --profile) need_value "$@"; PROFILE=$2; shift ;;
+        --zone) need_value "$@"; ZONES="$ZONES $2"; shift ;;
+        --machine-type) need_value "$@"; MACHINE_TYPE=$2; shift ;;
+        --image) need_value "$@"; IMAGE=$2; shift ;;
+        --max-run) need_value "$@"; MAX_RUN=$2; shift ;;
+        --on-demand) PROVISIONING=STANDARD ;;
+        --keep) KEEP=true ;;
+        --prebuilt) need_value "$@"; PREBUILT=$2; shift ;;
+        --dry-run) DRY=true ;;
+        -h | --help) usage ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
+ZONES=${ZONES:-$ZONES_DEFAULT}
+for zone in $ZONES; do
+    case $zone in
+        "$REGION"-?) ;;
+        *) die "zone $zone is outside $REGION, where the bucket is" ;;
+    esac
+done
+
+# duration_seconds D: 90m, 3h, 600s, or plain seconds.
+duration_seconds() {
+    case $1 in
+        *[!0-9smh]* | '' | [smh]*) return 1 ;;
+        *h) echo $((${1%h} * 3600)) ;;
+        *m) echo $((${1%m} * 60)) ;;
+        *s) echo "${1%s}" ;;
+        *) echo "$1" ;;
+    esac
+}
+MAX_RUN_SECONDS=$(duration_seconds "$MAX_RUN") || die "bad --max-run: $MAX_RUN"
+[ "$MAX_RUN_SECONDS" -ge 600 ] || [ "$TEST" = 1 ] ||
+    die "--max-run must be at least 10m"
+
+PROFILE=$(echo "$PROFILE" | tr -d ' ')
+BUILD_MODE=release
+[ "$PROFILE" = none ] || BUILD_MODE=profile
+
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+
+# --- gcloud.
+
+# dry_response ARGS...: what --dry-run pretends that gcloud printed: the
+# successful path, so that the whole sequence is shown.
+dry_response() {
+    case "$*" in
+        "config get-value project"*) echo dry-run-project ;;
+        "storage buckets describe"*)
+            python3 -c 'import json, sys; print(json.dumps({"location": "US-EAST1", "lifecycle_config": json.load(open(sys.argv[1]))}))' \
+                "$GCP/lifecycle.json"
+            ;;
+        "compute instances describe"*)
+            echo "{\"status\": \"RUNNING\", \"scheduling\": {\"maxRunDuration\": {\"seconds\": \"$MAX_RUN_SECONDS\"}, \"instanceTerminationAction\": \"DELETE\"}}"
+            ;;
+        "storage ls"*) echo "${3:-}" ;;
+        "storage cat"*) printf 'status=ok\nreason=dry run\nfailed_steps=\n' ;;
+    esac
+    return 0
+}
+
+# gcloud's JSON output escapes newlines as \n. Pass it on with printf '%s\n',
+# never echo: dash's echo turns \n into real newlines, and the JSON becomes
+# invalid.
+
+# gc ARGS...: gcloud with --project, or its dry-run stand-in. Dry-run lines
+# go to fd 9, the original stderr, so that redirections at call sites do
+# not hide them.
+exec 9>&2
+gc() {
+    if $DRY; then
+        echo "+ gcloud $* --project=$PROJECT" >&9
+        dry_response "$@"
+    else
+        gcloud "$@" --project="$PROJECT"
+    fi
+}
+
+# --- Host check.
+
+check_host() {
+    problem=
+    [ "$(uname -sm)" = "Linux x86_64" ] || problem="this host is $(uname -sm), not Linux x86_64"
+    if [ -z "$problem" ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release 2>/dev/null
+        [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 24.04 ] ||
+            problem="this host is ${PRETTY_NAME:-unknown}, not Ubuntu 24.04"
+    fi
+    [ -n "$problem" ] || return 0
+    if [ "$TEST" = 1 ] || $DRY; then
+        say "warning: $problem; the binaries may not run on the VM"
+    else
+        die "$problem. Build on x86_64 Ubuntu 24.04 (the WSL2 machine), the VM's architecture and release."
+    fi
+}
+
+# --- Build and stage.
+
+case $SUITE in
+    */*) SUITE_FILE=$SUITE ;;
+    *) SUITE_FILE=$GCP/suites/$SUITE.txt ;;
+esac
+[ -f "$SUITE_FILE" ] || die "no suite $SUITE ($SUITE_FILE)"
+
+# suite_lines: the suite without comments and blank lines, reduced to the
+# chosen steps and every preflight step.
+suite_lines() {
+    grep -v '^[[:space:]]*#' "$SUITE_FILE" | grep -v '^[[:space:]]*$' | while read -r name rest; do
+        keep=false
+        case $name in preflight-*) keep=true ;; esac
+        [ -z "$STEPS" ] && keep=true
+        for step in $STEPS; do
+            [ "$step" = "$name" ] && keep=true
+        done
+        $keep && echo "$name $rest"
+    done
+}
+
+# target_of NAME: the Buck2 target of a staged binary (tools/gcp/targets.txt).
+target_of() {
+    awk -v name="$1" '$1 == name { print $2 }' "$GCP/targets.txt"
+}
+
+# new_run_id: sets REVISION and RUN_ID (a UTC time and the short revision;
+# lowercase, so that it is valid in instance names and labels).
+new_run_id() {
+    REVISION=unknown
+    if command -v sl >/dev/null 2>&1; then
+        REVISION=$(cd "$ROOT" && sl whereami 2>/dev/null) || REVISION=unknown
+    fi
+    [ -n "$REVISION" ] || REVISION=unknown
+    RUN_ID=$(date -u +%Y%m%d-%H%M%S)-$(echo "$REVISION" | cut -c1-8)
+}
+
+stage() {
+    check_host
+    new_run_id
+    LOCAL=$OUT/$RUN_ID
+    STAGE=$LOCAL/artifacts
+    mkdir -p "$STAGE/bin" || die "cannot create $STAGE"
+
+    for step in $STEPS; do
+        suite_lines | awk '{ print $1 }' | grep -qx "$step" || die "suite $SUITE has no step $step"
+    done
+    suite_lines >"$STAGE/suite.txt"
+    binaries=$(awk '{ print $2 }' "$STAGE/suite.txt" | sort -u)
+    targets=
+    for binary in $binaries; do
+        target=$(target_of "$binary")
+        [ -n "$target" ] || die "suite $SUITE names $binary, which tools/gcp/targets.txt does not list"
+        targets="$targets $target"
+    done
+
+    if [ -n "$PREBUILT" ]; then
+        for binary in $binaries; do
+            [ -f "$PREBUILT/$binary" ] || die "no $PREBUILT/$binary"
+            cp "$PREBUILT/$binary" "$STAGE/bin/$binary"
+        done
+    else
+        say "building ($BUILD_MODE):$targets"
+        # shellcheck disable=SC2086 # one argument per target
+        outputs=$(cd "$ROOT" && tools/buck2 build "@build/mode/$BUILD_MODE" $targets --show-full-output) ||
+            die "build failed"
+        echo "$outputs" | while read -r target path; do
+            [ -n "$target" ] && cp "$path" "$STAGE/bin/${target##*:}"
+        done
+        for binary in $binaries; do
+            [ -f "$STAGE/bin/$binary" ] || die "the build did not produce $binary"
+        done
+    fi
+
+    env | grep '^PEPPYDB_BENCH_' | grep -v '^PEPPYDB_BENCH_DIR=' | sort >"$STAGE/bench.env"
+    stage_extra
+
+    dirty=unknown
+    if [ "$REVISION" != unknown ]; then
+        if [ -z "$(cd "$ROOT" && sl status -mard 2>/dev/null)" ]; then
+            dirty=false
+        else
+            dirty=true
+            say "warning: the working copy has uncommitted changes; MANIFEST records dirty=true"
+        fi
+    fi
+    {
+        echo "run_id=$RUN_ID"
+        echo "revision=$REVISION"
+        echo "dirty=$dirty"
+        echo "rustc=$(rustc --version 2>/dev/null || echo unknown)"
+        echo "build_mode=$BUILD_MODE"
+        echo "build_host=$(uname -sm), $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+        echo "suite=$SUITE"
+        echo "profile=$PROFILE"
+        echo "machine_type=$MACHINE_TYPE"
+        echo "provisioning=$PROVISIONING"
+        echo "image=${IMAGE:-family ubuntu-2404-lts-amd64}"
+        (cd "$STAGE" && find . -type f ! -name MANIFEST | sed 's|^\./||' | sort) | while read -r path; do
+            echo "sha256 $path $(sha256_of "$STAGE/$path")"
+        done
+    } >"$STAGE/MANIFEST"
+    say "staged $STAGE"
+}
+
+# Profiling hook (plan 0024 diff 5): extra files for the stage directory.
+stage_extra() { :; }
+check_profile() { [ "$PROFILE" = none ] || die "unknown profiler list: $PROFILE"; }
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# --- Checks before a run.
+
+resolve_project() {
+    if [ -z "$PROJECT" ]; then
+        if $DRY; then
+            PROJECT=dry-run-project
+        else
+            PROJECT=$(gcloud config get-value project 2>/dev/null)
+        fi
+    fi
+    [ -n "$PROJECT" ] || die "no project: use --project or PEPPYDB_GCP_PROJECT"
+}
+
+# check_bucket: the bucket is in us-east1, and its lifecycle rules match
+# tools/gcp/lifecycle.json (compared as rules, not as text).
+check_bucket() {
+    [ -n "$BUCKET" ] || die "no bucket: use --bucket or PEPPYDB_GCS_BUCKET"
+    description=$(gc storage buckets describe "gs://$BUCKET" --format=json) ||
+        die "cannot read bucket gs://$BUCKET"
+    printf '%s\n' "$description" | python3 "$GCP/check-bucket.py" "$GCP/lifecycle.json" "$REGION" ||
+        die "bucket gs://$BUCKET is not ready (see above)"
+}
+
+# --- Instances.
+
+NAME=
+ZONE=
+CREATED=false
+
+# instance_state: RUNNING, TERMINATED, ..., NOTFOUND, or ERROR.
+instance_state() {
+    if output=$(gc compute instances describe "$NAME" --zone="$ZONE" --format=json 2>"$LOCAL/describe.err"); then
+        printf '%s\n' "$output" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("status", "ERROR"))' 2>/dev/null ||
+            echo ERROR
+    elif grep -qi 'not found\|notFound' "$LOCAL/describe.err"; then
+        echo NOTFOUND
+    else
+        echo ERROR
+    fi
+}
+
+delete_instance() { # name zone
+    say "deleting instance $1 ($2)"
+    gc compute instances delete "$1" --zone="$2" --quiet >/dev/null 2>&1 ||
+        say "warning: could not delete $1 in $2; run tools/gcp-bench cleanup"
+}
+
+on_exit() {
+    status=$?
+    trap - EXIT INT TERM
+    if $CREATED && ! $KEEP; then
+        delete_instance "$NAME" "$ZONE"
+        CREATED=false
+    fi
+    list_leftovers
+    exit "$status"
+}
+
+list_leftovers() {
+    [ -n "$PROJECT" ] || return 0
+    leftovers=$(gc compute instances list --filter="labels.$LABEL=1" --format='value(name,zone.basename(),status)' 2>/dev/null)
+    if [ -n "$leftovers" ]; then
+        say "instances with label $LABEL=1 still exist (other runs, or run tools/gcp-bench cleanup):"
+        echo "$leftovers" | sed 's/^/  /' >&2
+    fi
+}
+
+# create_failure_is_capacity FILE: errors after which another zone may work.
+create_failure_is_capacity() {
+    grep -Eqi 'ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|resource pool|not available in|not supported in|does not exist in zone|stockout|currently unavailable' "$1"
+}
+
+create_instance() {
+    NAME=$LABEL-$RUN_ID
+    echo "$PROFILE" >"$LOCAL/profile"
+    if [ -n "$IMAGE" ]; then
+        image_args="--image=$IMAGE --image-project=ubuntu-os-cloud"
+    else
+        image_args="--image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud"
+    fi
+    for zone in $ZONES; do
+        ZONE=$zone
+        say "creating $NAME in $ZONE ($MACHINE_TYPE, $PROVISIONING)"
+        # shellcheck disable=SC2086 # image_args is two arguments
+        if gc compute instances create "$NAME" \
+            --zone="$ZONE" \
+            --machine-type="$MACHINE_TYPE" \
+            --provisioning-model="$PROVISIONING" \
+            --instance-termination-action=DELETE \
+            --max-run-duration="${MAX_RUN_SECONDS}s" \
+            $image_args \
+            --boot-disk-type=hyperdisk-balanced --boot-disk-size=20GB --boot-disk-auto-delete \
+            --service-account="$LABEL@$PROJECT.iam.gserviceaccount.com" \
+            --scopes=cloud-platform \
+            --labels="$LABEL=1,run=$RUN_ID" \
+            --metadata="peppydb-bucket=$BUCKET,peppydb-run-id=$RUN_ID" \
+            --metadata-from-file="peppydb-profile=$LOCAL/profile,startup-script=$GCP/remote-bench.sh" \
+            >"$LOCAL/create.out" 2>"$LOCAL/create.err"; then
+            CREATED=true
+            CREATED_AT=$(date +%s)
+            return 0
+        fi
+        sed 's/^/  /' "$LOCAL/create.err" >&2
+        # A failed call may still have created the instance.
+        if [ "$(instance_state)" != NOTFOUND ]; then
+            say "the failed create left an instance behind"
+            delete_instance "$NAME" "$ZONE"
+        fi
+        create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
+    done
+    die "no zone in $ZONES could create $MACHINE_TYPE; try again later or with --on-demand"
+}
+
+# check_limits: the created instance carries the time limit and DELETE.
+check_limits() {
+    description=$(gc compute instances describe "$NAME" --zone="$ZONE" --format=json) || {
+        say "cannot read back $NAME"
+        return 1
+    }
+    printf '%s\n' "$description" | python3 -c '
+import json, sys
+s = json.load(sys.stdin).get("scheduling", {})
+seconds = int(s.get("maxRunDuration", {}).get("seconds", 0))
+action = s.get("instanceTerminationAction")
+if seconds != int(sys.argv[1]) or action != "DELETE":
+    print(f"time limit {seconds}s, termination action {action}", file=sys.stderr)
+    sys.exit(1)
+' "$MAX_RUN_SECONDS"
+}
+
+object_exists() {
+    gc storage ls "$1" >/dev/null 2>&1
+}
+
+# wait_for_run: poll until the run ends. Sets OUTCOME to done, gone,
+# stopped, no-boot, or deadline.
+wait_for_run() {
+    started_seen=false
+    deadline=$((MAX_RUN_SECONDS + DEADLINE_MARGIN))
+    while :; do
+        $DRY || sleep "$POLL"
+        if object_exists "$REMOTE_RESULTS/DONE"; then
+            OUTCOME=done
+            return
+        fi
+        state=$(instance_state)
+        case $state in
+            NOTFOUND)
+                object_exists "$REMOTE_RESULTS/DONE" && OUTCOME=done || OUTCOME=gone
+                return
+                ;;
+            STOPPING | STOPPED | SUSPENDING | SUSPENDED | TERMINATED)
+                OUTCOME=stopped
+                return
+                ;;
+        esac
+        elapsed=$(($(date +%s) - CREATED_AT))
+        if ! $started_seen; then
+            if object_exists "$REMOTE_RESULTS/started"; then
+                started_seen=true
+                say "the VM has started the run"
+            elif [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
+                OUTCOME=no-boot
+                return
+            fi
+        fi
+        if [ "$elapsed" -ge "$deadline" ]; then
+            OUTCOME=deadline
+            return
+        fi
+    done
+}
+
+download_results() {
+    rm -rf "$LOCAL/download"
+    mkdir -p "$LOCAL/download"
+    if gc storage cp --recursive "$REMOTE_RESULTS" "$LOCAL/download/" >/dev/null 2>&1 &&
+        [ -d "$LOCAL/download/$RUN_ID" ]; then
+        rm -rf "$LOCAL/results"
+        mv "$LOCAL/download/$RUN_ID" "$LOCAL/results"
+    else
+        mkdir -p "$LOCAL/results"
+        $DRY || say "no results could be downloaded"
+    fi
+    rmdir "$LOCAL/download" 2>/dev/null
+}
+
+was_preempted() {
+    [ -n "$(gc compute operations list --zones="$ZONE" \
+        --filter="operationType=compute.instances.preempted AND targetLink~/$NAME\$" \
+        --format='value(name)' 2>/dev/null)" ]
+}
+
+report() {
+    if [ -f "$LOCAL/results/status" ]; then
+        say "steps (name profiler exit seconds note):"
+        sed 's/^/  /' "$LOCAL/results/status" >&2
+    fi
+    say "results: $LOCAL/results"
+}
+
+run() {
+    check_profile
+    resolve_project
+    check_bucket
+    stage
+    REMOTE_ARTIFACTS=gs://$BUCKET/peppydb-bench/artifacts/$RUN_ID
+    REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID
+
+    say "uploading artifacts to $REMOTE_ARTIFACTS"
+    say "gcloud: $( ($DRY && echo dry-run) || gcloud --version 2>/dev/null | head -n 1)"
+    (cd "$STAGE" && find . -type f | sed 's|^\./||' | sort) | while read -r path; do
+        gc storage cp --quiet "$STAGE/$path" "$REMOTE_ARTIFACTS/$path" >/dev/null 2>"$LOCAL/upload.err" || {
+            cat "$LOCAL/upload.err" >&2
+            die "upload of $path failed"
+        }
+    done || exit 2
+
+    trap on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    create_instance
+    if ! check_limits; then
+        die "$NAME lacks its time limit or DELETE action; deleted it"
+    fi
+    say "waiting for the run (every ${POLL}s; Ctrl-C deletes the VM)"
+    wait_for_run
+
+    code=0
+    case $OUTCOME in
+        done) ;;
+        gone)
+            if was_preempted; then
+                say "the Spot VM was preempted before the run finished"
+            else
+                say "the VM is gone, and the run did not finish (time limit, or deleted elsewhere)"
+            fi
+            CREATED=false
+            code=3
+            ;;
+        stopped)
+            say "the VM stopped before the run finished"
+            code=3
+            ;;
+        no-boot)
+            say "the VM did not start the run within ${BOOT_TIMEOUT}s; saving its serial port output"
+            mkdir -p "$LOCAL"
+            gc compute instances get-serial-port-output "$NAME" --zone="$ZONE" >"$LOCAL/serial-port.txt" 2>&1
+            say "serial port output: $LOCAL/serial-port.txt"
+            code=3
+            ;;
+        deadline)
+            say "the run did not finish within --max-run plus ${DEADLINE_MARGIN}s"
+            code=3
+            ;;
+    esac
+
+    download_results
+    if $CREATED && ! $KEEP; then
+        delete_instance "$NAME" "$ZONE"
+        CREATED=false
+    fi
+    if [ "$OUTCOME" = done ]; then
+        done_status=$(sed -n 's/^status=//p' "$LOCAL/results/DONE" 2>/dev/null)
+        reason=$(sed -n 's/^reason=//p' "$LOCAL/results/DONE" 2>/dev/null)
+        if $DRY; then
+            done_status=ok
+            reason="dry run"
+        fi
+        say "run finished: $reason"
+        [ "$done_status" = ok ] || code=1
+    fi
+    report
+    exit "$code"
+}
+
+cleanup() {
+    resolve_project
+    instances=$(gc compute instances list --filter="labels.$LABEL=1" --format='value(name,zone.basename())') ||
+        die "cannot list instances"
+    echo "$instances" | while read -r name zone _; do
+        [ -n "$name" ] && delete_instance "$name" "$zone"
+    done
+    disks=$(gc compute disks list --filter="name~^$LABEL-" --format='value(name,zone.basename())') ||
+        die "cannot list disks"
+    echo "$disks" | while read -r name zone _; do
+        if [ -n "$name" ]; then
+            say "deleting disk $name ($zone)"
+            gc compute disks delete "$name" --zone="$zone" --quiet >/dev/null ||
+                say "warning: could not delete disk $name"
+        fi
+    done
+    say "cleanup done"
+}
+
+case $COMMAND in
+    build)
+        check_profile
+        stage
+        ;;
+    run) run ;;
+    cleanup) cleanup ;;
+esac
