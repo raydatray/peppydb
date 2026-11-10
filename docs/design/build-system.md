@@ -110,7 +110,7 @@ do not use a configuration flag.
   that `perf` profiles have symbols, inlined frames, and cheap stack walks.
   Frame pointers change the code slightly, so reference measurements come
   only from `@build/mode/release`. `tools/gcp-bench --profile` selects this
-  mode ([plan 0024](../plans/0024-gcp-remote-bench.md)).
+  mode ([remote benchmarks](remote-benchmarks.md)).
 - **Applies to future switches.** A build-wide mode, such as running
   concurrency tests under the shuttle scheduler, should be a constraint on a
   platform too. It must also be a real feature, not `cfg(test)`, because
