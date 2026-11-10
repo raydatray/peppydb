@@ -1,0 +1,43 @@
+#!/bin/sh
+# A stand-in for bpftrace in offline tests (plan 0024). It records its
+# arguments in $PEPPYDB_FAKE_LOG, runs the -c command (split on spaces, as
+# bpftrace does), writes a map print in bpftrace's format to the -o file,
+# and exits 0 whatever the command returned, as bpftrace does.
+echo "bpftrace $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+[ "$1" = --version ] && {
+    echo "bpftrace v0.0.fake"
+    exit 0
+}
+out=/dev/stdout
+command=
+while [ $# -gt 1 ]; do
+    case $1 in
+        -o) out=$2; shift 2 ;;
+        -c) command=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+# shellcheck disable=SC2086 # split on spaces by design
+$command
+cat >"$out" <<'EOF'
+@offcpu_us[
+    __schedule+1260
+    schedule+44
+    futex_wait+100
+, 
+    std::sys::sync::mutex::futex::Mutex::lock_contended+52
+    bf_tree::tree::Tree::put+120
+    main+20
+]: 1500
+
+@offcpu_us[
+    __schedule+1260
+    schedule+44
+    futex_wait+100
+, 
+    std::sys::sync::mutex::futex::Mutex::lock_contended+52
+    bf_tree::tree::Tree::put+120
+    main+20
+]: 500
+EOF
+exit 0

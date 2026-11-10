@@ -215,22 +215,136 @@ write_env() {
     } >"$RESULTS/env.txt" 2>&1
 }
 
-# Profiler hooks. Plan 0024 diff 5 adds the profilers; until then only
-# "none" exists.
-env_extra() { :; }
-prepare_profiling() { :; }
-known_profiler() { [ "$1" = none ]; }
+# --- Profilers. C4D exposes no hardware counters (no PMU), so every
+# profiler uses software events and tracepoints.
+PROFILERS="none stat record record-dwarf offcpu sched"
 
-# run_profiled PROFILER NAME BIN ARGS...: run one step under one profiler,
-# with stdout and stderr in RESULTS/NAME.log or RESULTS/NAME.PROFILER.log.
-# Prints the files to upload, one per line, on fd 3.
+known_profiler() {
+    for known in $PROFILERS; do
+        [ "$1" = "$known" ] && return 0
+    done
+    return 1
+}
+
+# pmu_state: "available" if perf can count CPU cycles.
+pmu_state() {
+    if command -v perf >/dev/null 2>&1 &&
+        perf stat -x, -e cycles true 2>&1 | grep -q '^[0-9]'; then
+        echo available
+    else
+        echo unavailable
+    fi
+}
+
+env_extra() {
+    echo "profile=$PROFILE"
+    echo "pmu=$(pmu_state)"
+    for setting in kernel.perf_event_paranoid kernel.kptr_restrict; do
+        echo "$setting=$(sysctl -n "$setting" 2>/dev/null)"
+    done
+    if command -v perf >/dev/null 2>&1; then
+        section "perf version"
+        perf version
+    fi
+    if command -v bpftrace >/dev/null 2>&1; then
+        section "bpftrace version"
+        bpftrace --version
+    fi
+}
+
+# prepare_profiling: kernel settings and tool checks for the chosen
+# profilers.
+prepare_profiling() {
+    [ "$PROFILE" = none ] && return 0
+    # Kernel frames and addresses in profiles. A failure is recorded in
+    # env.txt but does not stop the run.
+    sysctl -q -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 ||
+        log "warning: cannot set perf sysctls"
+    for profiler in $(echo "$PROFILE" | tr , ' '); do
+        case $profiler in
+            stat | record | record-dwarf | sched)
+                perf version >/dev/null 2>&1 || {
+                    log "perf does not run"
+                    return 1
+                }
+                ;;
+            offcpu)
+                command -v bpftrace >/dev/null 2>&1 &&
+                    [ -f "$ARTIFACTS/offcpu.bt" ] && [ -f "$ARTIFACTS/fold-stacks.py" ] || {
+                    log "offcpu needs bpftrace, offcpu.bt, and fold-stacks.py"
+                    return 1
+                }
+                ;;
+        esac
+    done
+}
+
+# compress FILE: FILE.zst in place of FILE; prints the new name.
+compress() {
+    zstd -q -f --rm "$1" -o "$1.zst" && echo "$1.zst"
+}
+
+# run_profiled PROFILER NAME BIN ARGS...: run one step under one profiler.
+# The test output goes to RESULTS/NAME.log (no profiler) or
+# RESULTS/NAME.PROFILER.log. Prints the files to upload, one per line, on
+# fd 3. Returns the step's exit code.
 run_profiled() {
     profiler=$1 name=$2 bin=$3
     shift 3
-    "$ARTIFACTS/bin/$bin" "$@" >"$RESULTS/$name.log" 2>&1
-    rc=$?
-    echo "$RESULTS/$name.log" >&3
-    return "$rc"
+    exe=$ARTIFACTS/bin/$bin
+    base=$RESULTS/$name
+    log_file=$(step_log "$name" "$profiler")
+    echo "$log_file" >&3
+    case $profiler in
+        none)
+            "$exe" "$@" >"$log_file" 2>&1
+            ;;
+        stat)
+            perf stat -x, -o "$base.stat.csv" \
+                -e task-clock,context-switches,cpu-migrations,page-faults \
+                -- "$exe" "$@" >"$log_file" 2>&1
+            rc=$?
+            echo "$base.stat.csv" >&3
+            return "$rc"
+            ;;
+        record | record-dwarf)
+            call_graph=fp
+            [ "$profiler" = record-dwarf ] && call_graph=dwarf
+            data=$base.$profiler.perf.data
+            perf record -q -e cpu-clock -F 999 --call-graph "$call_graph" -o "$data" \
+                -- "$exe" "$@" >"$log_file" 2>&1
+            rc=$?
+            perf report -i "$data" --stdio --no-children --percent-limit 0.5 \
+                >"$base.$profiler.report.txt" 2>&1
+            perf script -i "$data" 2>/dev/null >"$base.$profiler.perf-script.txt"
+            echo "$base.$profiler.report.txt" >&3
+            compress "$base.$profiler.perf-script.txt" >&3
+            compress "$data" >&3
+            return "$rc"
+            ;;
+        offcpu)
+            # bpftrace -c splits the command on spaces, as the suite does.
+            bpftrace -q -o "$base.offcpu.bpftrace.txt" -c "$exe $*" "$ARTIFACTS/offcpu.bt" \
+                >"$log_file" 2>&1
+            rc=$?
+            python3 "$ARTIFACTS/fold-stacks.py" <"$base.offcpu.bpftrace.txt" >"$base.offcpu.folded"
+            echo "$base.offcpu.folded" >&3
+            compress "$base.offcpu.bpftrace.txt" >&3
+            return "$rc"
+            ;;
+        sched)
+            data=$base.sched.perf.data
+            perf sched record -q -o "$data" -- "$exe" "$@" >"$log_file" 2>&1
+            rc=$?
+            {
+                perf sched -i "$data" latency --sort max
+                perf sched -i "$data" timehist --summary
+            } >"$base.sched.txt" 2>&1
+            echo "$base.sched.txt" >&3
+            compress "$data" >&3
+            return "$rc"
+            ;;
+    esac
 }
 
 # step_log NAME PROFILER: the file with the step's test output.
@@ -243,10 +357,15 @@ step_log() {
 }
 
 # check_output NAME LOG: libtest output checks. Every step must run at least
-# one test. A preflight step fails if a test reports a skip.
+# one test, and no test may fail (some profilers do not pass on the exit
+# code). A preflight step fails if a test reports a skip.
 check_output() {
     if grep -q '^running 0 tests' "$2"; then
         echo "no tests matched"
+        return 1
+    fi
+    if grep -q '^test result: FAILED' "$2"; then
+        echo "tests failed"
         return 1
     fi
     case $1 in

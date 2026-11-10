@@ -28,7 +28,7 @@ echo "\$0 \$*" >>"$CASE_DIR/calls"
 env | grep '^PEPPYDB_BENCH' | sort >>"$CASE_DIR/calls"
 case $2 in
     empty) echo "running 0 tests"; echo; echo "test result: ok. 0 passed; 0 failed"; exit 0 ;;
-    fail) echo "running 1 test"; echo "test x ... FAILED"; exit 101 ;;
+    fail) echo "running 1 test"; echo "test x ... FAILED"; echo; echo "test result: FAILED. 0 passed; 1 failed"; exit 101 ;;
     skip) echo "running 1 test"; echo "skipped: /tmp rejects O_DIRECT" >&2 ;;
     *) echo "running 1 test" ;;
 esac
@@ -238,6 +238,63 @@ echo "bench-three missing --ignored" >>"$CASE_DIR/stage/suite.txt"
 publish
 run_remote
 expect_done failed "invalid suite"
+
+# --- Every profiler wraps every non-preflight step once.
+new_case profiled
+cp "$ROOT/tools/gcp/offcpu.bt" "$ROOT/tools/gcp/fold-stacks.py" "$CASE_DIR/stage/"
+publish
+echo "none,stat,record,record-dwarf,offcpu,sched" >"$CASE_DIR/metadata/instance_attributes_peppydb-profile"
+run_remote
+expect_done ok "all steps passed"
+expect_status preflight-store none 0
+for profiler in stat record record-dwarf offcpu sched; do
+    grep -q "^preflight-store $profiler " "$(results)/status" && fail "preflight ran under $profiler"
+    expect_status bench-one "$profiler" 0
+    expect_file "bench-one.$profiler.log"
+done
+expect_status bench-one none 0
+for file in bench-one.log bench-one.stat.csv \
+    bench-one.record.report.txt bench-one.record.perf-script.txt.zst bench-one.record.perf.data.zst \
+    bench-one.record-dwarf.report.txt bench-one.record-dwarf.perf.data.zst \
+    bench-one.offcpu.folded bench-one.offcpu.bpftrace.txt.zst \
+    bench-one.sched.txt bench-one.sched.perf.data.zst; do
+    expect_file "$file"
+done
+expect_log "perf record -q -e cpu-clock -F 999 --call-graph fp"
+expect_log "perf record -q -e cpu-clock -F 999 --call-graph dwarf"
+expect_log "perf stat -x, -o .*-e task-clock,context-switches,cpu-migrations,page-faults"
+expect_log "perf sched record -q -o"
+expect_log "bpftrace -q -o .* -c .*/bin/tree --ignored --nocapture tests::bench::"
+grep -qx "main;bf_tree::tree::Tree::put;std::sys::sync::mutex::futex::Mutex::lock_contended;futex_wait_\[k\];schedule_\[k\];__schedule_\[k\] 2000" \
+    "$(results)/bench-one.offcpu.folded" || fail "folded stacks: $(cat "$(results)/bench-one.offcpu.folded")"
+grep -q "^pmu=unavailable$" "$(results)/env.txt" || fail "env.txt pmu"
+grep -q "^profile=none,stat,record,record-dwarf,offcpu,sched$" "$(results)/env.txt" || fail "env.txt profile"
+# The binaries ran under the profilers: one call per profiler, plus preflight.
+[ "$(grep -c "tree --ignored --nocapture tests::bench::" "$CASE_DIR/calls")" = 6 ] || fail "bench-one did not run 6 times"
+
+# --- A failing test under bpftrace (which exits 0) still fails the step.
+new_case offcpu-fails
+fake_binary tree fail
+cp "$ROOT/tools/gcp/offcpu.bt" "$ROOT/tools/gcp/fold-stacks.py" "$CASE_DIR/stage/"
+publish
+echo offcpu >"$CASE_DIR/metadata/instance_attributes_peppydb-profile"
+run_remote
+expect_done failed "some steps failed"
+grep -q "^bench-one offcpu 1 .* tests-failed$" "$(results)/status" || fail "offcpu failure not detected"
+
+# --- offcpu without its script cannot run.
+new_case offcpu-no-script
+publish
+echo offcpu >"$CASE_DIR/metadata/instance_attributes_peppydb-profile"
+run_remote
+expect_done failed "profiling setup"
+
+# --- An unknown profiler is refused.
+new_case unknown-profiler
+publish
+echo "record,flamegraph" >"$CASE_DIR/metadata/instance_attributes_peppydb-profile"
+run_remote
+expect_done failed "invalid suite or profiler"
 
 # --- No metadata: nothing can be uploaded, but the script exits.
 new_case no-metadata

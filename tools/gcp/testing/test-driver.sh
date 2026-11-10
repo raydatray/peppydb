@@ -335,6 +335,42 @@ for expected in "+ gcloud storage buckets describe" "+ gcloud storage cp --quiet
     expect_output "$expected"
 done
 
+# --- A profiled run, end to end: the profile build mode, the off-CPU files
+# staged, the profiler list passed to the VM, and no PMU flag.
+new_case profiled
+# shellcheck disable=SC2046
+driver $(run_args) --profile none,record,offcpu
+expect_code 0
+expect_output "not reference numbers"
+expect_not_called "performance-monitoring-unit"
+grep -qx "build_mode=profile" "$(run_dir)/artifacts/MANIFEST" || fail "MANIFEST build_mode"
+grep -q "^sha256 offcpu.bt " "$(run_dir)/artifacts/MANIFEST" || fail "offcpu.bt not staged"
+grep -q "^sha256 fold-stacks.py " "$(run_dir)/artifacts/MANIFEST" || fail "fold-stacks.py not staged"
+grep -qx "none,record,offcpu" "$(run_dir)/profile" || fail "profile metadata"
+for file in bench-engine.log bench-engine.record.report.txt bench-engine.offcpu.folded; do
+    [ -f "$(run_dir)/results/$file" ] || fail "missing result $file"
+done
+
+# --- Unknown and repeated profilers are refused before anything else.
+new_case bad-profile
+# shellcheck disable=SC2046
+driver $(run_args) --profile record,flamegraph
+expect_code 2
+expect_output "unknown profiler flamegraph"
+[ ! -f "$CASE_DIR/fake.log" ] || fail "gcloud was called"
+# shellcheck disable=SC2046
+driver $(run_args) --profile record,record
+expect_code 2
+expect_output "listed twice"
+
+# --- A profiled dry run builds in profile mode.
+new_case profiled-dry-run
+# shellcheck disable=SC2046
+driver $(run_args) --profile stat --dry-run
+expect_code 0
+grep -qx "build_mode=profile" "$(run_dir)/artifacts/MANIFEST" || fail "MANIFEST build_mode"
+! grep -q "performance-monitoring-unit" "$CASE_DIR/output" || fail "PMU flag passed"
+
 # --- Without the test setting, a build on this host is refused unless it is
 # x86_64 Ubuntu 24.04.
 new_case host-check

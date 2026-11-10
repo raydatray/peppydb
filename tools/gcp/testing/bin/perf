@@ -1,0 +1,52 @@
+#!/bin/sh
+# A stand-in for perf in offline tests (plan 0024). It records its arguments
+# in $PEPPYDB_FAKE_LOG, runs the command after "--", and writes fake output
+# files. Like C4D, it has no hardware counters: "stat -e cycles" reports
+# "<not supported>".
+echo "perf $*" >>"${PEPPYDB_FAKE_LOG:-/dev/null}"
+
+# run_after_dashes ARGS...: find -o FILE, then run everything after "--".
+run_after_dashes() {
+    out=perf.data
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -o) out=$2; shift 2 ;;
+            --) shift; break ;;
+            *) shift ;;
+        esac
+    done
+    "$@"
+    rc=$?
+    echo "fake perf data" >"$out"
+    return "$rc"
+}
+
+case $1 in
+    version) echo "perf version 0.0.fake" ;;
+    stat)
+        case "$*" in
+            *"-e cycles true"*)
+                echo "<not supported>,,cycles,0,100.00,," >&2
+                exit 0
+                ;;
+        esac
+        shift
+        run_after_dashes "$@"
+        rc=$?
+        echo "12.5,msec,task-clock,12500000,100.00,," >"$out"
+        exit "$rc"
+        ;;
+    record) shift; run_after_dashes "$@" ;;
+    report) echo "# fake perf report" ;;
+    script) echo "fake perf script output" ;;
+    sched)
+        shift
+        if [ "$1" = record ]; then
+            shift
+            run_after_dashes "$@"
+        else
+            echo "fake perf sched $*"
+        fi
+        ;;
+    *) exit 1 ;;
+esac
