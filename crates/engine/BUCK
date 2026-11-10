@@ -11,4 +11,16 @@ peppy_rust_library(
     ],
     test_deps = ["//third-party/rust:tempfile"],
     visibility = ["PUBLIC"],
+    # `Db::fail_next_wal_sync`, for the server's fail-stop tests only
+    # (plan 0026). Production targets never enable it.
+    feature_variants = {
+        "fault-injection": {
+            "deps": [
+                "//crates/bf-tree:bf-tree",
+                "//crates/engine-wal:engine-wal-fault-injection",
+                "//third-party/rust:thiserror",
+            ],
+            "visibility": ["//crates/server:server-unittest"],
+        },
+    },
 )

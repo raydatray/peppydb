@@ -10,4 +10,14 @@ peppy_rust_library(
     ],
     test_deps = ["//third-party/rust:tempfile"],
     visibility = ["//crates/engine:"],
+    # `fail_next_sync` for the engine's fault-injection variant (plan 0026).
+    feature_variants = {
+        "fault-injection": {
+            "deps": [
+                "//third-party/rust:crc32c",
+                "//third-party/rust:thiserror",
+            ],
+            "visibility": ["//crates/engine:"],
+        },
+    },
 )
