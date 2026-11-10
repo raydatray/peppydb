@@ -43,7 +43,10 @@ mod linux {
                 std::fs::remove_file(&path).unwrap();
                 Some((dir, path))
             }
-            Err(StoreError::Io { kind, .. }) if kind == std::io::ErrorKind::InvalidInput => {
+            Err(StoreError::Io {
+                kind: std::io::ErrorKind::InvalidInput,
+                ..
+            }) => {
                 eprintln!("skipped: {} rejects O_DIRECT", dir.path().display());
                 None
             }
