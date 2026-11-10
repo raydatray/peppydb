@@ -21,6 +21,15 @@ RELEASE_FLAGS = [
     "-Coverflow-checks=off",
 ]
 
+# For `@build/mode/profile` (plan 0024): symbols, inlined frames, and source
+# lines for profilers, and frame pointers for cheap stack walks. Frame
+# pointers change the code slightly, so reference numbers come only from
+# release builds.
+PROFILE_FLAGS = [
+    "-Cdebuginfo=line-tables-only",
+    "-Cforce-frame-pointers=yes",
+]
+
 peppy_rust_toolchain(
     name = "rust",
     default_edition = "2024",
@@ -30,6 +39,7 @@ peppy_rust_toolchain(
     # `--cap-lints=allow` by the prelude and are not affected.
     rustc_flags = ["-Dunsafe_code"] + select({
         "root//build:mode-release": RELEASE_FLAGS,
+        "root//build:mode-profile": RELEASE_FLAGS + PROFILE_FLAGS,
         "DEFAULT": [],
     }),
     # `cargo clippy -- -D warnings`. Also makes warnings fail normal builds.
