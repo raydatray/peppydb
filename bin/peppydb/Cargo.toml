@@ -11,7 +11,7 @@ name = "peppydb"
 path = "src/main.rs"
 
 [dependencies]
-server = { path = "../../crates/server" }
+server = { path = "../../lib/server" }
 
 [lints]
 workspace = true

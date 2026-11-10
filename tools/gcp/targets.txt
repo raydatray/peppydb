@@ -1,8 +1,8 @@
 # Binaries that suites in tools/gcp/suites/ may name (plan 0024), and the
 # Buck2 targets that build them. One "NAME TARGET" per line. tools/gcp-bench
 # builds only the targets that the chosen suite uses.
-bf-tree-unittest                 //crates/bf-tree:bf-tree-unittest
-bf-tree-circular-buffer-unittest //crates/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest
-bf-tree-store-unittest           //crates/bf-tree-store:bf-tree-store-unittest
-engine-unittest                  //crates/engine:engine-unittest
-engine-wal-unittest              //crates/engine-wal:engine-wal-unittest
+bf-tree-unittest                 //lib/bf-tree:bf-tree-unittest
+bf-tree-circular-buffer-unittest //lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest
+bf-tree-store-unittest           //lib/bf-tree-store:bf-tree-store-unittest
+engine-unittest                  //lib/engine:engine-unittest
+engine-wal-unittest              //lib/engine-wal:engine-wal-unittest

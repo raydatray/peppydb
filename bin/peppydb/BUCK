@@ -3,5 +3,5 @@ rust_binary(
     name = "peppydb",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
-    deps = ["//crates/server:server"],
+    deps = ["//lib/server:server"],
 )
