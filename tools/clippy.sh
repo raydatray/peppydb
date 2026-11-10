@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 tools/check-tools
 tools/check-unsafe
 
-targets=$(tools/buck2 uquery 'kind("rust_(library|binary|test)", //crates/... + //bin/...)' 2>/dev/null \
+targets=$(tools/buck2 uquery 'kind("rust_(library|binary|test)", //crates/... + //bin/... + //tools/...)' 2>/dev/null \
     | sed 's/$/[clippy.txt]/')
 outputs=$(tools/buck2 build $targets --show-full-output 2>/dev/null | awk '{print $2}')
 

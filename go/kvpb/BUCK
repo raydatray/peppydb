@@ -1,0 +1,15 @@
+# Generated Go code for proto/peppydb/kv/v1 (plan 0026). tools/gen-proto
+# writes the *.pb.go files; do not edit them.
+go_library(
+    name = "kvpb",
+    package_name = "peppydb/go/kvpb",
+    srcs = glob(["*.pb.go"]),
+    deps = [
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/status",
+        "//third-party/go:google.golang.org/protobuf/reflect/protoreflect",
+        "//third-party/go:google.golang.org/protobuf/runtime/protoimpl",
+    ],
+    visibility = ["//go/..."],
+)

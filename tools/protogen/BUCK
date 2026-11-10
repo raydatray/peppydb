@@ -1,0 +1,12 @@
+# Writes the Rust code for proto/ from a descriptor set that buf built.
+# tools/gen-proto runs it; see docs/design/server.md.
+rust_binary(
+    name = "protogen",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/main.rs",
+    deps = [
+        "//third-party/rust:prost",
+        "//third-party/rust:prost-types",
+        "//third-party/rust:tonic-prost-build",
+    ],
+)

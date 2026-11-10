@@ -124,6 +124,10 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   package directory has a `BUCK` file whose `package_name` is
   `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
   work directly in `go/`.
+- The API lives in `proto/`. After changing a `.proto` file, run
+  `tools/gen-proto` and commit the generated Rust (`crates/server-proto`)
+  and Go (`go/kvpb`) code. It lints with buf and checks for breaking
+  changes against the parent revision.
 - To add a Go dependency, import it, run `go get` and `go mod tidy` in `go/`,
   run `tools/gobuckify-remote`, and add `//third-party/go:<import path>` to
   the `deps` of the packages that use it.
@@ -144,6 +148,7 @@ tools/clippy.sh
 tools/buck2 test //crates/... //bin/... //go/...
 tools/autocargo --check
 tools/gobuckify-remote --check
+tools/gen-proto --check
 cargo test --workspace --locked
 (cd go && go vet ./... && go test ./...)
 ```

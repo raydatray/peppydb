@@ -2,6 +2,23 @@
 # Run tools/gobuckify-remote after changing go/go.mod.
 
 http_archive(
+    name = "golang.org/x/net__srcs",
+    urls = ["https://proxy.golang.org/golang.org/x/net/@v/v0.61.0.zip"],
+    sha256 = "f6843a98d608298e48a6ca287292c9a6fae066284050ce174d5ffb781c9b3dcf",
+    strip_prefix = "golang.org/x/net@v0.61.0",
+    sub_targets = {
+        "http/httpguts": ["http/httpguts/guts.go", "http/httpguts/httplex.go"],
+        "http2": ["http2/ascii.go", "http2/ciphers.go", "http2/client_conn_pool.go", "http2/client_priority_go126.go", "http2/client_priority_go127.go", "http2/clientconn.go", "http2/config.go", "http2/config_go125.go", "http2/config_go126.go", "http2/databuffer.go", "http2/errors.go", "http2/flow.go", "http2/frame.go", "http2/gotrack.go", "http2/http2.go", "http2/pipe.go", "http2/server.go", "http2/server_common.go", "http2/server_wrap.go", "http2/transport.go", "http2/transport_common.go", "http2/transport_wrap.go", "http2/unencrypted.go", "http2/write.go", "http2/writesched.go", "http2/writesched_common.go", "http2/writesched_priority_rfc7540.go", "http2/writesched_priority_rfc9218.go", "http2/writesched_random.go", "http2/writesched_roundrobin.go"],
+        "http2/hpack": ["http2/hpack/encode.go", "http2/hpack/gen.go", "http2/hpack/hpack.go", "http2/hpack/huffman.go", "http2/hpack/static_table.go", "http2/hpack/tables.go"],
+        "idna": ["idna/idna.go", "idna/punycode.go", "idna/tables15.0.0.go", "idna/tables17.0.0.go", "idna/trie.go", "idna/trieval.go"],
+        "internal/httpcommon": ["internal/httpcommon/ascii.go", "internal/httpcommon/gzip.go", "internal/httpcommon/headermap.go", "internal/httpcommon/request.go"],
+        "internal/httpsfv": ["internal/httpsfv/httpsfv.go"],
+        "internal/timeseries": ["internal/timeseries/timeseries.go"],
+        "trace": ["trace/events.go", "trace/histogram.go", "trace/trace.go"],
+    },
+)
+
+http_archive(
     name = "golang.org/x/sync__srcs",
     urls = ["https://proxy.golang.org/golang.org/x/sync/@v/v0.24.0.zip"],
     sha256 = "ca3fcf3ea8259e75891f7947e1a816a5b89402c542d45d8bbbd9e061b0c58019",
@@ -11,9 +28,1055 @@ http_archive(
     },
 )
 
+http_archive(
+    name = "golang.org/x/sys__srcs",
+    urls = ["https://proxy.golang.org/golang.org/x/sys/@v/v0.49.0.zip"],
+    sha256 = "e73a06591ca0d7016ce3ccb45c36a8ed7128468aecc1a357f94d815c760c6b31",
+    strip_prefix = "golang.org/x/sys@v0.49.0",
+    sub_targets = {
+        "unix": ["unix/affinity_linux.go", "unix/aliases.go", "unix/asm_aix_ppc64.s", "unix/asm_bsd_386.s", "unix/asm_bsd_amd64.s", "unix/asm_bsd_arm.s", "unix/asm_bsd_arm64.s", "unix/asm_bsd_ppc64.s", "unix/asm_bsd_riscv64.s", "unix/asm_linux_386.s", "unix/asm_linux_amd64.s", "unix/asm_linux_arm.s", "unix/asm_linux_arm64.s", "unix/asm_linux_loong64.s", "unix/asm_linux_mips64x.s", "unix/asm_linux_mipsx.s", "unix/asm_linux_ppc64x.s", "unix/asm_linux_riscv64.s", "unix/asm_linux_s390x.s", "unix/asm_linux_sparc64.s", "unix/asm_openbsd_mips64.s", "unix/asm_solaris_amd64.s", "unix/asm_zos_s390x.s", "unix/auxv.go", "unix/auxv_unsupported.go", "unix/bluetooth_linux.go", "unix/bpxsvc_zos.go", "unix/bpxsvc_zos.s", "unix/cap_freebsd.go", "unix/constants.go", "unix/dev_aix_ppc.go", "unix/dev_aix_ppc64.go", "unix/dev_darwin.go", "unix/dev_dragonfly.go", "unix/dev_freebsd.go", "unix/dev_linux.go", "unix/dev_netbsd.go", "unix/dev_openbsd.go", "unix/dev_zos.go", "unix/dirent.go", "unix/endian_big.go", "unix/endian_little.go", "unix/env_unix.go", "unix/fcntl.go", "unix/fcntl_darwin.go", "unix/fcntl_linux_32bit.go", "unix/fdset.go", "unix/gccgo.go", "unix/gccgo_linux_amd64.go", "unix/ifreq_linux.go", "unix/ioctl_linux.go", "unix/ioctl_signed.go", "unix/ioctl_unsigned.go", "unix/ioctl_zos.go", "unix/mkasm.go", "unix/mkpost.go", "unix/mksyscall.go", "unix/mksyscall_aix_ppc.go", "unix/mksyscall_aix_ppc64.go", "unix/mksyscall_solaris.go", "unix/mksyscall_zos_s390x.go", "unix/mksysctl_openbsd.go", "unix/mksysnum.go", "unix/mmap_nomremap.go", "unix/mremap.go", "unix/pagesize_unix.go", "unix/pledge_openbsd.go", "unix/ptrace_darwin.go", "unix/ptrace_ios.go", "unix/ptrace_zos.go", "unix/ptrace_zos_singlestep.go", "unix/race.go", "unix/race0.go", "unix/readdirent_getdents.go", "unix/readdirent_getdirentries.go", "unix/readv_unix.go", "unix/sockcmsg_dragonfly.go", "unix/sockcmsg_linux.go", "unix/sockcmsg_unix.go", "unix/sockcmsg_unix_other.go", "unix/sockcmsg_zos.go", "unix/symaddr_zos_s390x.s", "unix/syscall.go", "unix/syscall_aix.go", "unix/syscall_aix_ppc.go", "unix/syscall_aix_ppc64.go", "unix/syscall_bsd.go", "unix/syscall_darwin.go", "unix/syscall_darwin_amd64.go", "unix/syscall_darwin_arm64.go", "unix/syscall_darwin_libSystem.go", "unix/syscall_dragonfly.go", "unix/syscall_dragonfly_amd64.go", "unix/syscall_freebsd.go", "unix/syscall_freebsd_386.go", "unix/syscall_freebsd_amd64.go", "unix/syscall_freebsd_arm.go", "unix/syscall_freebsd_arm64.go", "unix/syscall_freebsd_riscv64.go", "unix/syscall_hurd.go", "unix/syscall_hurd_386.go", "unix/syscall_illumos.go", "unix/syscall_linux.go", "unix/syscall_linux_386.go", "unix/syscall_linux_alarm.go", "unix/syscall_linux_amd64.go", "unix/syscall_linux_amd64_gc.go", "unix/syscall_linux_arm.go", "unix/syscall_linux_arm64.go", "unix/syscall_linux_gc.go", "unix/syscall_linux_gc_386.go", "unix/syscall_linux_gc_arm.go", "unix/syscall_linux_gccgo_386.go", "unix/syscall_linux_gccgo_arm.go", "unix/syscall_linux_loong64.go", "unix/syscall_linux_mips64x.go", "unix/syscall_linux_mipsx.go", "unix/syscall_linux_ppc.go", "unix/syscall_linux_ppc64x.go", "unix/syscall_linux_riscv64.go", "unix/syscall_linux_s390x.go", "unix/syscall_linux_sparc64.go", "unix/syscall_netbsd.go", "unix/syscall_netbsd_386.go", "unix/syscall_netbsd_amd64.go", "unix/syscall_netbsd_arm.go", "unix/syscall_netbsd_arm64.go", "unix/syscall_openbsd.go", "unix/syscall_openbsd_386.go", "unix/syscall_openbsd_amd64.go", "unix/syscall_openbsd_arm.go", "unix/syscall_openbsd_arm64.go", "unix/syscall_openbsd_libc.go", "unix/syscall_openbsd_mips64.go", "unix/syscall_openbsd_ppc64.go", "unix/syscall_openbsd_riscv64.go", "unix/syscall_solaris.go", "unix/syscall_solaris_amd64.go", "unix/syscall_unix.go", "unix/syscall_unix_gc.go", "unix/syscall_zos_s390x.go", "unix/sysvshm_linux.go", "unix/sysvshm_unix.go", "unix/sysvshm_unix_other.go", "unix/timestruct.go", "unix/types_aix.go", "unix/types_darwin.go", "unix/types_dragonfly.go", "unix/types_freebsd.go", "unix/types_netbsd.go", "unix/types_openbsd.go", "unix/types_solaris.go", "unix/unveil_openbsd.go", "unix/vgetrandom_linux.go", "unix/vgetrandom_unsupported.go", "unix/xattr_bsd.go", "unix/zerrors_aix_ppc.go", "unix/zerrors_aix_ppc64.go", "unix/zerrors_darwin_amd64.go", "unix/zerrors_darwin_arm64.go", "unix/zerrors_dragonfly_amd64.go", "unix/zerrors_freebsd_386.go", "unix/zerrors_freebsd_amd64.go", "unix/zerrors_freebsd_arm.go", "unix/zerrors_freebsd_arm64.go", "unix/zerrors_freebsd_riscv64.go", "unix/zerrors_linux.go", "unix/zerrors_linux_386.go", "unix/zerrors_linux_amd64.go", "unix/zerrors_linux_arm.go", "unix/zerrors_linux_arm64.go", "unix/zerrors_linux_loong64.go", "unix/zerrors_linux_mips.go", "unix/zerrors_linux_mips64.go", "unix/zerrors_linux_mips64le.go", "unix/zerrors_linux_mipsle.go", "unix/zerrors_linux_ppc.go", "unix/zerrors_linux_ppc64.go", "unix/zerrors_linux_ppc64le.go", "unix/zerrors_linux_riscv64.go", "unix/zerrors_linux_s390x.go", "unix/zerrors_linux_sparc64.go", "unix/zerrors_netbsd_386.go", "unix/zerrors_netbsd_amd64.go", "unix/zerrors_netbsd_arm.go", "unix/zerrors_netbsd_arm64.go", "unix/zerrors_openbsd_386.go", "unix/zerrors_openbsd_amd64.go", "unix/zerrors_openbsd_arm.go", "unix/zerrors_openbsd_arm64.go", "unix/zerrors_openbsd_mips64.go", "unix/zerrors_openbsd_ppc64.go", "unix/zerrors_openbsd_riscv64.go", "unix/zerrors_solaris_amd64.go", "unix/zerrors_zos_s390x.go", "unix/zptrace_armnn_linux.go", "unix/zptrace_linux_arm64.go", "unix/zptrace_mipsnn_linux.go", "unix/zptrace_mipsnnle_linux.go", "unix/zptrace_x86_linux.go", "unix/zsymaddr_zos_s390x.s", "unix/zsyscall_aix_ppc.go", "unix/zsyscall_aix_ppc64.go", "unix/zsyscall_aix_ppc64_gc.go", "unix/zsyscall_aix_ppc64_gccgo.go", "unix/zsyscall_darwin_amd64.go", "unix/zsyscall_darwin_amd64.s", "unix/zsyscall_darwin_arm64.go", "unix/zsyscall_darwin_arm64.s", "unix/zsyscall_dragonfly_amd64.go", "unix/zsyscall_freebsd_386.go", "unix/zsyscall_freebsd_amd64.go", "unix/zsyscall_freebsd_arm.go", "unix/zsyscall_freebsd_arm64.go", "unix/zsyscall_freebsd_riscv64.go", "unix/zsyscall_illumos_amd64.go", "unix/zsyscall_linux.go", "unix/zsyscall_linux_386.go", "unix/zsyscall_linux_amd64.go", "unix/zsyscall_linux_arm.go", "unix/zsyscall_linux_arm64.go", "unix/zsyscall_linux_loong64.go", "unix/zsyscall_linux_mips.go", "unix/zsyscall_linux_mips64.go", "unix/zsyscall_linux_mips64le.go", "unix/zsyscall_linux_mipsle.go", "unix/zsyscall_linux_ppc.go", "unix/zsyscall_linux_ppc64.go", "unix/zsyscall_linux_ppc64le.go", "unix/zsyscall_linux_riscv64.go", "unix/zsyscall_linux_s390x.go", "unix/zsyscall_linux_sparc64.go", "unix/zsyscall_netbsd_386.go", "unix/zsyscall_netbsd_amd64.go", "unix/zsyscall_netbsd_arm.go", "unix/zsyscall_netbsd_arm64.go", "unix/zsyscall_openbsd_386.go", "unix/zsyscall_openbsd_386.s", "unix/zsyscall_openbsd_amd64.go", "unix/zsyscall_openbsd_amd64.s", "unix/zsyscall_openbsd_arm.go", "unix/zsyscall_openbsd_arm.s", "unix/zsyscall_openbsd_arm64.go", "unix/zsyscall_openbsd_arm64.s", "unix/zsyscall_openbsd_mips64.go", "unix/zsyscall_openbsd_mips64.s", "unix/zsyscall_openbsd_ppc64.go", "unix/zsyscall_openbsd_ppc64.s", "unix/zsyscall_openbsd_riscv64.go", "unix/zsyscall_openbsd_riscv64.s", "unix/zsyscall_solaris_amd64.go", "unix/zsyscall_zos_s390x.go", "unix/zsysctl_openbsd_386.go", "unix/zsysctl_openbsd_amd64.go", "unix/zsysctl_openbsd_arm.go", "unix/zsysctl_openbsd_arm64.go", "unix/zsysctl_openbsd_mips64.go", "unix/zsysctl_openbsd_ppc64.go", "unix/zsysctl_openbsd_riscv64.go", "unix/zsysnum_darwin_amd64.go", "unix/zsysnum_darwin_arm64.go", "unix/zsysnum_dragonfly_amd64.go", "unix/zsysnum_freebsd_386.go", "unix/zsysnum_freebsd_amd64.go", "unix/zsysnum_freebsd_arm.go", "unix/zsysnum_freebsd_arm64.go", "unix/zsysnum_freebsd_riscv64.go", "unix/zsysnum_linux_386.go", "unix/zsysnum_linux_amd64.go", "unix/zsysnum_linux_arm.go", "unix/zsysnum_linux_arm64.go", "unix/zsysnum_linux_loong64.go", "unix/zsysnum_linux_mips.go", "unix/zsysnum_linux_mips64.go", "unix/zsysnum_linux_mips64le.go", "unix/zsysnum_linux_mipsle.go", "unix/zsysnum_linux_ppc.go", "unix/zsysnum_linux_ppc64.go", "unix/zsysnum_linux_ppc64le.go", "unix/zsysnum_linux_riscv64.go", "unix/zsysnum_linux_s390x.go", "unix/zsysnum_linux_sparc64.go", "unix/zsysnum_netbsd_386.go", "unix/zsysnum_netbsd_amd64.go", "unix/zsysnum_netbsd_arm.go", "unix/zsysnum_netbsd_arm64.go", "unix/zsysnum_openbsd_386.go", "unix/zsysnum_openbsd_amd64.go", "unix/zsysnum_openbsd_arm.go", "unix/zsysnum_openbsd_arm64.go", "unix/zsysnum_openbsd_mips64.go", "unix/zsysnum_openbsd_ppc64.go", "unix/zsysnum_openbsd_riscv64.go", "unix/zsysnum_zos_s390x.go", "unix/ztypes_aix_ppc.go", "unix/ztypes_aix_ppc64.go", "unix/ztypes_darwin_amd64.go", "unix/ztypes_darwin_arm64.go", "unix/ztypes_dragonfly_amd64.go", "unix/ztypes_freebsd_386.go", "unix/ztypes_freebsd_amd64.go", "unix/ztypes_freebsd_arm.go", "unix/ztypes_freebsd_arm64.go", "unix/ztypes_freebsd_riscv64.go", "unix/ztypes_linux.go", "unix/ztypes_linux_386.go", "unix/ztypes_linux_amd64.go", "unix/ztypes_linux_arm.go", "unix/ztypes_linux_arm64.go", "unix/ztypes_linux_loong64.go", "unix/ztypes_linux_mips.go", "unix/ztypes_linux_mips64.go", "unix/ztypes_linux_mips64le.go", "unix/ztypes_linux_mipsle.go", "unix/ztypes_linux_ppc.go", "unix/ztypes_linux_ppc64.go", "unix/ztypes_linux_ppc64le.go", "unix/ztypes_linux_riscv64.go", "unix/ztypes_linux_s390x.go", "unix/ztypes_linux_sparc64.go", "unix/ztypes_netbsd_386.go", "unix/ztypes_netbsd_amd64.go", "unix/ztypes_netbsd_arm.go", "unix/ztypes_netbsd_arm64.go", "unix/ztypes_openbsd_386.go", "unix/ztypes_openbsd_amd64.go", "unix/ztypes_openbsd_arm.go", "unix/ztypes_openbsd_arm64.go", "unix/ztypes_openbsd_mips64.go", "unix/ztypes_openbsd_ppc64.go", "unix/ztypes_openbsd_riscv64.go", "unix/ztypes_solaris_amd64.go", "unix/ztypes_zos_s390x.go"],
+    },
+)
+
+http_archive(
+    name = "golang.org/x/text__srcs",
+    urls = ["https://proxy.golang.org/golang.org/x/text/@v/v0.43.0.zip"],
+    sha256 = "b75131f628f6e2e4892fd638d33127e952a5027775e0162b94ba069cb4e13863",
+    strip_prefix = "golang.org/x/text@v0.43.0",
+    sub_targets = {
+        "secure/bidirule": ["secure/bidirule/bidirule.go"],
+        "transform": ["transform/transform.go"],
+        "unicode/bidi": ["unicode/bidi/bidi.go", "unicode/bidi/bracket.go", "unicode/bidi/core.go", "unicode/bidi/gen.go", "unicode/bidi/gen_ranges.go", "unicode/bidi/gen_trieval.go", "unicode/bidi/prop.go", "unicode/bidi/tables15.0.0.go", "unicode/bidi/tables17.0.0.go", "unicode/bidi/trieval.go"],
+        "unicode/norm": ["unicode/norm/composition.go", "unicode/norm/forminfo.go", "unicode/norm/input.go", "unicode/norm/iter.go", "unicode/norm/maketables.go", "unicode/norm/normalize.go", "unicode/norm/readwriter.go", "unicode/norm/tables15.0.0.go", "unicode/norm/tables17.0.0.go", "unicode/norm/transform.go", "unicode/norm/trie.go", "unicode/norm/triegen.go"],
+    },
+)
+
+http_archive(
+    name = "google.golang.org/genproto/googleapis/rpc__srcs",
+    urls = ["https://proxy.golang.org/google.golang.org/genproto/googleapis/rpc/@v/v0.0.0-20261012220534-4341edf3f941.zip"],
+    sha256 = "4728954680ee41fdb6d90adddcb175edb179afd93d1a7237e60b1e969626162c",
+    strip_prefix = "google.golang.org/genproto/googleapis/rpc@v0.0.0-20261012220534-4341edf3f941",
+    sub_targets = {
+        "status": ["status/status.pb.go"],
+    },
+)
+
+http_archive(
+    name = "google.golang.org/grpc__srcs",
+    urls = ["https://proxy.golang.org/google.golang.org/grpc/@v/v1.85.0.zip"],
+    sha256 = "bd1ce651075f55e5bad492f9e1ee7cc013f1b96770981556d2a9cb5ee2c31e1e",
+    strip_prefix = "google.golang.org/grpc@v1.85.0",
+    sub_targets = {
+        ".": ["backoff.go", "balancer_wrapper.go", "call.go", "clientconn.go", "clientconn_disconnect_reason_noplan9.go", "clientconn_disconnect_reason_plan9.go", "codec.go", "dialoptions.go", "doc.go", "interceptor.go", "picker_wrapper.go", "preloader.go", "resolver_wrapper.go", "rpc_util.go", "server.go", "service_config.go", "stream.go", "stream_interfaces.go", "trace.go", "trace_notrace.go", "trace_withtrace.go", "version.go"],
+        "attributes": ["attributes/attributes.go"],
+        "backoff": ["backoff/backoff.go"],
+        "balancer": ["balancer/balancer.go", "balancer/conn_state_evaluator.go", "balancer/subconn.go"],
+        "balancer/base": ["balancer/base/balancer.go", "balancer/base/base.go"],
+        "balancer/endpointsharding": ["balancer/endpointsharding/endpointsharding.go"],
+        "balancer/grpclb/state": ["balancer/grpclb/state/state.go"],
+        "balancer/pickfirst": ["balancer/pickfirst/pickfirst.go"],
+        "balancer/pickfirst/internal": ["balancer/pickfirst/internal/internal.go"],
+        "balancer/roundrobin": ["balancer/roundrobin/roundrobin.go"],
+        "binarylog/grpc_binarylog_v1": ["binarylog/grpc_binarylog_v1/binarylog.pb.go"],
+        "channelz": ["channelz/channelz.go"],
+        "codes": ["codes/code_string.go", "codes/codes.go"],
+        "connectivity": ["connectivity/connectivity.go"],
+        "credentials": ["credentials/credentials.go", "credentials/tls.go"],
+        "credentials/insecure": ["credentials/insecure/insecure.go"],
+        "encoding": ["encoding/encoding.go", "encoding/encoding_v2.go"],
+        "encoding/internal": ["encoding/internal/internal.go"],
+        "encoding/proto": ["encoding/proto/proto.go"],
+        "experimental/balancer/weight": ["experimental/balancer/weight/weight.go"],
+        "experimental/stats": ["experimental/stats/metricregistry.go", "experimental/stats/metrics.go"],
+        "grpclog": ["grpclog/component.go", "grpclog/grpclog.go", "grpclog/logger.go", "grpclog/loggerv2.go"],
+        "grpclog/internal": ["grpclog/internal/grpclog.go", "grpclog/internal/logger.go", "grpclog/internal/loggerv2.go"],
+        "internal": ["internal/experimental.go", "internal/internal.go", "internal/tcp_keepalive_others.go", "internal/tcp_keepalive_unix.go", "internal/tcp_keepalive_windows.go"],
+        "internal/backoff": ["internal/backoff/backoff.go"],
+        "internal/balancer/gracefulswitch": ["internal/balancer/gracefulswitch/config.go", "internal/balancer/gracefulswitch/gracefulswitch.go"],
+        "internal/balancerload": ["internal/balancerload/load.go"],
+        "internal/binarylog": ["internal/binarylog/binarylog.go", "internal/binarylog/binarylog_testutil.go", "internal/binarylog/env_config.go", "internal/binarylog/method_logger.go", "internal/binarylog/sink.go"],
+        "internal/buffer": ["internal/buffer/unbounded.go"],
+        "internal/channelz": ["internal/channelz/channel.go", "internal/channelz/channelmap.go", "internal/channelz/funcs.go", "internal/channelz/logging.go", "internal/channelz/server.go", "internal/channelz/socket.go", "internal/channelz/subchannel.go", "internal/channelz/syscall_linux.go", "internal/channelz/syscall_nonlinux.go", "internal/channelz/trace.go"],
+        "internal/credentials": ["internal/credentials/credentials.go", "internal/credentials/spiffe.go", "internal/credentials/syscallconn.go", "internal/credentials/util.go"],
+        "internal/envconfig": ["internal/envconfig/envconfig.go", "internal/envconfig/observability.go", "internal/envconfig/xds.go"],
+        "internal/grpclog": ["internal/grpclog/prefix_logger.go"],
+        "internal/grpcsync": ["internal/grpcsync/callback_serializer.go", "internal/grpcsync/event.go", "internal/grpcsync/pubsub.go", "internal/grpcsync/refcounted.go"],
+        "internal/grpcutil": ["internal/grpcutil/compressor.go", "internal/grpcutil/encode_duration.go", "internal/grpcutil/grpcutil.go", "internal/grpcutil/metadata.go", "internal/grpcutil/method.go"],
+        "internal/idle": ["internal/idle/idle.go"],
+        "internal/mem": ["internal/mem/buffer_pool.go"],
+        "internal/metadata": ["internal/metadata/metadata.go"],
+        "internal/pretty": ["internal/pretty/pretty.go"],
+        "internal/proxyattributes": ["internal/proxyattributes/proxyattributes.go"],
+        "internal/resolver": ["internal/resolver/config_selector.go"],
+        "internal/resolver/delegatingresolver": ["internal/resolver/delegatingresolver/delegatingresolver.go"],
+        "internal/resolver/dns": ["internal/resolver/dns/dns_resolver.go"],
+        "internal/resolver/dns/internal": ["internal/resolver/dns/internal/internal.go"],
+        "internal/resolver/passthrough": ["internal/resolver/passthrough/passthrough.go"],
+        "internal/resolver/unix": ["internal/resolver/unix/unix.go"],
+        "internal/serviceconfig": ["internal/serviceconfig/duration.go", "internal/serviceconfig/serviceconfig.go"],
+        "internal/stats": ["internal/stats/labels.go", "internal/stats/metrics_recorder_list.go", "internal/stats/stats.go"],
+        "internal/status": ["internal/status/status.go"],
+        "internal/syscall": ["internal/syscall/syscall_linux.go", "internal/syscall/syscall_nonlinux.go"],
+        "internal/transport": ["internal/transport/bdp_estimator.go", "internal/transport/client_stream.go", "internal/transport/controlbuf.go", "internal/transport/defaults.go", "internal/transport/flowcontrol.go", "internal/transport/handler_server.go", "internal/transport/http2_client.go", "internal/transport/http2_server.go", "internal/transport/http_util.go", "internal/transport/logging.go", "internal/transport/proxy.go", "internal/transport/server_stream.go", "internal/transport/transport.go"],
+        "internal/transport/internal": ["internal/transport/internal/internal.go"],
+        "internal/transport/networktype": ["internal/transport/networktype/networktype.go"],
+        "internal/transport/readyreader": ["internal/transport/readyreader/raw_conn_linux.go", "internal/transport/readyreader/raw_conn_nonlinux.go", "internal/transport/readyreader/ready_reader.go"],
+        "keepalive": ["keepalive/keepalive.go"],
+        "mem": ["mem/buffer_pool.go", "mem/buffer_slice.go", "mem/buffers.go"],
+        "metadata": ["metadata/metadata.go"],
+        "peer": ["peer/peer.go"],
+        "resolver": ["resolver/map.go", "resolver/resolver.go"],
+        "resolver/dns": ["resolver/dns/dns_resolver.go"],
+        "serviceconfig": ["serviceconfig/serviceconfig.go"],
+        "stats": ["stats/handlers.go", "stats/metrics.go", "stats/stats.go"],
+        "status": ["status/status.go"],
+        "tap": ["tap/tap.go"],
+    },
+)
+
+http_archive(
+    name = "google.golang.org/protobuf__srcs",
+    urls = ["https://proxy.golang.org/google.golang.org/protobuf/@v/v1.36.13-0.20261016172727-e9ee2a76ab8e.zip"],
+    sha256 = "2ca03b481949f2d46c5e1fa5370bfbe284a84ab592d502e1ef73e23836a164d9",
+    strip_prefix = "google.golang.org/protobuf@v1.36.13-0.20261016172727-e9ee2a76ab8e",
+    sub_targets = {
+        "encoding/protojson": ["encoding/protojson/decode.go", "encoding/protojson/doc.go", "encoding/protojson/encode.go", "encoding/protojson/enum.go", "encoding/protojson/well_known_types.go"],
+        "encoding/prototext": ["encoding/prototext/decode.go", "encoding/prototext/doc.go", "encoding/prototext/encode.go"],
+        "encoding/protowire": ["encoding/protowire/wire.go"],
+        "internal/descfmt": ["internal/descfmt/stringer.go"],
+        "internal/descopts": ["internal/descopts/options.go"],
+        "internal/detrand": ["internal/detrand/rand.go"],
+        "internal/editiondefaults": ["internal/editiondefaults/defaults.go"],
+        "internal/editiondefaults__embed": ["internal/editiondefaults/editions_defaults.binpb"],
+        "internal/encoding/defval": ["internal/encoding/defval/default.go"],
+        "internal/encoding/json": ["internal/encoding/json/decode.go", "internal/encoding/json/decode_number.go", "internal/encoding/json/decode_string.go", "internal/encoding/json/decode_token.go", "internal/encoding/json/encode.go"],
+        "internal/encoding/messageset": ["internal/encoding/messageset/messageset.go"],
+        "internal/encoding/tag": ["internal/encoding/tag/tag.go"],
+        "internal/encoding/text": ["internal/encoding/text/decode.go", "internal/encoding/text/decode_number.go", "internal/encoding/text/decode_string.go", "internal/encoding/text/decode_token.go", "internal/encoding/text/doc.go", "internal/encoding/text/encode.go"],
+        "internal/errors": ["internal/errors/errors.go"],
+        "internal/filedesc": ["internal/filedesc/build.go", "internal/filedesc/desc.go", "internal/filedesc/desc_init.go", "internal/filedesc/desc_lazy.go", "internal/filedesc/desc_list.go", "internal/filedesc/desc_list_gen.go", "internal/filedesc/editions.go", "internal/filedesc/placeholder.go", "internal/filedesc/presence.go"],
+        "internal/filetype": ["internal/filetype/build.go"],
+        "internal/flags": ["internal/flags/flags.go", "internal/flags/proto_legacy_disable.go", "internal/flags/proto_legacy_enable.go"],
+        "internal/genid": ["internal/genid/any_gen.go", "internal/genid/api_gen.go", "internal/genid/descriptor_gen.go", "internal/genid/doc.go", "internal/genid/duration_gen.go", "internal/genid/empty_gen.go", "internal/genid/field_mask_gen.go", "internal/genid/go_features_gen.go", "internal/genid/goname.go", "internal/genid/json_enumvalue_options_gen.go", "internal/genid/json_options_gen.go", "internal/genid/map_entry.go", "internal/genid/name.go", "internal/genid/source_context_gen.go", "internal/genid/struct_gen.go", "internal/genid/timestamp_gen.go", "internal/genid/type_gen.go", "internal/genid/wrappers.go", "internal/genid/wrappers_gen.go"],
+        "internal/impl": ["internal/impl/api_export.go", "internal/impl/api_export_opaque.go", "internal/impl/bitmap.go", "internal/impl/bitmap_race.go", "internal/impl/checkinit.go", "internal/impl/codec_extension.go", "internal/impl/codec_field.go", "internal/impl/codec_field_opaque.go", "internal/impl/codec_gen.go", "internal/impl/codec_map.go", "internal/impl/codec_message.go", "internal/impl/codec_message_opaque.go", "internal/impl/codec_messageset.go", "internal/impl/codec_tables.go", "internal/impl/codec_unsafe.go", "internal/impl/convert.go", "internal/impl/convert_list.go", "internal/impl/convert_map.go", "internal/impl/decode.go", "internal/impl/encode.go", "internal/impl/enum.go", "internal/impl/equal.go", "internal/impl/extension.go", "internal/impl/lazy.go", "internal/impl/legacy_enum.go", "internal/impl/legacy_export.go", "internal/impl/legacy_extension.go", "internal/impl/legacy_file.go", "internal/impl/legacy_message.go", "internal/impl/merge.go", "internal/impl/merge_gen.go", "internal/impl/message.go", "internal/impl/message_opaque.go", "internal/impl/message_opaque_gen.go", "internal/impl/message_reflect.go", "internal/impl/message_reflect_field.go", "internal/impl/message_reflect_field_gen.go", "internal/impl/message_reflect_gen.go", "internal/impl/pointer_unsafe.go", "internal/impl/pointer_unsafe_opaque.go", "internal/impl/presence.go", "internal/impl/validate.go"],
+        "internal/order": ["internal/order/order.go", "internal/order/range.go"],
+        "internal/pragma": ["internal/pragma/pragma.go"],
+        "internal/protolazy": ["internal/protolazy/bufferreader.go", "internal/protolazy/lazy.go", "internal/protolazy/pointer_unsafe.go"],
+        "internal/set": ["internal/set/ints.go"],
+        "internal/strs": ["internal/strs/strings.go", "internal/strs/strings_unsafe.go"],
+        "internal/version": ["internal/version/version.go"],
+        "proto": ["proto/checkinit.go", "proto/decode.go", "proto/decode_gen.go", "proto/doc.go", "proto/encode.go", "proto/encode_gen.go", "proto/equal.go", "proto/extension.go", "proto/merge.go", "proto/messageset.go", "proto/proto.go", "proto/proto_methods.go", "proto/proto_reflect.go", "proto/reset.go", "proto/size.go", "proto/size_gen.go", "proto/wrapperopaque.go", "proto/wrappers.go"],
+        "protoadapt": ["protoadapt/convert.go"],
+        "reflect/protoreflect": ["reflect/protoreflect/methods.go", "reflect/protoreflect/proto.go", "reflect/protoreflect/source.go", "reflect/protoreflect/source_gen.go", "reflect/protoreflect/type.go", "reflect/protoreflect/value.go", "reflect/protoreflect/value_equal.go", "reflect/protoreflect/value_union.go", "reflect/protoreflect/value_unsafe.go"],
+        "reflect/protoregistry": ["reflect/protoregistry/registry.go"],
+        "runtime/protoiface": ["runtime/protoiface/legacy.go", "runtime/protoiface/methods.go"],
+        "runtime/protoimpl": ["runtime/protoimpl/impl.go", "runtime/protoimpl/version.go"],
+        "types/descriptorpb": ["types/descriptorpb/descriptor.pb.go"],
+        "types/jsonenumvalueoptionspb": ["types/jsonenumvalueoptionspb/json_enumvalue_options.pb.go"],
+        "types/known/anypb": ["types/known/anypb/any.pb.go"],
+        "types/known/durationpb": ["types/known/durationpb/duration.pb.go"],
+        "types/known/timestamppb": ["types/known/timestamppb/timestamp.pb.go"],
+    },
+)
+
+go_library(
+    name = "golang.org/x/net/http/httpguts",
+    package_name = "golang.org/x/net/http/httpguts",
+    srcs = [":golang.org/x/net__srcs[http/httpguts]"],
+    deps = [":golang.org/x/net/idna"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/http2",
+    package_name = "golang.org/x/net/http2",
+    srcs = [":golang.org/x/net__srcs[http2]"],
+    deps = [":golang.org/x/net/http/httpguts", ":golang.org/x/net/http2/hpack", ":golang.org/x/net/idna", ":golang.org/x/net/internal/httpcommon", ":golang.org/x/net/internal/httpsfv"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/http2/hpack",
+    package_name = "golang.org/x/net/http2/hpack",
+    srcs = [":golang.org/x/net__srcs[http2/hpack]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/idna",
+    package_name = "golang.org/x/net/idna",
+    srcs = [":golang.org/x/net__srcs[idna]"],
+    deps = [":golang.org/x/text/secure/bidirule", ":golang.org/x/text/unicode/bidi", ":golang.org/x/text/unicode/norm"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/internal/httpcommon",
+    package_name = "golang.org/x/net/internal/httpcommon",
+    srcs = [":golang.org/x/net__srcs[internal/httpcommon]"],
+    deps = [":golang.org/x/net/http/httpguts", ":golang.org/x/net/http2/hpack"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/internal/httpsfv",
+    package_name = "golang.org/x/net/internal/httpsfv",
+    srcs = [":golang.org/x/net__srcs[internal/httpsfv]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/internal/timeseries",
+    package_name = "golang.org/x/net/internal/timeseries",
+    srcs = [":golang.org/x/net__srcs[internal/timeseries]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/net/trace",
+    package_name = "golang.org/x/net/trace",
+    srcs = [":golang.org/x/net__srcs[trace]"],
+    deps = [":golang.org/x/net/internal/timeseries"],
+    visibility = ["PUBLIC"],
+)
+
 go_library(
     name = "golang.org/x/sync/errgroup",
     package_name = "golang.org/x/sync/errgroup",
     srcs = [":golang.org/x/sync__srcs[errgroup]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/sys/unix",
+    package_name = "golang.org/x/sys/unix",
+    srcs = [":golang.org/x/sys__srcs[unix]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/text/secure/bidirule",
+    package_name = "golang.org/x/text/secure/bidirule",
+    srcs = [":golang.org/x/text__srcs[secure/bidirule]"],
+    deps = [":golang.org/x/text/transform", ":golang.org/x/text/unicode/bidi"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/text/transform",
+    package_name = "golang.org/x/text/transform",
+    srcs = [":golang.org/x/text__srcs[transform]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/text/unicode/bidi",
+    package_name = "golang.org/x/text/unicode/bidi",
+    srcs = [":golang.org/x/text__srcs[unicode/bidi]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "golang.org/x/text/unicode/norm",
+    package_name = "golang.org/x/text/unicode/norm",
+    srcs = [":golang.org/x/text__srcs[unicode/norm]"],
+    deps = [":golang.org/x/text/transform"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/genproto/googleapis/rpc/status",
+    package_name = "google.golang.org/genproto/googleapis/rpc/status",
+    srcs = [":google.golang.org/genproto/googleapis/rpc__srcs[status]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl", ":google.golang.org/protobuf/types/known/anypb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc",
+    package_name = "google.golang.org/grpc",
+    srcs = [":google.golang.org/grpc__srcs[.]"],
+    deps = [":golang.org/x/net/trace", ":google.golang.org/grpc/backoff", ":google.golang.org/grpc/balancer", ":google.golang.org/grpc/balancer/base", ":google.golang.org/grpc/balancer/pickfirst", ":google.golang.org/grpc/balancer/roundrobin", ":google.golang.org/grpc/channelz", ":google.golang.org/grpc/codes", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/credentials", ":google.golang.org/grpc/credentials/insecure", ":google.golang.org/grpc/encoding", ":google.golang.org/grpc/encoding/proto", ":google.golang.org/grpc/experimental/stats", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/internal/backoff", ":google.golang.org/grpc/internal/balancer/gracefulswitch", ":google.golang.org/grpc/internal/balancerload", ":google.golang.org/grpc/internal/binarylog", ":google.golang.org/grpc/internal/channelz", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/internal/grpcsync", ":google.golang.org/grpc/internal/grpcutil", ":google.golang.org/grpc/internal/idle", ":google.golang.org/grpc/internal/metadata", ":google.golang.org/grpc/internal/pretty", ":google.golang.org/grpc/internal/resolver", ":google.golang.org/grpc/internal/resolver/delegatingresolver", ":google.golang.org/grpc/internal/resolver/passthrough", ":google.golang.org/grpc/internal/resolver/unix", ":google.golang.org/grpc/internal/serviceconfig", ":google.golang.org/grpc/internal/stats", ":google.golang.org/grpc/internal/status", ":google.golang.org/grpc/internal/transport", ":google.golang.org/grpc/keepalive", ":google.golang.org/grpc/mem", ":google.golang.org/grpc/metadata", ":google.golang.org/grpc/peer", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/resolver/dns", ":google.golang.org/grpc/serviceconfig", ":google.golang.org/grpc/stats", ":google.golang.org/grpc/status", ":google.golang.org/grpc/tap"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/attributes",
+    package_name = "google.golang.org/grpc/attributes",
+    srcs = [":google.golang.org/grpc__srcs[attributes]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/backoff",
+    package_name = "google.golang.org/grpc/backoff",
+    srcs = [":google.golang.org/grpc__srcs[backoff]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer",
+    package_name = "google.golang.org/grpc/balancer",
+    srcs = [":google.golang.org/grpc__srcs[balancer]"],
+    deps = [":google.golang.org/grpc/channelz", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/credentials", ":google.golang.org/grpc/experimental/stats", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/metadata", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/base",
+    package_name = "google.golang.org/grpc/balancer/base",
+    srcs = [":google.golang.org/grpc__srcs[balancer/base]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/endpointsharding",
+    package_name = "google.golang.org/grpc/balancer/endpointsharding",
+    srcs = [":google.golang.org/grpc__srcs[balancer/endpointsharding]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/balancer/base", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/grpclb/state",
+    package_name = "google.golang.org/grpc/balancer/grpclb/state",
+    srcs = [":google.golang.org/grpc__srcs[balancer/grpclb/state]"],
+    deps = [":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/pickfirst",
+    package_name = "google.golang.org/grpc/balancer/pickfirst",
+    srcs = [":google.golang.org/grpc__srcs[balancer/pickfirst]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/balancer/pickfirst/internal", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/experimental/balancer/weight", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/internal/grpclog", ":google.golang.org/grpc/internal/pretty", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/pickfirst/internal",
+    package_name = "google.golang.org/grpc/balancer/pickfirst/internal",
+    srcs = [":google.golang.org/grpc__srcs[balancer/pickfirst/internal]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/balancer/roundrobin",
+    package_name = "google.golang.org/grpc/balancer/roundrobin",
+    srcs = [":google.golang.org/grpc__srcs[balancer/roundrobin]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/balancer/endpointsharding", ":google.golang.org/grpc/balancer/pickfirst", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/grpclog"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/binarylog/grpc_binarylog_v1",
+    package_name = "google.golang.org/grpc/binarylog/grpc_binarylog_v1",
+    srcs = [":google.golang.org/grpc__srcs[binarylog/grpc_binarylog_v1]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl", ":google.golang.org/protobuf/types/known/durationpb", ":google.golang.org/protobuf/types/known/timestamppb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/channelz",
+    package_name = "google.golang.org/grpc/channelz",
+    srcs = [":google.golang.org/grpc__srcs[channelz]"],
+    deps = [":google.golang.org/grpc/internal/channelz"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/codes",
+    package_name = "google.golang.org/grpc/codes",
+    srcs = [":google.golang.org/grpc__srcs[codes]"],
+    deps = [":google.golang.org/grpc/internal"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/connectivity",
+    package_name = "google.golang.org/grpc/connectivity",
+    srcs = [":google.golang.org/grpc__srcs[connectivity]"],
+    deps = [":google.golang.org/grpc/grpclog"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/credentials",
+    package_name = "google.golang.org/grpc/credentials",
+    srcs = [":google.golang.org/grpc__srcs[credentials]"],
+    deps = [":google.golang.org/grpc/attributes", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/credentials", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/protobuf/proto"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/credentials/insecure",
+    package_name = "google.golang.org/grpc/credentials/insecure",
+    srcs = [":google.golang.org/grpc__srcs[credentials/insecure]"],
+    deps = [":google.golang.org/grpc/credentials"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/encoding",
+    package_name = "google.golang.org/grpc/encoding",
+    srcs = [":google.golang.org/grpc__srcs[encoding]"],
+    deps = [":google.golang.org/grpc/encoding/internal", ":google.golang.org/grpc/internal/grpcutil", ":google.golang.org/grpc/mem"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/encoding/internal",
+    package_name = "google.golang.org/grpc/encoding/internal",
+    srcs = [":google.golang.org/grpc__srcs[encoding/internal]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/encoding/proto",
+    package_name = "google.golang.org/grpc/encoding/proto",
+    srcs = [":google.golang.org/grpc__srcs[encoding/proto]"],
+    deps = [":google.golang.org/grpc/encoding", ":google.golang.org/grpc/mem", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/protoadapt"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/experimental/balancer/weight",
+    package_name = "google.golang.org/grpc/experimental/balancer/weight",
+    srcs = [":google.golang.org/grpc__srcs[experimental/balancer/weight]"],
+    deps = [":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/experimental/stats",
+    package_name = "google.golang.org/grpc/experimental/stats",
+    srcs = [":google.golang.org/grpc__srcs[experimental/stats]"],
+    deps = [":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/stats"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/grpclog",
+    package_name = "google.golang.org/grpc/grpclog",
+    srcs = [":google.golang.org/grpc__srcs[grpclog]"],
+    deps = [":google.golang.org/grpc/grpclog/internal"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/grpclog/internal",
+    package_name = "google.golang.org/grpc/grpclog/internal",
+    srcs = [":google.golang.org/grpc__srcs[grpclog/internal]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal",
+    package_name = "google.golang.org/grpc/internal",
+    srcs = [":google.golang.org/grpc__srcs[internal]"],
+    deps = [":golang.org/x/sys/unix", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/backoff",
+    package_name = "google.golang.org/grpc/internal/backoff",
+    srcs = [":google.golang.org/grpc__srcs[internal/backoff]"],
+    deps = [":google.golang.org/grpc/backoff"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/balancer/gracefulswitch",
+    package_name = "google.golang.org/grpc/internal/balancer/gracefulswitch",
+    srcs = [":google.golang.org/grpc__srcs[internal/balancer/gracefulswitch]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/balancer/base", ":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/balancerload",
+    package_name = "google.golang.org/grpc/internal/balancerload",
+    srcs = [":google.golang.org/grpc__srcs[internal/balancerload]"],
+    deps = [":google.golang.org/grpc/metadata"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/binarylog",
+    package_name = "google.golang.org/grpc/internal/binarylog",
+    srcs = [":google.golang.org/grpc__srcs[internal/binarylog]"],
+    deps = [":google.golang.org/grpc/binarylog/grpc_binarylog_v1", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/grpcutil", ":google.golang.org/grpc/metadata", ":google.golang.org/grpc/status", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/types/known/durationpb", ":google.golang.org/protobuf/types/known/timestamppb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/buffer",
+    package_name = "google.golang.org/grpc/internal/buffer",
+    srcs = [":google.golang.org/grpc__srcs[internal/buffer]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/channelz",
+    package_name = "google.golang.org/grpc/internal/channelz",
+    srcs = [":google.golang.org/grpc__srcs[internal/channelz]"],
+    deps = [":google.golang.org/grpc/connectivity", ":google.golang.org/grpc/credentials", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal"] + select({
+        "config//os:linux": select({
+            "config//cpu:arm64": [":golang.org/x/sys/unix"],
+            "config//cpu:x86_64": [":golang.org/x/sys/unix"],
+            "DEFAULT": [],
+        }),
+        "DEFAULT": [],
+    }),
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/credentials",
+    package_name = "google.golang.org/grpc/internal/credentials",
+    srcs = [":google.golang.org/grpc__srcs[internal/credentials]"],
+    deps = [":google.golang.org/grpc/grpclog"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/envconfig",
+    package_name = "google.golang.org/grpc/internal/envconfig",
+    srcs = [":google.golang.org/grpc__srcs[internal/envconfig]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/grpclog",
+    package_name = "google.golang.org/grpc/internal/grpclog",
+    srcs = [":google.golang.org/grpc__srcs[internal/grpclog]"],
+    deps = [":google.golang.org/grpc/grpclog"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/grpcsync",
+    package_name = "google.golang.org/grpc/internal/grpcsync",
+    srcs = [":google.golang.org/grpc__srcs[internal/grpcsync]"],
+    deps = [":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/buffer"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/grpcutil",
+    package_name = "google.golang.org/grpc/internal/grpcutil",
+    srcs = [":google.golang.org/grpc__srcs[internal/grpcutil]"],
+    deps = [":google.golang.org/grpc/metadata"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/idle",
+    package_name = "google.golang.org/grpc/internal/idle",
+    srcs = [":google.golang.org/grpc__srcs[internal/idle]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/mem",
+    package_name = "google.golang.org/grpc/internal/mem",
+    srcs = [":google.golang.org/grpc__srcs[internal/mem]"],
+    deps = [":google.golang.org/grpc/internal"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/metadata",
+    package_name = "google.golang.org/grpc/internal/metadata",
+    srcs = [":google.golang.org/grpc__srcs[internal/metadata]"],
+    deps = [":google.golang.org/grpc/metadata", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/pretty",
+    package_name = "google.golang.org/grpc/internal/pretty",
+    srcs = [":google.golang.org/grpc__srcs[internal/pretty]"],
+    deps = [":google.golang.org/protobuf/encoding/protojson", ":google.golang.org/protobuf/protoadapt"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/proxyattributes",
+    package_name = "google.golang.org/grpc/internal/proxyattributes",
+    srcs = [":google.golang.org/grpc__srcs[internal/proxyattributes]"],
+    deps = [":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver",
+    package_name = "google.golang.org/grpc/internal/resolver",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver]"],
+    deps = [":google.golang.org/grpc/internal/serviceconfig", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver/delegatingresolver",
+    package_name = "google.golang.org/grpc/internal/resolver/delegatingresolver",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver/delegatingresolver]"],
+    deps = [":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/internal/proxyattributes", ":google.golang.org/grpc/internal/transport", ":google.golang.org/grpc/internal/transport/networktype", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver/dns",
+    package_name = "google.golang.org/grpc/internal/resolver/dns",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver/dns]"],
+    deps = [":google.golang.org/grpc/balancer/grpclb/state", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal/backoff", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/internal/resolver/dns/internal", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver/dns/internal",
+    package_name = "google.golang.org/grpc/internal/resolver/dns/internal",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver/dns/internal]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver/passthrough",
+    package_name = "google.golang.org/grpc/internal/resolver/passthrough",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver/passthrough]"],
+    deps = [":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/resolver/unix",
+    package_name = "google.golang.org/grpc/internal/resolver/unix",
+    srcs = [":google.golang.org/grpc__srcs[internal/resolver/unix]"],
+    deps = [":google.golang.org/grpc/internal/transport/networktype", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/serviceconfig",
+    package_name = "google.golang.org/grpc/internal/serviceconfig",
+    srcs = [":google.golang.org/grpc__srcs[internal/serviceconfig]"],
+    deps = [":google.golang.org/grpc/balancer", ":google.golang.org/grpc/codes", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/stats",
+    package_name = "google.golang.org/grpc/internal/stats",
+    srcs = [":google.golang.org/grpc__srcs[internal/stats]"],
+    deps = [":google.golang.org/grpc/experimental/stats", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/stats"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/status",
+    package_name = "google.golang.org/grpc/internal/status",
+    srcs = [":google.golang.org/grpc__srcs[internal/status]"],
+    deps = [":google.golang.org/genproto/googleapis/rpc/status", ":google.golang.org/grpc/codes", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/protoadapt", ":google.golang.org/protobuf/types/known/anypb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/syscall",
+    package_name = "google.golang.org/grpc/internal/syscall",
+    srcs = [":google.golang.org/grpc__srcs[internal/syscall]"],
+    deps = [":google.golang.org/grpc/grpclog"] + select({
+        "config//os:linux": select({
+            "config//cpu:arm64": [":golang.org/x/sys/unix"],
+            "config//cpu:x86_64": [":golang.org/x/sys/unix"],
+            "DEFAULT": [],
+        }),
+        "DEFAULT": [],
+    }),
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/transport",
+    package_name = "google.golang.org/grpc/internal/transport",
+    srcs = [":google.golang.org/grpc__srcs[internal/transport]"],
+    deps = [":golang.org/x/net/http2", ":golang.org/x/net/http2/hpack", ":google.golang.org/grpc/codes", ":google.golang.org/grpc/credentials", ":google.golang.org/grpc/grpclog", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/internal/channelz", ":google.golang.org/grpc/internal/credentials", ":google.golang.org/grpc/internal/envconfig", ":google.golang.org/grpc/internal/grpclog", ":google.golang.org/grpc/internal/grpcsync", ":google.golang.org/grpc/internal/grpcutil", ":google.golang.org/grpc/internal/mem", ":google.golang.org/grpc/internal/metadata", ":google.golang.org/grpc/internal/pretty", ":google.golang.org/grpc/internal/proxyattributes", ":google.golang.org/grpc/internal/stats", ":google.golang.org/grpc/internal/status", ":google.golang.org/grpc/internal/syscall", ":google.golang.org/grpc/internal/transport/internal", ":google.golang.org/grpc/internal/transport/networktype", ":google.golang.org/grpc/internal/transport/readyreader", ":google.golang.org/grpc/keepalive", ":google.golang.org/grpc/mem", ":google.golang.org/grpc/metadata", ":google.golang.org/grpc/peer", ":google.golang.org/grpc/resolver", ":google.golang.org/grpc/stats", ":google.golang.org/grpc/status", ":google.golang.org/grpc/tap", ":google.golang.org/protobuf/proto"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/transport/internal",
+    package_name = "google.golang.org/grpc/internal/transport/internal",
+    srcs = [":google.golang.org/grpc__srcs[internal/transport/internal]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/transport/networktype",
+    package_name = "google.golang.org/grpc/internal/transport/networktype",
+    srcs = [":google.golang.org/grpc__srcs[internal/transport/networktype]"],
+    deps = [":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/internal/transport/readyreader",
+    package_name = "google.golang.org/grpc/internal/transport/readyreader",
+    srcs = [":google.golang.org/grpc__srcs[internal/transport/readyreader]"],
+    deps = [":google.golang.org/grpc/mem"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/keepalive",
+    package_name = "google.golang.org/grpc/keepalive",
+    srcs = [":google.golang.org/grpc__srcs[keepalive]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/mem",
+    package_name = "google.golang.org/grpc/mem",
+    srcs = [":google.golang.org/grpc__srcs[mem]"],
+    deps = [":google.golang.org/grpc/internal", ":google.golang.org/grpc/internal/mem"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/metadata",
+    package_name = "google.golang.org/grpc/metadata",
+    srcs = [":google.golang.org/grpc__srcs[metadata]"],
+    deps = [":google.golang.org/grpc/internal"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/peer",
+    package_name = "google.golang.org/grpc/peer",
+    srcs = [":google.golang.org/grpc__srcs[peer]"],
+    deps = [":google.golang.org/grpc/credentials"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/resolver",
+    package_name = "google.golang.org/grpc/resolver",
+    srcs = [":google.golang.org/grpc__srcs[resolver]"],
+    deps = [":google.golang.org/grpc/attributes", ":google.golang.org/grpc/credentials", ":google.golang.org/grpc/experimental/stats", ":google.golang.org/grpc/internal", ":google.golang.org/grpc/serviceconfig"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/resolver/dns",
+    package_name = "google.golang.org/grpc/resolver/dns",
+    srcs = [":google.golang.org/grpc__srcs[resolver/dns]"],
+    deps = [":google.golang.org/grpc/internal/resolver/dns", ":google.golang.org/grpc/resolver"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/serviceconfig",
+    package_name = "google.golang.org/grpc/serviceconfig",
+    srcs = [":google.golang.org/grpc__srcs[serviceconfig]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/stats",
+    package_name = "google.golang.org/grpc/stats",
+    srcs = [":google.golang.org/grpc__srcs[stats]"],
+    deps = [":google.golang.org/grpc/metadata"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/status",
+    package_name = "google.golang.org/grpc/status",
+    srcs = [":google.golang.org/grpc__srcs[status]"],
+    deps = [":google.golang.org/genproto/googleapis/rpc/status", ":google.golang.org/grpc/codes", ":google.golang.org/grpc/internal/status"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/grpc/tap",
+    package_name = "google.golang.org/grpc/tap",
+    srcs = [":google.golang.org/grpc__srcs[tap]"],
+    deps = [":google.golang.org/grpc/metadata"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/encoding/protojson",
+    package_name = "google.golang.org/protobuf/encoding/protojson",
+    srcs = [":google.golang.org/protobuf__srcs[encoding/protojson]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/encoding/json", ":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/filedesc", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/internal/genid", ":google.golang.org/protobuf/internal/order", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/internal/set", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry", ":google.golang.org/protobuf/types/jsonenumvalueoptionspb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/encoding/prototext",
+    package_name = "google.golang.org/protobuf/encoding/prototext",
+    srcs = [":google.golang.org/protobuf__srcs[encoding/prototext]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/encoding/text", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/internal/genid", ":google.golang.org/protobuf/internal/order", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/internal/set", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/encoding/protowire",
+    package_name = "google.golang.org/protobuf/encoding/protowire",
+    srcs = [":google.golang.org/protobuf__srcs[encoding/protowire]"],
+    deps = [":google.golang.org/protobuf/internal/errors"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/descfmt",
+    package_name = "google.golang.org/protobuf/internal/descfmt",
+    srcs = [":google.golang.org/protobuf__srcs[internal/descfmt]"],
+    deps = [":google.golang.org/protobuf/internal/detrand", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/descopts",
+    package_name = "google.golang.org/protobuf/internal/descopts",
+    srcs = [":google.golang.org/protobuf__srcs[internal/descopts]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/detrand",
+    package_name = "google.golang.org/protobuf/internal/detrand",
+    srcs = [":google.golang.org/protobuf__srcs[internal/detrand]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/editiondefaults",
+    package_name = "google.golang.org/protobuf/internal/editiondefaults",
+    srcs = [":google.golang.org/protobuf__srcs[internal/editiondefaults]"],
+    embed_srcs = [":google.golang.org/protobuf__srcs[internal/editiondefaults__embed]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/encoding/defval",
+    package_name = "google.golang.org/protobuf/internal/encoding/defval",
+    srcs = [":google.golang.org/protobuf__srcs[internal/encoding/defval]"],
+    deps = [":google.golang.org/protobuf/internal/encoding/text", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/encoding/json",
+    package_name = "google.golang.org/protobuf/internal/encoding/json",
+    srcs = [":google.golang.org/protobuf__srcs[internal/encoding/json]"],
+    deps = [":google.golang.org/protobuf/internal/detrand", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/strs"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/encoding/messageset",
+    package_name = "google.golang.org/protobuf/internal/encoding/messageset",
+    srcs = [":google.golang.org/protobuf__srcs[internal/encoding/messageset]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/encoding/tag",
+    package_name = "google.golang.org/protobuf/internal/encoding/tag",
+    srcs = [":google.golang.org/protobuf__srcs[internal/encoding/tag]"],
+    deps = [":google.golang.org/protobuf/internal/encoding/defval", ":google.golang.org/protobuf/internal/filedesc", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/encoding/text",
+    package_name = "google.golang.org/protobuf/internal/encoding/text",
+    srcs = [":google.golang.org/protobuf__srcs[internal/encoding/text]"],
+    deps = [":google.golang.org/protobuf/internal/detrand", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/internal/strs"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/errors",
+    package_name = "google.golang.org/protobuf/internal/errors",
+    srcs = [":google.golang.org/protobuf__srcs[internal/errors]"],
+    deps = [":google.golang.org/protobuf/internal/detrand"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/filedesc",
+    package_name = "google.golang.org/protobuf/internal/filedesc",
+    srcs = [":google.golang.org/protobuf__srcs[internal/filedesc]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/descfmt", ":google.golang.org/protobuf/internal/descopts", ":google.golang.org/protobuf/internal/editiondefaults", ":google.golang.org/protobuf/internal/encoding/defval", ":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/genid", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/filetype",
+    package_name = "google.golang.org/protobuf/internal/filetype",
+    srcs = [":google.golang.org/protobuf__srcs[internal/filetype]"],
+    deps = [":google.golang.org/protobuf/internal/descopts", ":google.golang.org/protobuf/internal/filedesc", ":google.golang.org/protobuf/internal/impl", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/flags",
+    package_name = "google.golang.org/protobuf/internal/flags",
+    srcs = [":google.golang.org/protobuf__srcs[internal/flags]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/genid",
+    package_name = "google.golang.org/protobuf/internal/genid",
+    srcs = [":google.golang.org/protobuf__srcs[internal/genid]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/impl",
+    package_name = "google.golang.org/protobuf/internal/impl",
+    srcs = [":google.golang.org/protobuf__srcs[internal/impl]"],
+    deps = [":google.golang.org/protobuf/encoding/prototext", ":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/descopts", ":google.golang.org/protobuf/internal/detrand", ":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/encoding/tag", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/filedesc", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/internal/genid", ":google.golang.org/protobuf/internal/order", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/internal/protolazy", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry", ":google.golang.org/protobuf/runtime/protoiface"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/order",
+    package_name = "google.golang.org/protobuf/internal/order",
+    srcs = [":google.golang.org/protobuf__srcs[internal/order]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/pragma",
+    package_name = "google.golang.org/protobuf/internal/pragma",
+    srcs = [":google.golang.org/protobuf__srcs[internal/pragma]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/protolazy",
+    package_name = "google.golang.org/protobuf/internal/protolazy",
+    srcs = [":google.golang.org/protobuf__srcs[internal/protolazy]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/runtime/protoiface"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/set",
+    package_name = "google.golang.org/protobuf/internal/set",
+    srcs = [":google.golang.org/protobuf__srcs[internal/set]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/strs",
+    package_name = "google.golang.org/protobuf/internal/strs",
+    srcs = [":google.golang.org/protobuf__srcs[internal/strs]"],
+    deps = [":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/internal/version",
+    package_name = "google.golang.org/protobuf/internal/version",
+    srcs = [":google.golang.org/protobuf__srcs[internal/version]"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/proto",
+    package_name = "google.golang.org/protobuf/proto",
+    srcs = [":google.golang.org/protobuf__srcs[proto]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/internal/genid", ":google.golang.org/protobuf/internal/order", ":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/internal/strs", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry", ":google.golang.org/protobuf/runtime/protoiface"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/protoadapt",
+    package_name = "google.golang.org/protobuf/protoadapt",
+    srcs = [":google.golang.org/protobuf__srcs[protoadapt]"],
+    deps = [":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/runtime/protoiface", ":google.golang.org/protobuf/runtime/protoimpl"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/reflect/protoreflect",
+    package_name = "google.golang.org/protobuf/reflect/protoreflect",
+    srcs = [":google.golang.org/protobuf__srcs[reflect/protoreflect]"],
+    deps = [":google.golang.org/protobuf/encoding/protowire", ":google.golang.org/protobuf/internal/pragma"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/reflect/protoregistry",
+    package_name = "google.golang.org/protobuf/reflect/protoregistry",
+    srcs = [":google.golang.org/protobuf__srcs[reflect/protoregistry]"],
+    deps = [":google.golang.org/protobuf/internal/encoding/messageset", ":google.golang.org/protobuf/internal/errors", ":google.golang.org/protobuf/internal/flags", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/runtime/protoiface",
+    package_name = "google.golang.org/protobuf/runtime/protoiface",
+    srcs = [":google.golang.org/protobuf__srcs[runtime/protoiface]"],
+    deps = [":google.golang.org/protobuf/internal/pragma", ":google.golang.org/protobuf/reflect/protoreflect"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/runtime/protoimpl",
+    package_name = "google.golang.org/protobuf/runtime/protoimpl",
+    srcs = [":google.golang.org/protobuf__srcs[runtime/protoimpl]"],
+    deps = [":google.golang.org/protobuf/internal/filedesc", ":google.golang.org/protobuf/internal/filetype", ":google.golang.org/protobuf/internal/impl", ":google.golang.org/protobuf/internal/protolazy", ":google.golang.org/protobuf/internal/version"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/types/descriptorpb",
+    package_name = "google.golang.org/protobuf/types/descriptorpb",
+    srcs = [":google.golang.org/protobuf__srcs[types/descriptorpb]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/types/jsonenumvalueoptionspb",
+    package_name = "google.golang.org/protobuf/types/jsonenumvalueoptionspb",
+    srcs = [":google.golang.org/protobuf__srcs[types/jsonenumvalueoptionspb]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl", ":google.golang.org/protobuf/types/descriptorpb"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/types/known/anypb",
+    package_name = "google.golang.org/protobuf/types/known/anypb",
+    srcs = [":google.golang.org/protobuf__srcs[types/known/anypb]"],
+    deps = [":google.golang.org/protobuf/proto", ":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/reflect/protoregistry", ":google.golang.org/protobuf/runtime/protoimpl"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/types/known/durationpb",
+    package_name = "google.golang.org/protobuf/types/known/durationpb",
+    srcs = [":google.golang.org/protobuf__srcs[types/known/durationpb]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl"],
+    visibility = ["PUBLIC"],
+)
+
+go_library(
+    name = "google.golang.org/protobuf/types/known/timestamppb",
+    package_name = "google.golang.org/protobuf/types/known/timestamppb",
+    srcs = [":google.golang.org/protobuf__srcs[types/known/timestamppb]"],
+    deps = [":google.golang.org/protobuf/reflect/protoreflect", ":google.golang.org/protobuf/runtime/protoimpl"],
     visibility = ["PUBLIC"],
 )

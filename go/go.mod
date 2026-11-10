@@ -2,7 +2,11 @@ module peppydb/go
 
 go 1.27.0
 
-require golang.org/x/sync v0.24.0
+require (
+	golang.org/x/sync v0.24.0
+	google.golang.org/grpc v1.85.0
+	google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e
+)
 
 require (
 	buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20261002170247-538130002972.2 // indirect
@@ -90,9 +94,7 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261012220534-4341edf3f941 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
-	google.golang.org/grpc v1.85.0 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2 // indirect
-	google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e // indirect
 	mvdan.cc/xurls/v2 v2.6.0 // indirect
 	pluginrpc.com/pluginrpc v0.6.0 // indirect
 )
