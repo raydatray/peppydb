@@ -2,6 +2,7 @@
 //! generated client.
 
 mod kv;
+mod scan;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

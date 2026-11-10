@@ -31,6 +31,20 @@ pub(crate) fn user_key(key: &[u8]) -> Result<Vec<u8>, Status> {
     Ok([&[USER], key].concat())
 }
 
+/// The stored range for a user range `[start, end)`. An unset bound
+/// becomes the edge of the user keyspace, so the result never reaches a
+/// system key or a reserved prefix.
+pub(crate) fn user_range(start: Option<&[u8]>, end: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+    let start = start.map_or_else(|| vec![USER], |start| [&[USER], start].concat());
+    let end = end.map_or_else(|| vec![USER + 1], |end| [&[USER], end].concat());
+    (start, end)
+}
+
+/// The user key for a stored user key: strip the namespace byte.
+pub(crate) fn strip(stored: &[u8]) -> Vec<u8> {
+    stored[1..].to_vec()
+}
+
 /// Why a database cannot be served.
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {
@@ -70,5 +84,17 @@ mod tests {
             tonic::Code::InvalidArgument
         );
         assert_eq!(FORMAT_KEY[0], 0x00);
+    }
+
+    #[test]
+    fn user_ranges_stay_inside_the_user_keyspace() {
+        assert_eq!(user_range(None, None), (vec![USER], vec![USER + 1]));
+        assert_eq!(
+            user_range(Some(b"a"), Some(b"\xff\xff")),
+            (b"\x01a".to_vec(), b"\x01\xff\xff".to_vec())
+        );
+        let (start, _) = user_range(None, None);
+        assert!(FORMAT_KEY < start.as_slice());
+        assert_eq!(strip(b"\x01abc"), b"abc");
     }
 }
