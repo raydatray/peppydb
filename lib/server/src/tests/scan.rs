@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use server_proto::kv::v1::kv_service_client::KvServiceClient;
-use server_proto::kv::v1::{PutRequest, ScanRequest, ScanResponse};
+use kv_proto::kv::v1::kv_service_client::KvServiceClient;
+use kv_proto::kv::v1::{PutRequest, ScanRequest, ScanResponse};
 use tonic::Code;
 use tonic::transport::Channel;
 

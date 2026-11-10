@@ -1,10 +1,10 @@
 load("//build:defs.bzl", "peppy_rust_library")
 
-# Generated code for proto/: prost messages and tonic clients and servers.
-# tools/gen-proto writes src/generated/; do not edit it. Internal to the
-# server component.
+# Generated Rust code for proto/kv/v1 (peppydb.kv.v1): prost messages and
+# tonic clients and servers. tools/gen-proto writes src/generated/; do not
+# edit it.
 peppy_rust_library(
-    name = "server-proto",
+    name = "kv-proto",
     deps = [
         "//third-party/rust:prost",
         "//third-party/rust:tonic",

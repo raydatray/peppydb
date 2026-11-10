@@ -6,7 +6,7 @@ peppy_rust_library(
     name = "server",
     deps = [
         "//lib/engine:engine",
-        "//crates/server-proto:server-proto",
+        "//proto/kv/v1/rust:kv-proto",
         "//third-party/rust:arc-swap",
         "//third-party/rust:clap",
         "//third-party/rust:thiserror",

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use server_proto::kv::v1::{CheckpointRequest, GetRequest, PutRequest, StatusRequest};
+use kv_proto::kv::v1::{CheckpointRequest, GetRequest, PutRequest, StatusRequest};
 use tonic::Code;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;

@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::Db;
-use server_proto::kv::v1::admin_service_server::AdminServiceServer;
-use server_proto::kv::v1::kv_service_server::KvServiceServer;
+use kv_proto::kv::v1::admin_service_server::AdminServiceServer;
+use kv_proto::kv::v1::kv_service_server::KvServiceServer;
 use tokio::net::TcpListener;
 use tonic::server::NamedService;
 use tonic::transport::server::TcpIncoming;

@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use server_proto::kv::v1::admin_service_client::AdminServiceClient;
-use server_proto::kv::v1::kv_service_client::KvServiceClient;
+use kv_proto::kv::v1::admin_service_client::AdminServiceClient;
+use kv_proto::kv::v1::kv_service_client::KvServiceClient;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
