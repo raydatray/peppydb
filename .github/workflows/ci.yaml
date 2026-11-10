@@ -24,7 +24,12 @@ jobs:
       - name: Run clippy
         run: tools/clippy.sh
       - name: Run tests
-        run: tools/buck2 test //crates/... //bin/... //go/...
+        run: tools/buck2 test //bin/... //lib/... //proto/...
+      # Without a Sapling checkout there is no parent revision to compare,
+      # so CI runs lint and checks the generated code; the breaking-change
+      # check runs locally.
+      - name: Check generated protobuf code
+        run: tools/gen-proto --check
 
   cargo:
     runs-on: ubuntu-latest
@@ -47,12 +52,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: Check generated third-party Go rules
         run: tools/gobuckify-remote --check
       - name: Vet and test with the go command
-        working-directory: go
         run: |
           go vet ./...
           go test ./...
