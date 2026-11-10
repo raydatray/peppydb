@@ -6,11 +6,11 @@
 //! bounds the work in flight, and shutdown closes it and takes every permit
 //! to prove that no engine call is running.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwapOption;
 use engine::Db;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tonic::Status;
 
 use crate::Config;
@@ -21,6 +21,10 @@ pub(crate) struct Inner {
     db: ArcSwapOption<Db>,
     inflight: Arc<Semaphore>,
     pub(crate) config: Config,
+    /// The first WAL failure: the server must stop (fail-stop).
+    fatal: Mutex<Option<engine::Error>>,
+    /// Woken once, by the first WAL failure.
+    pub(crate) fatal_notify: Notify,
 }
 
 impl Inner {
@@ -29,6 +33,8 @@ impl Inner {
             db: ArcSwapOption::from_pointee(db),
             inflight: Arc::new(Semaphore::new(config.max_inflight)),
             config,
+            fatal: Mutex::new(None),
+            fatal_notify: Notify::new(),
         }
     }
 
@@ -38,15 +44,40 @@ impl Inner {
         &self,
         f: impl FnOnce(&Db) -> Result<T, engine::Error> + Send + 'static,
     ) -> Result<T, Status> {
-        self.blocking_status(move |db| f(db).map_err(|error| crate::status::status(&error)))
-            .await
+        match self.run(f).await? {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.engine_status(error)),
+        }
     }
 
-    /// As [`Inner::blocking`], for calls that build their own status.
-    pub(crate) async fn blocking_status<T: Send + 'static>(
+    /// The status for an engine error. A WAL error also starts the
+    /// fail-stop shutdown: the WAL fails every later write until a reopen.
+    fn engine_status(&self, error: engine::Error) -> Status {
+        let status = crate::status::status(&error);
+        if matches!(error, engine::Error::Wal(_)) {
+            let mut fatal = self.fatal.lock().unwrap_or_else(PoisonError::into_inner);
+            if fatal.is_none() {
+                tracing::error!(%error, "the WAL failed; stopping the server");
+                *fatal = Some(error);
+                // Stores a permit if serve is not waiting yet.
+                self.fatal_notify.notify_one();
+            }
+        }
+        status
+    }
+
+    /// The first WAL failure, if any.
+    pub(crate) fn take_fatal(&self) -> Option<engine::Error> {
+        self.fatal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    async fn run<R: Send + 'static>(
         &self,
-        f: impl FnOnce(&Db) -> Result<T, Status> + Send + 'static,
-    ) -> Result<T, Status> {
+        f: impl FnOnce(&Db) -> R + Send + 'static,
+    ) -> Result<R, Status> {
         let permit = Arc::clone(&self.inflight)
             .acquire_owned()
             .await
@@ -61,7 +92,7 @@ impl Inner {
             f(&db)
         })
         .await
-        .map_err(|error| Status::internal(format!("engine task failed: {error}")))?
+        .map_err(|error| Status::internal(format!("engine task failed: {error}")))
     }
 
     /// Stop new engine calls, wait for running ones, and take the database.

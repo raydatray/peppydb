@@ -1,22 +1,28 @@
 //! In-process tests: a temporary database, `serve` on `127.0.0.1:0`, and a
 //! generated client.
 
+mod admin;
 mod kv;
 mod scan;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use server_proto::kv::v1::admin_service_client::AdminServiceClient;
 use server_proto::kv::v1::kv_service_client::KvServiceClient;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
+use tonic_health::pb::health_client::HealthClient;
 
-use crate::{Config, Exit, ServeError, serve};
+use crate::bridge::Inner;
+use crate::{Config, Exit, ServeError, prepare, run};
 
 /// A running server over a database directory.
 pub(super) struct Server {
     pub(super) addr: SocketAddr,
+    inner: Arc<Inner>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<Exit, ServeError>>>,
 }
@@ -39,11 +45,13 @@ impl Server {
         let (stop, stopped) = oneshot::channel();
         // The listener is already bound, so clients can connect before
         // `serve` starts accepting.
-        let task = tokio::spawn(serve(db, listener, config, async {
+        let inner = prepare(db, config).await.expect("prepare");
+        let task = tokio::spawn(run(Arc::clone(&inner), listener, async {
             let _ = stopped.await;
         }));
         Self {
             addr,
+            inner,
             stop: Some(stop),
             task: Some(task),
         }
@@ -53,6 +61,37 @@ impl Server {
         KvServiceClient::connect(format!("http://{}", self.addr))
             .await
             .expect("connect")
+    }
+
+    pub(super) async fn admin(&self) -> AdminServiceClient<Channel> {
+        AdminServiceClient::connect(format!("http://{}", self.addr))
+            .await
+            .expect("connect")
+    }
+
+    pub(super) async fn health(&self) -> HealthClient<Channel> {
+        let channel = Channel::from_shared(format!("http://{}", self.addr))
+            .unwrap()
+            .connect()
+            .await
+            .expect("connect");
+        HealthClient::new(channel)
+    }
+
+    /// Make the WAL's next sync fail.
+    pub(super) async fn fail_next_wal_sync(&self) {
+        self.inner
+            .blocking(|db| {
+                db.fail_next_wal_sync();
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Wait for `serve` to return without triggering shutdown.
+    pub(super) async fn exited(mut self) -> Result<Exit, ServeError> {
+        self.task.take().unwrap().await.unwrap()
     }
 
     /// Trigger shutdown and wait for `serve` to return.

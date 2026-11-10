@@ -3,7 +3,9 @@
 //!
 //! [`serve`] is the entry point. It takes an opened database and a bound
 //! listener, serves until its shutdown future completes, then drains
-//! requests and closes the database.
+//! requests and closes the database. A WAL failure stops it too
+//! ([`Exit::Fatal`]): the engine refuses writes until a reopen, so the
+//! process should exit and be restarted.
 //!
 //! - **Semantics are the engine's.** A `Put` or `Delete` returns `OK` only
 //!   once durable; single keys are linearizable; scans are consistent per
@@ -19,10 +21,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::Db;
+use server_proto::kv::v1::admin_service_server::AdminServiceServer;
 use server_proto::kv::v1::kv_service_server::KvServiceServer;
 use tokio::net::TcpListener;
+use tonic::server::NamedService;
 use tonic::transport::server::TcpIncoming;
+use tonic_health::ServingStatus;
 
+mod admin;
 mod bridge;
 mod keys;
 mod kv;
@@ -85,6 +91,9 @@ pub enum Exit {
     /// The shutdown future completed; the database closed with a
     /// checkpoint.
     Clean,
+    /// A WAL failure stopped the server. The database was dropped without
+    /// a checkpoint; a restart reopens it and replays the durable WAL.
+    Fatal(engine::Error),
 }
 
 /// Why [`serve`] failed.
@@ -102,33 +111,86 @@ pub enum ServeError {
     Join(#[from] tokio::task::JoinError),
 }
 
-/// Serve `db` on `listener` until `shutdown` completes, then drain and
-/// close the database.
+/// Serve `db` on `listener` until `shutdown` completes or the WAL fails,
+/// then drain requests and close the database.
 ///
 /// On an empty database `serve` writes the format marker; a database with
 /// data but no marker is refused with [`FormatError::Missing`].
+///
+/// Shutdown marks every service `NOT_SERVING` in the health service, stops
+/// accepting connections, waits up to [`Config::shutdown_grace`] for
+/// in-flight requests, then waits for every engine call to return. On a
+/// clean shutdown it closes the database, which checkpoints; after a WAL
+/// failure it drops it.
 pub async fn serve(
     db: Db,
     listener: TcpListener,
     config: Config,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Exit, ServeError> {
+    let inner = prepare(db, config).await?;
+    run(inner, listener, shutdown).await
+}
+
+/// Check the configuration and the format marker.
+pub(crate) async fn prepare(db: Db, config: Config) -> Result<Arc<bridge::Inner>, ServeError> {
     config.validate()?;
     let db = tokio::task::spawn_blocking(move || keys::check_format(&db).map(|()| db)).await??;
-    let inner = Arc::new(bridge::Inner::new(db, config));
+    Ok(Arc::new(bridge::Inner::new(db, config)))
+}
 
+/// Serve, drain, and close.
+pub(crate) async fn run(
+    inner: Arc<bridge::Inner>,
+    listener: TcpListener,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<Exit, ServeError> {
+    let config = inner.config;
     let kv = KvServiceServer::new(kv::Kv {
         inner: Arc::clone(&inner),
     })
     .max_decoding_message_size(config.max_request_bytes);
+    let admin = AdminServiceServer::new(admin::Admin {
+        inner: Arc::clone(&inner),
+    })
+    .max_decoding_message_size(config.max_request_bytes);
+
+    let (health, health_service) = tonic_health::server::health_reporter();
+    let names = [
+        "",
+        <KvServiceServer<kv::Kv> as NamedService>::NAME,
+        <AdminServiceServer<admin::Admin> as NamedService>::NAME,
+    ];
+    for name in names {
+        health
+            .set_service_status(name, ServingStatus::Serving)
+            .await;
+    }
 
     let (stopping, stopped) = tokio::sync::oneshot::channel();
-    let signal = async move {
-        shutdown.await;
-        let _ = stopping.send(());
+    let signal = {
+        let inner = Arc::clone(&inner);
+        let mut health = health.clone();
+        async move {
+            tokio::select! {
+                () = shutdown => tracing::info!("shutting down"),
+                () = inner.fatal_notify.notified() => {}
+            }
+            // Watchers see NOT_SERVING; clearing the statuses then ends
+            // their streams, so they do not hold up the drain.
+            for name in names {
+                health
+                    .set_service_status(name, ServingStatus::NotServing)
+                    .await;
+                health.clear_service_status(name).await;
+            }
+            let _ = stopping.send(());
+        }
     };
     let server = tonic::transport::Server::builder()
+        .add_service(health_service)
         .add_service(kv)
+        .add_service(admin)
         .serve_with_incoming_shutdown(TcpIncoming::from(listener), signal);
     tokio::select! {
         result = server => result?,
@@ -138,10 +200,13 @@ pub async fn serve(
         } => tracing::warn!("shutdown grace period expired with requests in flight"),
     }
 
-    let db = inner
-        .take_db()
-        .await
-        .expect("only serve takes the database");
+    let db = inner.take_db().await.expect("only run takes the database");
+    if let Some(error) = inner.take_fatal() {
+        // A checkpoint cannot commit after a WAL failure: its hook syncs
+        // the WAL. The restart replays the durable WAL instead.
+        tokio::task::spawn_blocking(move || drop(db)).await?;
+        return Ok(Exit::Fatal(error));
+    }
     tokio::task::spawn_blocking(move || db.close())
         .await?
         .map_err(ServeError::Close)?;
