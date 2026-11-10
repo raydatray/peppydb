@@ -51,3 +51,31 @@ by Sarang Masti. Engineering at Meta, August 6, 2021.
   and shard management into a distributed key-value database. Describes RocksDB,
   Data Shuttle, and ShardManager, including their consistency and durability choices.
 - **Relevant sections:** Architecture, Data model, and Consistency.
+
+## Raft
+
+**In Search of an Understandable Consensus Algorithm (Extended Version)**
+by Diego Ongaro and John Ousterhout. USENIX ATC 2014.
+
+**Consensus: Bridging Theory and Practice** by Diego Ongaro. PhD
+dissertation, Stanford University, 2014.
+
+- [Extended paper (PDF)](https://raft.github.io/raft.pdf)
+- [Dissertation source and PDF](https://github.com/ongardie/dissertation)
+- **Use:** Primary reference for phase 2 replication: leader election, log
+  replication, safety, log compaction, and membership changes.
+- **Relevant sections:** Paper §5 (the algorithm and Figure 2), §7 (log
+  compaction), §8 (client interaction). Dissertation ch. 4 (membership
+  changes), ch. 6 (client interaction, read index, leases), §9.6 (pre-vote).
+
+## Raft implementations
+
+- [raft-rs](https://github.com/tikv/raft-rs) (TiKV): a Rust Raft core
+  without I/O, driven through a "Ready" loop; ported from etcd's Raft.
+- [etcd raft](https://github.com/etcd-io/raft): the Go library raft-rs
+  follows; a reference for pre-vote, check quorum, read index, and learners.
+- [openraft](https://github.com/databendlabs/openraft): an async Rust Raft
+  built on tokio, with storage and network traits.
+- **Use:** openraft is peppydb's Raft implementation
+  ([server roadmap](plans/0025-server-roadmap.md), decision 9). etcd raft
+  and raft-rs are references for Raft extensions and edge cases.
