@@ -15,7 +15,7 @@ updates `bf-tree-pages.md`.
 [single-threaded tree composition](0007-bf-tree-in-memory-tree.md) (split
 selector and admission rule), [page mutation](0004-bf-tree-page-mutation.md)
 and [prefix compression](0005-bf-tree-page-prefix.md) (record kinds, fences),
-[Buck2 build](0009-buck2-build.md) (crate rules),
+[Buck2 build](0009-workspace-buck2-build.md) (crate rules),
 [circular buffer component](0010-bf-tree-circular-buffer.md) (`Block`, the
 allocator the write loop uses).
 

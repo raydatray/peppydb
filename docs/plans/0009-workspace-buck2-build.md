@@ -7,7 +7,7 @@
 This stack adds `docs/design/build-system.md`.
 
 **Supersedes:** The "prefer modules inside the BF-Tree crate" decision in
-[0001: Phased crate layout](0001-crate-layout.md#decisions-and-trade-offs).
+[0001: Phased crate layout](0001-workspace-crate-layout.md#decisions-and-trade-offs).
 
 ## Goal and scope
 
