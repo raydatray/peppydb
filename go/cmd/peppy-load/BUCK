@@ -1,0 +1,12 @@
+# peppy-load: an external load generator for peppydb (plan 0026).
+go_binary(
+    name = "peppy-load",
+    srcs = glob(["*.go"]),
+    deps = [
+        "//go/internal/load:load",
+        "//go/kvpb:kvpb",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/credentials/insecure",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+)

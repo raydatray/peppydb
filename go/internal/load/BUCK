@@ -1,0 +1,12 @@
+go_library(
+    name = "load",
+    package_name = "peppydb/go/internal/load",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    visibility = ["//go/..."],
+)
+
+go_test(
+    name = "load-test",
+    srcs = glob(["*_test.go"]),
+    target_under_test = ":load",
+)
