@@ -110,11 +110,8 @@ impl<RT: AsyncRuntime> RaftTypeConfig for Types<RT> {
     type ErrorSource = openraft::AnyError;
 }
 
-// Used by the simulator's models now, and by the transport later.
-#[cfg(any(test, feature = "sim"))]
 /// openraft's vote under [`Types`].
 pub(crate) type OrVote = openraft::impls::Vote<LeaderId>;
-#[cfg(any(test, feature = "sim"))]
 /// openraft's log id under [`Types`].
 pub(crate) type OrLogId = openraft::impls::LogId<CommittedLeaderId>;
 /// openraft's entry payload under [`Types`].
@@ -122,14 +119,12 @@ pub(crate) type OrPayload = openraft::impls::EntryPayload<Command, Membership>;
 /// openraft's log entry under [`Types`].
 pub(crate) type OrEntry = openraft::impls::Entry<CommittedLeaderId, OrPayload>;
 
-#[cfg(any(test, feature = "sim"))]
 /// openraft's stored membership under [`Types`].
 pub(crate) type OrStoredMembership = openraft::StoredMembership<CommittedLeaderId, Membership>;
-#[cfg(any(test, feature = "sim"))]
 /// openraft's snapshot metadata under [`Types`].
 pub(crate) type OrSnapshotMeta = openraft::storage::SnapshotMeta<CommittedLeaderId, Membership>;
-#[cfg(any(test, feature = "sim"))]
 /// openraft's snapshot, with the bytes the models use as snapshot data.
+#[cfg(any(test, feature = "sim"))]
 pub(crate) type OrSnapshot = openraft::storage::Snapshot<CommittedLeaderId, Membership, Vec<u8>>;
 
 /// A log id from a term and an index.
