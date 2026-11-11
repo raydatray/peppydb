@@ -1,0 +1,17 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+peppy_rust_library(
+    name = "bf-tree-page",
+    deps = [
+        "//lib/bf-tree-node-id:bf-tree-node-id",
+        "//third-party/rust:crc32c",
+        "//third-party/rust:thiserror",
+        "//third-party/rust:zerocopy",
+    ],
+    visibility = [
+        "//lib/bf-tree-inner:",
+        "//lib/bf-tree-mini-page:",
+        "//lib/bf-tree-store:",
+        "//lib/bf-tree:",
+    ],
+)

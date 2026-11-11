@@ -1,0 +1,15 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+peppy_rust_library(
+    name = "bf-tree-store",
+    deps = [
+        "//lib/bf-tree-page:bf-tree-page",
+        "//lib/bf-tree-sync:bf-tree-sync",
+        "//third-party/rust:crc32c",
+        "//third-party/rust:libc",
+        "//third-party/rust:thiserror",
+        "//third-party/rust:zerocopy",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["//lib/bf-tree:"],
+)
