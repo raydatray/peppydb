@@ -9,6 +9,7 @@
 //!   openraft (plan 0025, S6).
 //! - [`Router`] is a perfect in-memory transport, and [`SimNetwork`] adds
 //!   faults to it.
+//! - `simulator` (tests only) runs a seeded cluster under faults.
 //!
 //! The models are generic over the async runtime. Tests run them on
 //! `openraft_rt_sim::SimRuntime`, so one seed fixes every timing.
@@ -20,6 +21,8 @@ mod mem_log;
 mod model_sm;
 mod network;
 mod router;
+#[cfg(test)]
+pub mod simulator;
 mod trace;
 
 pub use mem_log::LogConfig;
