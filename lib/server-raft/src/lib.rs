@@ -9,20 +9,40 @@
 //!   async runtime: Tokio in production, the deterministic simulator in
 //!   tests.
 //! - [`Command`] is the replicated payload, with a stable binary codec.
-//! - [`Transport`] is what a node needs from the network, over the peer
-//!   messages in [`transport`]. `server` implements it (S7).
+//! - [`RaftNode`] is the facade: propose, read barrier, status, leader
+//!   transfer, and the handlers for incoming peer messages.
+//! - [`Transport`] is what the node needs from the network, over the
+//!   peer messages in [`transport`]. `server` implements it (S7); tests
+//!   use the simulator's network.
 
 mod command;
+mod error;
+mod network;
+mod node;
 #[cfg(any(test, feature = "sim"))]
 pub mod rng;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
+#[cfg(test)]
+mod tests;
 pub mod transport;
 mod types;
 
 pub use command::CodecError;
 pub use command::Command;
 pub use command::Op;
+pub use error::LeaderHint;
+pub use error::ProposeError;
+pub use error::ReadError;
+pub use error::StartError;
+pub use error::StopError;
+pub use node::HandleError;
+pub use node::Proposed;
+pub use node::RaftConfig;
+pub use node::RaftNode;
+pub use node::ReadPoint;
+pub use node::Role;
+pub use node::Status;
 pub use transport::Transport;
 pub use types::LeaderId;
 pub use types::Membership;
