@@ -22,6 +22,8 @@ pub mod checker;
 mod mem_log;
 mod model_sm;
 mod network;
+#[cfg(test)]
+pub mod regressions;
 mod router;
 #[cfg(test)]
 pub mod simulator;
