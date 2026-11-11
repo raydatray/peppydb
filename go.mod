@@ -1,9 +1,17 @@
-module peppydb/go
+module peppydb
 
 go 1.27.0
 
+// Keep the go command out of build outputs and third-party trees. buck-out/
+// holds unpacked third-party Go sources that `go ./...` would otherwise
+// treat as packages of this module (plan 0027).
+ignore (
+	./buck-out
+	./target
+	./third-party
+)
+
 require (
-	golang.org/x/sync v0.24.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e
 )
@@ -89,6 +97,7 @@ require (
 	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

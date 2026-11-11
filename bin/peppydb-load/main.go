@@ -1,7 +1,7 @@
-// peppy-load drives a running peppydb server over gRPC and reports
+// peppydb-load drives a running peppydb server over gRPC and reports
 // throughput and latency (plan 0026, "The load generator").
 //
-//	peppy-load --addr 127.0.0.1:7420 --workload mixed:90 --concurrency 64 \
+//	peppydb-load --addr 127.0.0.1:7420 --workload mixed:90 --concurrency 64 \
 //	    --duration 30s --keys 1000000 --distribution zipf --preload
 //
 // Workers issue requests back to back (a closed loop). Errors are counted
@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"peppydb/go/internal/load"
 	"peppydb/go/kvpb"
+	"peppydb/lib/load"
 )
 
 type options struct {
@@ -60,7 +60,7 @@ func main() {
 	flag.BoolVar(&o.json, "json", false, "print JSON instead of text")
 	flag.Parse()
 	if err := run(o); err != nil {
-		fmt.Fprintln(os.Stderr, "peppy-load:", err)
+		fmt.Fprintln(os.Stderr, "peppydb-load:", err)
 		os.Exit(1)
 	}
 }
