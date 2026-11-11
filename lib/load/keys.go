@@ -1,4 +1,4 @@
-// Package load holds the pieces of peppy-load that do not need a server:
+// Package load holds the pieces of peppydb-load that do not need a server:
 // key generation, the latency histogram, and result formatting
 // (plan 0026, "The load generator").
 package load

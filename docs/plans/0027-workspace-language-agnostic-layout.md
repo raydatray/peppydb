@@ -1,6 +1,6 @@
 # 0027: Workspace layout by role, not by language
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md),
 [architecture](../design/architecture.md#code-layout),
@@ -286,7 +286,8 @@ show up in Sapling as renames, so review focuses on the edits.
 - **Core changes:** `sl mv crates/<x> lib/<x>` for every crate except
   `server-proto`; `BUCK` labels and visibility; `build/defs.bzl`;
   `tools/autocargo`, `clippy.sh`, `fmt.sh`, `check-unsafe`,
-  `gcp/targets.txt`, `linux-run`; `tools/autocargo`; `AGENTS.md` paths.
+  `gcp/targets.txt`, `linux-run`; `tools/autocargo`; `AGENTS.md` paths;
+  `//lib/...` in the CI Buck2 test command.
 - **Verification:** `tools/buck2 test //lib/... //bin/...`;
   `cargo test --workspace --locked`; fmt, clippy, `autocargo --check`;
   Miri for `lib/bf-tree-circular-buffer`.
@@ -298,8 +299,9 @@ show up in Sapling as renames, so review focuses on the edits.
   list; `go/cmd/peppy-load` to `bin/peppydb-load`; `go/internal/load` to
   `lib/load`; remove `go/cmd/hello` and `go/internal/greet`; import paths;
   `tools/gobuckify-remote`, `check-tools`, `fmt.sh`, `gopackagesdriver`,
-  `gen-proto` (Go commands at the root); `go/kvpb` stays in place for this
-  diff and becomes package `peppydb/go/kvpb` of the root module.
+  `gen-proto` (Go commands at the root); the CI Go job at the root;
+  `go/kvpb` stays in place for this diff and becomes package
+  `peppydb/go/kvpb` of the root module.
 - **Verification:** `go vet ./... && go test ./...` from the root;
   `tools/buck2 test //bin/... //lib/... //go/...`;
   `tools/gobuckify-remote --check`; `tools/gen-proto --check`.
@@ -311,7 +313,9 @@ show up in Sapling as renames, so review focuses on the edits.
   `crates/server-proto` to `proto/kv/v1/rust` as crate `kv-proto`;
   `go/kvpb` to `proto/kv/v1/go` as package `kvv1`; `go_package`;
   `buf.yaml` lint exception; `buf.gen.yaml`; `tools/gen-proto` output
-  paths; imports in `lib/server` and `bin/peppydb-load`; regenerate.
+  paths; imports in `lib/server` and `bin/peppydb-load`; regenerate; the
+  CI Buck2 test command becomes `//bin/... //lib/... //proto/...`, and CI
+  runs `tools/gen-proto --check`.
 - **Verification:** `tools/gen-proto --check`, with the breaking check run
   against the old tree (`PROTO_BASE` pointing at the parent revision,
   where the file is at its old path; buf compares by package and type, so
@@ -332,7 +336,8 @@ show up in Sapling as renames, so review focuses on the edits.
 - **Purpose:** Catch stragglers in one place.
 - **Core changes:** fix any remaining reference to `crates/`, `go/`,
   `peppy-load`, `server_proto`, or `kvpb` outside completed plans; record
-  verification outcomes in this plan.
+  verification outcomes in this plan. (The CI workflow fixes first landed
+  here; they now live in diffs 2 to 4.)
 - **Verification:** `grep` finds no old paths outside `docs/plans/00{01..26}*`;
   the full `AGENTS.md` check list passes.
 
@@ -365,15 +370,74 @@ Deferred, not blocking: the area prefix for `0024-gcp-remote-bench.md`.
 ## Progress
 
 - [x] Agree on the layout and commit stack with the user.
-- [ ] 2/6 Rust libraries to `lib/`.
-- [ ] 3/6 Go module to the root.
-- [ ] 4/6 API into `proto/kv/v1`.
-- [ ] 5/6 Documents and `AGENTS.md`.
-- [ ] 6/6 Straggler check; stack-wide verification.
+- [x] 2/6 Rust libraries to `lib/`.
+- [x] 3/6 Go module to the root.
+- [x] 4/6 API into `proto/kv/v1`.
+- [x] 5/6 Documents and `AGENTS.md`.
+- [x] 6/6 Straggler check; stack-wide verification.
+
+## Verification outcomes (2026-11-10)
+
+On macOS (Apple M4 Pro); Docker was not available.
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 28 Rust targets clean |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass: 27 targets (one fewer than before: the hello-world Go test is gone) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test ./...` from the root | Pass; `go list ./...` lists exactly `bin/peppydb-load`, `lib/load`, and `proto/kv/v1/go`, nothing under `buck-out/` |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check` | Up to date |
+| `tools/gen-proto --check` | Up to date. The move of `kv.proto` passed `buf breaking`; a deliberate `uint32` to `uint64` change of `page_size` was still reported |
+| Miri: `lib/bf-tree-circular-buffer` | Pass |
+| Paths in design documents and `AGENTS.md` | Every `lib/`, `bin/`, `proto/`, and `tools/` path exists, except four labelled as future (`bin/peppydb-gateway`, `bin/peppydb-placement`, `proto/raft/v1`, `proto/third_party/`); every link and anchor resolves |
+| Old paths | None outside completed plans, except the deliberate old-to-new mapping in `build-system.md` |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`buf breaking` compared by file.** With the `FILE` rules, moving
+  `kv.proto` from `proto/peppydb/kv/v1/` to `proto/kv/v1/` was reported as
+  a deleted file. `buf.yaml` now uses the `PACKAGE` rules, which compare by
+  package and type: the move passes, and real changes, such as a field's
+  type, are still caught.
+- **buf's Go output root.** With the module at the repository root,
+  `buf.gen.yaml` writes to `.` with `module=peppydb`, and `go_package`
+  (`peppydb/proto/kv/v1/go;kvv1`) places the files in `proto/kv/v1/go/`.
+- **gofmt does not read `go.mod`'s `ignore` list.** `tools/fmt.sh` finds Go
+  files itself, pruning `buck-out/`, `target/`, `third-party/`, and dot
+  directories, and checks `package_name` for each directory that holds Go
+  files.
+- **CI workflows named the old paths** (`.github/workflows/ci.yaml` and
+  `buck2-update.yaml`). They were first fixed together in diff 6, but CI
+  runs each pull request's own workflow, so diffs 2 to 5 ran the old
+  commands against the new layout: the Go job could not find
+  `go/go.mod` after diff 3, and the Buck2 job could not find `crates/`
+  after diff 4. Worse, diffs 2 and 3 passed while testing only
+  `//crates/...` (just `server-proto`), not `//lib/...`. Each diff now
+  updates the workflows for its own move:
+  - diff 2 adds `//lib/...` to the Buck2 test command;
+  - diff 3 points `setup-go` at the root `go.mod` and `go.sum` and runs
+    the `go` command from the root (`//go/...` stays until `go/kvpb`
+    moves);
+  - diff 4 replaces `//crates/... //go/...` with `//proto/...`.
+
+  Diff 4 also adds the `tools/gen-proto --check` step that plan 0026 added
+  to `AGENTS.md` but not to CI. CI has no Sapling checkout, so there the
+  breaking-change check is skipped and only lint and the generated code
+  are checked; locally the check runs against the parent revision.
+- **A flaky engine test, older than this stack.** CI failed once on diff 2
+  and once on diff 6 in
+  `tests::crash::concurrent_writers_with_racing_checkpoints_recover_a_prefix`,
+  with `SequenceOrder { seq: 606, applied: 607 }` from `Db::write`. The
+  test helper `unsynced_put` called `Tree::put_logged` without the write
+  gate that `Db::put` holds, so an unsynced put could take and apply a
+  later sequence while a batch held the gate exclusively between its WAL
+  append and its apply. `Db` itself is not affected. The fix is a
+  separate one-diff stack below this one
+  (`[1/1][engine-crash-test-gate][tests]`).
+- **`go.sum` and `Cargo.lock`.** `go mod tidy` at the root marked
+  `golang.org/x/sync` indirect, because the hello-world package that
+  imported it is gone. `Cargo.lock` changed only in the workspace entry
+  for `server-proto`, now `kv-proto`.
 
 ## Agent notes
 
