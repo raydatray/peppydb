@@ -39,11 +39,11 @@ flowchart TD
 - Every leaf is a fenced `Page`. Every leaf is at the same depth.
 - Inner nodes store no interval. Leaf fences are the only place the key-space
   partition is stored a second time, so they make the structure self-checking.
-- Inner nodes live in frames (`crates/bf-tree/src/frames.rs`), addressed
+- Inner nodes live in frames (`lib/bf-tree/src/frames.rs`), addressed
   by dense `InnerId`s. Each frame holds a version word and an immutable
   4 KiB image of the node; a writer publishes a new image instead of
   changing the old one. Frames are never freed, so an ID is never reused.
-  `Inner` (`crates/bf-tree/src/inner.rs`) holds the frames, the root word,
+  `Inner` (`lib/bf-tree/src/inner.rs`) holds the frames, the root word,
   and the `root_grow` mutex. Inner nodes are derived, in-memory data:
   nothing persists them, and `Tree::open` rebuilds them from leaf fences,
   allocating complete frames. The

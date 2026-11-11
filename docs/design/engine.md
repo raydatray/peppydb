@@ -33,12 +33,12 @@ Related documents:
 [concurrency](bf-tree-concurrency.md) (leaf locks), and
 [build system](build-system.md) (Buck2 visibility).
 
-The WAL code is in `crates/engine-wal/src/`: `lib.rs` (`Wal`, `Op`, `Record`,
+The WAL code is in `lib/engine-wal/src/`: `lib.rs` (`Wal`, `Op`, `Record`,
 `WalError`), `record.rs` (record and segment-header encoding), `segment.rs`
 (naming, listing, directory sync), `replay.rs` (`Wal::replay`, `Replayed`),
 and `flusher.rs` (`WalOptions`, `open`, appends, the flusher thread,
 durability waits, truncation, `close`, `abandon`). The tests are in
-`crates/engine-wal/src/tests/` (`record.rs`, `replay.rs`, `writer.rs`,
+`lib/engine-wal/src/tests/` (`record.rs`, `replay.rs`, `writer.rs`,
 `lifecycle.rs`).
 
 ## Terms
@@ -62,7 +62,7 @@ The engine component has one entry crate, `engine` (plan 0021), and
 internal crates. `engine-wal` is the first internal crate:
 
 ```python
-# crates/engine-wal/BUCK
+# lib/engine-wal/BUCK
 peppy_rust_library(
     name = "engine-wal",
     deps = [
@@ -70,11 +70,11 @@ peppy_rust_library(
         "//third-party/rust:thiserror",
     ],
     test_deps = ["//third-party/rust:tempfile"],
-    visibility = ["//crates/engine:"],
+    visibility = ["//lib/engine:"],
 )
 ```
 
-- **Visibility.** Only the `//crates/engine` package may depend on
+- **Visibility.** Only the `//lib/engine` package may depend on
   `engine-wal`. Buck2 accepts the pattern before the package exists.
 - **No `bf-tree` dependency.** The WAL knows sequences, operations, and
   bytes, not trees. It is testable without a tree and cannot reach into tree
@@ -495,7 +495,7 @@ synced. Such bytes belong to a group whose waiters were never woken, so
 
 **Why `abandon` is public.** The engine's crash tests are in another crate
 (`engine`), and `cfg(test)` does not cross crates. Buck2 visibility limits
-the crate, and so `abandon`, to `//crates/engine:`. Its documentation states
+the crate, and so `abandon`, to `//lib/engine:`. Its documentation states
 that production code calls `close`. The other test hooks (a sync counter
 and a sync-fault injector) stay crate-private.
 
@@ -536,7 +536,7 @@ pub enum WalError {
 
 ## Guarantees
 
-Test paths are relative to `crates/engine-wal/src/tests/`.
+Test paths are relative to `lib/engine-wal/src/tests/`.
 
 | Guarantee | Tests |
 | --- | --- |
@@ -632,8 +632,8 @@ makes every acknowledged write durable, applies atomic batches, serves
 reads, checkpoints on a background policy that bounds the WAL, and closes
 in order.
 
-The code is in `crates/engine/src/lib.rs`. The tests are in
-`crates/engine/src/tests/`: `open.rs` (open, recovery, and reads),
+The code is in `lib/engine/src/lib.rs`. The tests are in
+`lib/engine/src/tests/`: `open.rs` (open, recovery, and reads),
 `write.rs` (single writes), `batch.rs` (batches), `checkpoint.rs`
 (checkpoints, policy, and snapshots), `crash.rs` (simulated crashes), and
 `io.rs` (the store I/O mode). The benchmarks are in `bench.rs`
@@ -685,14 +685,14 @@ a compile-time assertion in `lib.rs` checks it.
 ### Crate and boundaries
 
 ```python
-# crates/engine/BUCK
+# lib/engine/BUCK
 # The engine component's entry crate. Other components depend on this
 # crate only; engine-* crates are internal.
 peppy_rust_library(
     name = "engine",
     deps = [
-        "//crates/bf-tree:bf-tree",
-        "//crates/engine-wal:engine-wal",
+        "//lib/bf-tree:bf-tree",
+        "//lib/engine-wal:engine-wal",
         "//third-party/rust:thiserror",
     ],
     test_deps = ["//third-party/rust:tempfile"],
@@ -704,8 +704,8 @@ peppy_rust_library(
   `bin/` must depend on `engine`, never on `engine-wal`.
 - **`engine` depends on `bf-tree` only** from the BF-Tree component, never
   on a `bf-tree-*` crate. The `bf-tree-*` crates' visibility lists do not
-  include `//crates/engine`, so Buck2 rejects such a dependency. `engine-wal`
-  is visible only to `//crates/engine:`. Plan 0021 checked both rules with
+  include `//lib/engine`, so Buck2 rejects such a dependency. `engine-wal`
+  is visible only to `//lib/engine:`. Plan 0021 checked both rules with
   local experiments; each failed with "is not visible".
 - **Re-exports.** `engine` re-exports, under their own names, the types
   that appear in its public signatures: `Io` (for `Options::io`),
@@ -1283,7 +1283,7 @@ The model takes about 20 s, bound by real fsyncs.
 
 ### Db guarantees
 
-Test paths are relative to `crates/engine/src/tests/`.
+Test paths are relative to `lib/engine/src/tests/`.
 
 | Guarantee | Tests |
 | --- | --- |
@@ -1309,7 +1309,7 @@ Other behaviour with tests:
 ### Read consistency
 
 What a concurrent reader can observe. The crate documentation
-(`crates/engine/src/lib.rs`, "Consistency") states the same contract for
+(`lib/engine/src/lib.rs`, "Consistency") states the same contract for
 callers.
 
 **Guaranteed.**
@@ -1432,8 +1432,8 @@ entries with `Db::apply`, decides when to checkpoint, and moves whole
 states between replicas with snapshots.
 [Plan 0022](../plans/0022-engine-external.md) built it.
 
-The code is in `crates/engine/src/lib.rs`. The tests are in
-`crates/engine/src/tests/`: `external.rs` (modes, `apply`, the hook,
+The code is in `lib/engine/src/lib.rs`. The tests are in
+`lib/engine/src/tests/`: `external.rs` (modes, `apply`, the hook,
 reopen, and snapshot install) and `replica.rs` (a standalone leader and an
 external follower, end to end).
 
@@ -1793,7 +1793,7 @@ seq)` replays the stream into a map up to `seq` and is the oracle.
 
 ### External mode guarantees
 
-Test paths are relative to `crates/engine/src/tests/`.
+Test paths are relative to `lib/engine/src/tests/`.
 
 | Guarantee | Tests |
 | --- | --- |
@@ -1868,13 +1868,13 @@ path.
 
 [Plan 0023](../plans/0023-bf-tree-io-perf.md) added three informational
 benchmarks, not gates: `bench_engine_write` and `bench_wal_recovery` in
-`crates/engine/src/tests/bench.rs`, and `bench_wal_append` in
-`crates/engine-wal/src/tests/bench.rs`. Run them in release mode, for
+`lib/engine/src/tests/bench.rs`, and `bench_wal_append` in
+`lib/engine-wal/src/tests/bench.rs`. Run them in release mode, for
 example:
 
 ```sh
-tools/linux-run tools/buck2 run @build/mode/release //crates/engine:engine-unittest -- --ignored --nocapture tests::bench::
-tools/linux-run tools/buck2 run @build/mode/release //crates/engine-wal:engine-wal-unittest -- --ignored --nocapture tests::bench::
+tools/linux-run tools/buck2 run @build/mode/release //lib/engine:engine-unittest -- --ignored --nocapture tests::bench::
+tools/linux-run tools/buck2 run @build/mode/release //lib/engine-wal:engine-wal-unittest -- --ignored --nocapture tests::bench::
 ```
 
 **Environment for every number in this section:** *Docker on macOS

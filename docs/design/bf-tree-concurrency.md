@@ -83,7 +83,7 @@ pub struct Tree {
     sequencing: AtomicU8,
 }
 
-/// The routing layer (crates/bf-tree/src/inner.rs).
+/// The routing layer (lib/bf-tree/src/inner.rs).
 struct Inner {
     /// A packed `ChildRef`; bit 63 marks a leaf root.
     root: AtomicU64,
@@ -132,7 +132,7 @@ tree than last time, so reads write no shared cache line for their rolls
 
 ## Frames
 
-`crates/bf-tree/src/frames.rs` holds the inner nodes. Each inner node lives
+`lib/bf-tree/src/frames.rs` holds the inner nodes. Each inner node lives
 in one `Frame`, addressed by its `InnerId`:
 
 ```rust
@@ -319,7 +319,7 @@ lock. Scans release a leaf before they lock the next. Eviction and
 Eviction, `maintain`, and the deferred path take a leaf lock by ID while
 they hold no other leaf lock, exactly as the checkpoint pass does. Plan
 0018 added ranks 0 and 5 and the `superseded` mutex. Plan 0019 added no
-rank. The `Tree` doc comment in `crates/bf-tree/src/lib.rs` states the
+rank. The `Tree` doc comment in `lib/bf-tree/src/lib.rs` states the
 same order in seven groups (0 to 6): it merges this document's ranks 1 and
 2 into one group and names the checkpointing mutex, the gate, and the
 superseded-page list.
@@ -509,8 +509,8 @@ rebuild or a root shrink, replaces the root without holding it.
 
 ## Correctness argument
 
-The claims below refer to `crates/bf-tree/src/frames.rs` and
-`crates/bf-tree/src/inner.rs`.
+The claims below refer to `lib/bf-tree/src/frames.rs` and
+`lib/bf-tree/src/inner.rs`.
 
 1. **An even version names one image.** A writer stores a new image only
    while the version is odd, and stores it before the version becomes even
@@ -854,14 +854,14 @@ their own bytes back.
 
 ## Verification
 
-- `crates/bf-tree/src/tests/frames.rs` checks the frame primitive: a read
+- `lib/bf-tree/src/tests/frames.rs` checks the frame primitive: a read
   validates until a publication; a held frame gives `Retry`; an unchanged
   release restores the version; snapshots are immutable; 4 writers doing
   2000 locked increments each lose no update (count 8000, version 16000);
   and 2 writers making 20,000 publications each against 4 readers produce
   no torn image, and every validated read holds the image published at its
   version.
-- `crates/bf-tree/src/tests/route.rs` checks the reader protocol: a held
+- `lib/bf-tree/src/tests/route.rs` checks the reader protocol: a held
   frame makes `try_descend` return `Retry` at once; a route survives splits
   under other parents but not under its own; a leaf-root route is anchored
   at the root word and changes when the root grows; a route under the root
@@ -869,7 +869,7 @@ their own bytes back.
   it unchanged; `find_parent` reports the root until it grows. It also
   checks that writes without a split leave a route valid, and that a write
   through a stale route lands in the right half.
-- `crates/bf-tree/src/tests/concurrent.rs` runs writers on disjoint key
+- `lib/bf-tree/src/tests/concurrent.rs` runs writers on disjoint key
   prefixes, each with its own `BTreeMap` oracle and a counter key with
   increasing values. Readers check that values are well formed and that
   counters never decrease. Scanners check order and values in both scan
@@ -894,7 +894,7 @@ their own bytes back.
   and scrambled order, so splits race with splits of their neighbours and
   parents. The tree must reach height 4 or more, equal the union oracle,
   and pass the invariants.
-- `crates/bf-tree/src/tests/contention.rs` (plan 0016) has several writers
+- `lib/bf-tree/src/tests/contention.rs` (plan 0016) has several writers
   write the same keys, with values tagged by key, writer, and a per-writer
   sequence number. Readers check that every value is well formed and that
   one writer's sequence number never decreases for one key; scanners check
@@ -906,17 +906,17 @@ their own bytes back.
   writes, the circular-buffer budget holds, and the invariants hold.
   `concurrent_soak` (ignored) repeats such rounds across policies, buffer
   sizes, and backends for `PEPPYDB_SOAK_SECS` seconds (default 60).
-- `crates/bf-tree/src/tests/buffered.rs` runs four writers on a
+- `lib/bf-tree/src/tests/buffered.rs` runs four writers on a
   `FileStore` while another thread calls `checkpoint` in a loop. After a
   final checkpoint and a reopen, the tree must hold every write.
-- `crates/bf-tree/src/tests/checkpoint.rs` (plan 0018):
+- `lib/bf-tree/src/tests/checkpoint.rs` (plan 0018):
   `concurrent_checkpoints_commit_consecutive_ids_beside_writers` runs three
   checkpoint threads beside two writers; the 60 checkpoints commit ids 2
   to 61 once each, every returned `applied_seq` is at least the value read
   before the call, and a reopen holds all 1600 writes.
   `a_write_through_in_flight_holds_back_the_commit` holds the gate shared
   and checks that the checkpoint waits for it.
-- `crates/bf-tree/src/tests/crash.rs` (plan 0018):
+- `lib/bf-tree/src/tests/crash.rs` (plan 0018):
   `crashes_with_checkpoints_beside_writers_recover_after_replay` runs four
   writers and a checkpoint thread on a fault-injecting store that dies
   after 200 to 3200 calls. A split during the pass into a new leaf is one
@@ -938,7 +938,7 @@ their own bytes back.
 
 ## Measurements
 
-The benchmarks in `crates/bf-tree/src/tests/bench.rs` are informational,
+The benchmarks in `lib/bf-tree/src/tests/bench.rs` are informational,
 not gates. Plan 0016 ran the same harness before the frames (at diff 2,
 under the interim inner `RwLock` and global version) and after them (at
 the tip of the stack) on macOS. Plan 0023 ran it on Linux, in a container,
@@ -948,7 +948,7 @@ at plan 0016's diff 2 and at the tip of plan 0023
 ### macOS
 
 Conditions: Apple M4 Pro, 12 cores; release build;
-`tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::`;
+`tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::`;
 1,000,000 8-byte keys with 16-byte values; 32 MiB circular buffer; 1 s per
 point.
 
@@ -1038,8 +1038,8 @@ and on GCP (plan 0023) were not done.
 Commands, from the repository root:
 
 ```sh
-tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
-PEPPYDB_SOAK_SECS=120 tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
+tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
+PEPPYDB_SOAK_SECS=120 tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
 ```
 
 "Diff 2" is plan 0016's diff 2: the interim inner `RwLock` and global
@@ -1114,12 +1114,12 @@ Interpretation:
 
 Soak: `concurrent_soak` with `PEPPYDB_SOAK_SECS=120` in the container ran
 516 rounds in 120 s on 12 threads and passed. The container check
-(`tools/linux-run tools/buck2 test //crates/...`) passes since plan 0023's
+(`tools/linux-run tools/buck2 test //lib/...`) passes since plan 0023's
 diff 2, which added `clang` and `lld` to the image.
 
 #### The circular-buffer mutex
 
-`bench_circular_buffer_lock` (`crates/bf-tree/src/tests/bench_io.rs`,
+`bench_circular_buffer_lock` (`lib/bf-tree/src/tests/bench_io.rs`,
 same environment and shape) measures random `put` throughput with a
 32 MiB circular buffer, which evicts, and with a 1024 MiB buffer, which
 never evicts. Plan 0023 planned a `perf` profile instead, but the container

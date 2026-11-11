@@ -180,7 +180,7 @@ mini-page with a dirty record and unclaims it. See
 ### A full buffer
 
 `LeafMap::buffer` returns `Ok(None)` when the buffer cannot supply a block.
-Nothing changed then. The write path in `crates/bf-tree/src/write.rs`
+Nothing changed then. The write path in `lib/bf-tree/src/write.rs`
 loops over `write_attempt`, which returns `Attempt::Done` or
 `Attempt::NeedRoom`. On `NeedRoom`, every leaf guard of the attempt has
 already been dropped. `write` calls `make_room(classes.largest())` with no
@@ -195,7 +195,7 @@ another would allow a self-deadlock or an ABBA deadlock.
 
 ### Making room
 
-`Tree::make_room(need)` in `crates/bf-tree/src/evict.rs` evicts until
+`Tree::make_room(need)` in `lib/bf-tree/src/evict.rs` evicts until
 `has_room(need + capacity / 16)`. Each round calls `evict_one`, which
 returns one of three results:
 
@@ -235,7 +235,7 @@ head eviction is stalled.
 Plan 0014 left open whether the tree needs room accounting for in-flight
 evictions (`has_room_after_claims`) and a `Condvar` wait for the head to
 move. Plan 0023 measured it with `bench_head_stall`
-(`crates/bf-tree/src/tests/bench_io.rs`): 12 threads of replacing puts on
+(`lib/bf-tree/src/tests/bench_io.rs`): 12 threads of replacing puts on
 an in-memory tree with 1,000,000 keys of 8 bytes, 16-byte values, and a
 4 MiB circular buffer, for 1 s. In the stalled case, a test-only hook
 (`evict::EVICT_STALL_MICROS`, `cfg(test)` only) makes one eviction stall
@@ -314,7 +314,7 @@ A block near the head is the next victim. If it is accessed there, the
 tree copies it to the tail instead (paper §4.3, §5.5). Upstream does this
 at access time too (`move_cache_page_to_tail` in `src/mini_page_op.rs`).
 Eviction itself stays strictly FIFO. The code is in
-`crates/bf-tree/src/maintain.rs`.
+`lib/bf-tree/src/maintain.rs`.
 
 `Tree::relocate(leaf)` runs under the leaf's X lock:
 
@@ -406,7 +406,7 @@ M4 Pro host; a Linux VM with 12 CPUs, 8 GB of RAM, and kernel
 106.9 ns per `alloc` plus `free` with 10,000, 100,000, and 300,000 live
 blocks.
 
-`bench_circular_buffer_free` (`crates/bf-tree-circular-buffer/src/tests/bench.rs`)
+`bench_circular_buffer_free` (`lib/bf-tree-circular-buffer/src/tests/bench.rs`)
 compares size-class free lists with tombstone-on-free, a crate-private
 switch (`without_holes`) that only this benchmark uses. The trace is
 synthetic and seeded: 50,000 owners, 80 percent of steps on 20 percent of
