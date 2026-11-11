@@ -11,8 +11,10 @@
 //! - [`Command`] is the replicated payload, with a stable binary codec.
 
 mod command;
-#[cfg(test)]
-mod rng;
+#[cfg(any(test, feature = "sim"))]
+pub mod rng;
+#[cfg(any(test, feature = "sim"))]
+pub mod sim;
 mod types;
 
 pub use command::CodecError;
