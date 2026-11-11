@@ -3,7 +3,7 @@
 This document records the design of the server component: the
 `peppydb.kv.v1` gRPC API, the `server` crate that serves it over one
 `engine::Db`, the `peppydb serve` command, the proto toolchain, and the
-`peppy-load` load generator.
+`peppydb-load` load generator.
 [Plan 0026](../plans/0026-server-grpc-kv.md) built it, as milestone S1 of
 the [server roadmap](../plans/0025-server-roadmap.md).
 
@@ -16,10 +16,10 @@ variants, and protobuf code generation).
 
 ```mermaid
 flowchart LR
-    client["gRPC client<br/>(peppy-load, grpcurl, later the gateway)"] -->|HTTP/2| tonic
+    client["gRPC client<br/>(peppydb-load, grpcurl, later the gateway)"] -->|HTTP/2| tonic
     subgraph bin["peppydb serve"]
         cli["server::cli: flags, logs,<br/>signals, runtime"] --> serve
-        subgraph server["crates/server"]
+        subgraph server["lib/server"]
             serve["serve()"] --> tonic["tonic router"]
             tonic --> kv["KvService"] & admin["AdminService"] & health["grpc.health.v1"]
             kv & admin --> bridge["blocking bridge<br/>(semaphore + spawn_blocking)"]
@@ -30,17 +30,17 @@ flowchart LR
 
 | Path | Role |
 | --- | --- |
-| `proto/peppydb/kv/v1/kv.proto` | The API, with its semantics in comments |
-| `crates/server-proto` | Generated prost messages and tonic clients and servers; internal |
-| `crates/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
-| `crates/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
-| `crates/server/src/kv.rs`, `admin.rs` | The two services |
-| `crates/server/src/keys.rs` | The stored key layout and the format marker |
-| `crates/server/src/status.rs` | `engine::Error` to gRPC status |
-| `crates/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
-| `crates/server/src/tests/` | In-process tests and the process tests |
-| `go/kvpb` | Generated Go client |
-| `go/cmd/peppy-load`, `go/internal/load` | The load generator |
+| `proto/kv/v1/kv.proto` | The API (package `peppydb.kv.v1`), with its semantics in comments |
+| `proto/kv/v1/rust` | Crate `kv-proto`: generated prost messages and tonic clients and servers |
+| `proto/kv/v1/go` | Package `kvv1`: generated Go client and server |
+| `lib/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
+| `lib/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
+| `lib/server/src/kv.rs`, `admin.rs` | The two services |
+| `lib/server/src/keys.rs` | The stored key layout and the format marker |
+| `lib/server/src/status.rs` | `engine::Error` to gRPC status |
+| `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
+| `lib/server/src/tests/` | In-process tests and the process tests |
+| `bin/peppydb-load`, `lib/load` | The load generator (Go) |
 | `tools/gen-proto`, `tools/protogen` | Code generation |
 
 The component is named `server`, not `kv-server`, because in phase 2 the
@@ -234,10 +234,10 @@ fails if the checked-in code differs.
 
 ## The load generator
 
-`peppy-load` drives a running server over the generated Go client.
+`peppydb-load` drives a running server over the generated Go client.
 
 ```text
-peppy-load --addr 127.0.0.1:7420 --workload put|get|mixed[:read-percent]
+peppydb-load --addr 127.0.0.1:7420 --workload put|get|mixed[:read-percent]
            --concurrency 64 --conns 4 --duration 10s --warmup 2s
            --keys 100000 --key-size 16 --value-size 100
            --distribution uniform|zipf[:s] [--preload] [--seed 1] [--json]
@@ -256,7 +256,7 @@ peppy-load --addr 127.0.0.1:7420 --workload put|get|mixed[:read-percent]
 
 ## Guarantees and tests
 
-Test paths are relative to `crates/server/src/tests/` unless noted.
+Test paths are relative to `lib/server/src/tests/` unless noted.
 
 | Guarantee | Tests |
 | --- | --- |
@@ -275,10 +275,10 @@ Test paths are relative to `crates/server/src/tests/` unless noted.
 | 13. A write acknowledged by `peppydb serve` survives `SIGKILL`; `SIGTERM` exits 0. | `process.rs`: `acknowledged_writes_survive_sigkill_and_sigterm_stops_cleanly` |
 | 14. A second server on a locked database exits 1. | `process.rs`: `a_second_server_on_a_locked_database_exits_with_an_error` |
 | 15. The generated code matches `proto/`, which passes lint and the breaking-change check. | `tools/gen-proto --check` |
-| 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `go/internal/load/load_test.go` |
+| 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `lib/load/load_test.go` |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
-`crates/engine/src/tests/fault.rs` with `cargo test -p engine --features
+`lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
 fault-injection`, and through guarantee 12 under Buck2.
 
 **Process tests and lock files.** The process tests fork children from
@@ -327,7 +327,7 @@ double open still fails. Production servers do not fork.
 
 Informational, not gates. **Environment:** native macOS 27.0.1, Apple M4
 Pro (12 cores), APFS on the internal SSD, where one fsync takes about
-4 ms; release builds (`@build/mode/release`); `peppy-load` and
+4 ms; release builds (`@build/mode/release`); `peppydb-load` and
 `peppydb serve` on the same machine over loopback. Docker was not
 available, so these are not the Linux numbers of the
 [engine measurements](engine.md#measurements) and are not comparable to

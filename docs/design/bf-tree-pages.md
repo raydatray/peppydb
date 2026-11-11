@@ -199,7 +199,7 @@ key comparison; range endpoints use the index from either variant. Each probe
 compares the slot's two-byte zero-padded preview, read as a big-endian `u16`,
 with a query word that the search computes once from the query suffix
 (`preview_word`). It loads the stored suffix and compares slices only when the
-words are equal (`compare_preview` in `crates/bf-tree-page/src/read.rs`).
+words are equal (`compare_preview` in `lib/bf-tree-page/src/read.rs`).
 Unequal previews avoid payload access and out-of-line `memcmp` calls.
 
 **Why integer order is safe.** For two byte strings, a strict inequality of
@@ -211,7 +211,7 @@ search then compares the stored bytes. This preserves full lexicographic order,
 including embedded zero bytes, short keys, and preview collisions.
 
 `KeyRef::cmp_bytes` uses the same rule through `cmp_short`
-(`crates/bf-tree-page/src/key.rs`). It compares the prefix and the suffix parts
+(`lib/bf-tree-page/src/key.rs`). It compares the prefix and the suffix parts
 in turn. When the common length of two parts is at most 8, it compares them as
 zero-padded big-endian `u64` words (`padded_word`) and then by length; longer
 parts use slice order. Inner-node routing uses the same rule for its 4-byte
