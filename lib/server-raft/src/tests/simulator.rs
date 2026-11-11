@@ -1,5 +1,6 @@
 //! The simulator itself: determinism, and that every fault occurs (plan
-//! 0028, diff 10).
+//! 0028, diff 10); safety holds and the checker catches a broken log
+//! (diff 11).
 
 use crate::sim::Trace;
 use crate::sim::simulator::Outcome;
@@ -63,11 +64,30 @@ fn every_fault_occurs_and_the_cluster_recovers() {
         "the workload makes progress"
     );
     for report in &reports {
+        report.assert_safe();
         let first = report.contents.values().next().unwrap();
         assert!(
             report.contents.values().all(|c| c == first),
             "seed {}: replicas converge",
             report.seed
+        );
+    }
+}
+
+/// The checker catches a log that loses unflushed votes, in every seed.
+#[test]
+fn a_log_that_loses_votes_is_caught() {
+    for seed in 1..=10 {
+        let mut config = SimConfig::for_seed(seed);
+        config.lazy_votes = true;
+        let report = run_with(seed, config, Trace::default(), |_, _| {});
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.starts_with("persist before send")),
+            "seed {seed}: {:?}",
+            report.violations
         );
     }
 }
