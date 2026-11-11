@@ -29,11 +29,11 @@ Related documents:
 [concurrency](bf-tree-concurrency.md) (the lock order, including the
 write-through gate, and the shareable store contract).
 
-The code is in `crates/bf-tree-store/src/` (`lib.rs`: `PageNumber`,
+The code is in `lib/bf-tree-store/src/` (`lib.rs`: `PageNumber`,
 `PageStore`, `StoreError`; `superblock.rs`: the codec; `file.rs` and
-`mem.rs`: the backends), `crates/bf-tree-page/src/` (`layout.rs`: the
+`mem.rs`: the backends), `lib/bf-tree-page/src/` (`layout.rs`: the
 header; `lib.rs`: stamp, sequence, and checksum accessors), and
-`crates/bf-tree/src/` (`leaf_map.rs`: the page table, `load_base`,
+`lib/bf-tree/src/` (`leaf_map.rs`: the page table, `load_base`,
 `write_through`, the superseded list, the free pin, and the gate; `lib.rs`:
 `Tree::checkpoint`, `checkpoint_with`, the commit step, and `TreeError`;
 `write.rs`: the sequence closure; `apply.rs`: `Op`, `Entry`, `Log`,
@@ -309,7 +309,7 @@ and erased pages).
 ## Direct I/O
 
 [Plan 0023](../plans/0023-bf-tree-io-perf.md) added an I/O mode to
-`FileStore` (`crates/bf-tree-store/src/file.rs`). Through the page cache,
+`FileStore` (`lib/bf-tree-store/src/file.rs`). Through the page cache,
 the kernel caches every store page a second time, outside the circular
 buffer's budget. Direct I/O (`O_DIRECT`) bypasses the page cache, so the
 budget bounds the memory that the data occupies, and a circular-buffer miss
@@ -380,7 +380,7 @@ impl FileStore {
 ([Open](#open-select-the-committed-image)). With `Io::Direct`, each read is
 a synchronous device round trip. `select` therefore reads runs of
 `OPEN_RUN_PAGES` (64) pages with `PageStore::read_run`: 256 KiB per call
-with 4096-byte pages (`crates/bf-tree/src/open.rs`). `FileStore::read_run`
+with 4096-byte pages (`lib/bf-tree/src/open.rs`). `FileStore::read_run`
 makes one positioned read per run; with `Io::Direct` the run goes through
 the bounce buffer. The scan's results do not depend on the run length:
 the tests compare runs of 1, 7, and 64 pages, including a page count that
@@ -398,7 +398,7 @@ numbers come from a virtual disk, so they are indicative only. The
 reference runs on WSL2 and on GCP with a Local SSD (plan 0023, environments
 2 and 3) were not done.
 
-`bench_persistence` (`crates/bf-tree/src/tests/bench_io.rs`): 1,000,000
+`bench_persistence` (`lib/bf-tree/src/tests/bench_io.rs`): 1,000,000
 keys of 8 bytes, 16-byte values, a 32 MiB circular buffer, 1 s per `get`
 point:
 
@@ -777,7 +777,7 @@ sequenceDiagram
 ```
 
 The code is `Tree::checkpoint_with` and `Tree::commit_written` in
-`crates/bf-tree/src/lib.rs`:
+`lib/bf-tree/src/lib.rs`:
 
 1. Lock the `checkpointing` mutex for the whole call. Two checkpoints would
    otherwise race on the next checkpoint id and on the free step.
@@ -951,7 +951,7 @@ empty tree, not as a store with no committed page.
 `FileStore::open` selects the superblock copy. `Tree::open` takes the
 configuration from it (`Tree::open_with` requires a matching one) and reads
 the committed `State`: `N` and `W`. `select(store, config, W)` in
-`crates/bf-tree/src/open.rs` then reads pages `0..page_count()` once, in
+`lib/bf-tree/src/open.rs` then reads pages `0..page_count()` once, in
 page-number order. `select` has no side effects: it returns the chosen
 page of each leaf and lists the zero, released, and erased pages, and
 `open` acts on the lists after the scan. `write_snapshot` shares `select`
@@ -1147,7 +1147,7 @@ that the caller owns makes the writes after it durable. The engine
 (plans [0020](../plans/0020-engine-wal.md) to
 [0022](../plans/0022-engine-external.md)) supplies the log: its own
 write-ahead log (WAL) in standalone mode, or a replicated log in external
-mode. The tree defines the contract, in `crates/bf-tree/src/apply.rs`:
+mode. The tree defines the contract, in `lib/bf-tree/src/apply.rs`:
 
 ```rust
 /// One write. Payloads borrow from the caller.
@@ -1550,7 +1550,7 @@ remain `open`'s job. A snapshot of a damaged store fails with the same
 ## Guarantees and their tests
 
 Test paths are relative to each crate's `src/`. Tree tests are in
-`crates/bf-tree/src/tests/`.
+`lib/bf-tree/src/tests/`.
 
 ### Store format (plan 0017)
 

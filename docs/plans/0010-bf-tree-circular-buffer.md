@@ -13,7 +13,7 @@ milestone with eviction). It lands before the
 loop allocates from it.
 
 **Builds on:** [Leaf mapping table and page store](0008-bf-tree-leaf-store.md)
-(`LeafId`), [Buck2 build](0009-buck2-build.md) (crate rules). The size
+(`LeafId`), [Buck2 build](0009-workspace-buck2-build.md) (crate rules). The size
 classes it serves are defined by plan 0011; this crate takes them as a
 plain list.
 

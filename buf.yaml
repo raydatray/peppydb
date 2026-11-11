@@ -1,0 +1,19 @@
+# buf module and lint rules for proto/ (plan 0026). tools/gen-proto runs
+# buf from the pinned Go distribution; see docs/design/server.md.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Packages are peppydb.<api>.<version>, but files are at
+    # proto/<api>/<version>/: the peppydb level is implied by the
+    # repository, and the package keeps the wire names namespaced
+    # (plan 0027).
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  # Compare by package and type, not by file path, so that moving a file
+  # within its package is not a breaking change (plan 0027).
+  use:
+    - PACKAGE

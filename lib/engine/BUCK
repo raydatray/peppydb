@@ -1,0 +1,26 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The engine component's entry crate. Other components depend on this
+# crate only; engine-* crates are internal.
+peppy_rust_library(
+    name = "engine",
+    deps = [
+        "//lib/bf-tree:bf-tree",
+        "//lib/engine-wal:engine-wal",
+        "//third-party/rust:thiserror",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["PUBLIC"],
+    # `Db::fail_next_wal_sync`, for the server's fail-stop tests only
+    # (plan 0026). Production targets never enable it.
+    feature_variants = {
+        "fault-injection": {
+            "deps": [
+                "//lib/bf-tree:bf-tree",
+                "//lib/engine-wal:engine-wal-fault-injection",
+                "//third-party/rust:thiserror",
+            ],
+            "visibility": ["//lib/server:server-unittest"],
+        },
+    },
+)

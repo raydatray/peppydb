@@ -104,8 +104,8 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 - Every tool is pinned. Buck2 downloads Go itself (`GO_VERSION` in
   `build/toolchains/BUCK`), and `tools/fmt.sh` uses its `gofmt`.
   `tools/check-tools` fails if `rustc` on `PATH` or `GO_VERSION` differ from
-  `rust-toolchain.toml` and `go/go.mod`. For the plain `go` command, use the
-  Go version in `go/go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
+  `rust-toolchain.toml` and `go.mod`. For the plain `go` command, use the
+  Go version in `go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
   on `PATH`.
 - After changing a `BUCK` file, run `tools/autocargo` and commit the result.
 - To add, change, or remove a crates.io dependency, edit
@@ -113,26 +113,34 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   `//third-party/rust:<name>` to the `deps` of the targets that use it. If
   reindeer warns about a build script, add
   `third-party/rust/fixups/<crate>/fixups.toml` with `buildscript.run = true`.
-- To add a crate, create its directory with a `BUCK` file that uses
+- To add a crate, create its directory under `lib/` (or `bin/` for an
+  executable) with a `BUCK` file that uses
   `peppy_rust_library` from `//build:defs.bzl`, list exactly the targets that
   may depend on it in `visibility`, and run `tools/autocargo`. Do not run
   `cargo init` or `cargo new`.
 - Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
 - Miri: `tools/buck2 test @build/mode/miri '<test target>[miri]'`. Buck2
   downloads the pinned nightly; `tools/update-miri` moves the pin.
-- Go code lives in the module at `go/` (`go/go.mod` is hand-written). Each
-  package directory has a `BUCK` file whose `package_name` is
-  `peppydb/go/<dir>`; `tools/fmt.sh` checks it. The `go` command and gopls
-  work directly in `go/`.
-- To add a Go dependency, import it, run `go get` and `go mod tidy` in `go/`,
+- Go code is one module at the repository root (`go.mod`, hand-written,
+  module `peppydb`). Its `ignore` list keeps the `go` command out of
+  `buck-out/`, `target/`, and `third-party/`. A Go package can live in any
+  directory: executables under `bin/`, libraries under `lib/`. Each has a
+  `BUCK` file whose `package_name` is `peppydb/<dir>`; `tools/fmt.sh`
+  checks it. Buck2 `visibility`, not Go's `internal/`, limits importers.
+  The `go` command and gopls work from the root.
+- The API lives in `proto/`. After changing a `.proto` file, run
+  `tools/gen-proto` and commit the generated code beside it: Rust in
+  `proto/<api>/<version>/rust/` and Go in `proto/<api>/<version>/go/`. It lints with buf and checks for breaking
+  changes against the parent revision.
+- To add a Go dependency, import it, run `go get` and `go mod tidy`,
   run `tools/gobuckify-remote`, and add `//third-party/go:<import path>` to
   the `deps` of the packages that use it.
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
-such as `tools/buck2 test //crates/bf-tree/...`, or run one unit-test
+such as `tools/buck2 test //lib/bf-tree/...`, or run one unit-test
 binary with a filter:
-`tools/buck2 run //crates/bf-tree:bf-tree-unittest -- open::`.
+`tools/buck2 run //lib/bf-tree:bf-tree-unittest -- open::`.
 For Linux runs and contended benchmarks, prefix a command with
 `tools/linux-run` (a pinned Docker container; see `tools/linux/Dockerfile`).
 
@@ -141,18 +149,19 @@ Before completing work that changes code or `BUCK` files, run:
 ```sh
 tools/fmt.sh
 tools/clippy.sh
-tools/buck2 test //crates/... //bin/... //go/...
+tools/buck2 test //bin/... //lib/... //proto/...
 tools/autocargo --check
 tools/gobuckify-remote --check
+tools/gen-proto --check
 cargo test --workspace --locked
-(cd go && go vet ./... && go test ./...)
+go vet ./... && go test ./...
 ```
 
 For each crate allowed to contain `unsafe` code (the `tools/check-unsafe`
 allowlist), also run its tests under Miri:
 
 ```sh
-tools/buck2 test @build/mode/miri '//crates/<crate>:<crate>-unittest[miri]'
+tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
 ```
 
 `buck2 test` reports one result per target; use `tools/buck2 run` on a

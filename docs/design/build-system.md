@@ -20,6 +20,36 @@ graph.
   `visibility` rules control who may depend on a target. The crate design
   below depends on both.
 
+## Layout by role, not by language
+
+Directories are organized by what code is for, not by its language
+([plan 0027](../plans/0027-workspace-language-agnostic-layout.md)):
+
+```text
+bin/<name>/                  one executable each: peppydb (Rust), peppydb-load (Go)
+lib/<name>/                  one library each: bf-tree, engine, server (Rust), load (Go)
+proto/<api>/<version>/       one API each: <api>.proto, rust/ (crate <api>-proto), go/ (package <api><version>)
+```
+
+- **Why.** Buck2 builds both languages, Cargo manifests are generated,
+  and visibility enforces boundaries, so splitting directories by language
+  only answered "which compiler builds this?", which each `BUCK` file
+  already answers. One directory now lists every executable, one every
+  library, and one API's protocol and generated code sit together.
+- **Executables** are named `peppydb` or `peppydb-<role>`. Libraries keep
+  the component naming below.
+- **The API directory drops the `peppydb` level.** Protobuf packages are
+  `peppydb.<api>.<version>`, so the wire names stay namespaced; files sit
+  at `proto/<api>/<version>/`, and `buf.yaml` disables the
+  `PACKAGE_DIRECTORY_MATCH` lint rule for that reason.
+- **The Go package in `go/`** is named `<api><version>` (`kvv1`), because
+  `go` is a keyword; importers use an alias.
+- **Trade-off.** The layout departs from Go's `cmd/` and `internal/` and
+  from Rust's `crates/`, so it must be learned. Plans before 0027 use the
+  old paths: `crates/<x>` is now `lib/<x>`, `go/cmd/peppy-load` is
+  `bin/peppydb-load`, `go/internal/load` is `lib/load`, `go/kvpb` and
+  `crates/server-proto` are `proto/kv/v1/go` and `proto/kv/v1/rust`.
+
 ## Small crates with enforced boundaries
 
 Rust code is split into small crates. Each component has one entry crate,
@@ -50,7 +80,7 @@ flowchart BT
 ## Generated Cargo manifests, hand-written Go module
 
 The `Cargo.toml` files are generated from the Buck2 graph by
-`tools/autocargo`. `go/go.mod` is written by hand. The difference follows
+`tools/autocargo`. `go.mod` is written by hand. The difference follows
 from how each language records dependencies.
 
 - **Cargo** needs a manifest for each crate that lists that crate's
@@ -60,19 +90,56 @@ from how each language records dependencies.
   build the same versions.
 - **Go** records only third-party versions, in one `go.mod` for the whole
   module. Which package depends on which comes from `import` lines, which
-  Buck2 and `go` both read. There is nothing to generate. The module sits at
-  `go/`, and not in `third-party/go/`, because a Go module covers only its
-  own directory tree. First-party code must be inside it for `go` and gopls
-  to work.
+  Buck2 and `go` both read. There is nothing to generate. The module
+  (`peppydb`) sits at the repository root, because a Go module covers only
+  its own directory tree and Go packages live in `bin/`, `lib/`, and
+  `proto/`. Its `ignore` directive keeps the `go` command out of
+  `buck-out/` (which holds unpacked third-party Go sources), `target/`, and
+  `third-party/`. Buck2 `visibility`, not Go's `internal/`, limits who may
+  import a package.
 - **Third-party rules** are generated in the other direction: reindeer
   generates them from `third-party/rust/Cargo.toml`, and
-  `tools/gobuckify-remote` from `go/go.mod`. Both write one `BUCK` file of
+  `tools/gobuckify-remote` from `go.mod`. Both write one `BUCK` file of
   sha256-pinned archives that are downloaded at build time. Nothing is
   vendored, so repository size and dependency-upgrade diffs stay small.
 - **Limit.** Cargo and `go` do not see Buck2-only behavior: visibility,
   release mode, and denied warnings. They also cannot see code that Buck2
-  generates into `buck-out`. When protobuf code generation arrives, the
-  generated sources must be copied into the tree for them.
+  generates into `buck-out`. Generated protobuf code is therefore checked
+  into the tree ([Protobuf code generation](#protobuf-code-generation)).
+- **Feature variants.** A test-only switch that a dependent crate's tests
+  need (such as the engine's `fault-injection`, plan 0026) cannot be
+  `cfg(test)`, which applies only to the crate under test.
+  `peppy_rust_library`'s `feature_variants` defines `:<name>-<feature>`,
+  the same crate built with that Cargo feature, visible only to the tests
+  that use it. A `test_deps` entry naming a variant replaces the plain
+  dependency in the unit tests. `tools/autocargo` turns each variant into
+  a `[features]` entry and a feature-enabled dev-dependency.
+
+## Protobuf code generation
+
+The API lives in `proto/`. `tools/gen-proto` lints it, checks it for
+breaking changes, and writes Rust (`proto/kv/v1/rust/src/generated/`)
+and Go (`proto/kv/v1/go/`) code, which is checked in
+([plan 0026](../plans/0026-server-grpc-kv.md)).
+
+- **buf for every language.** buf parses once for Rust and Go, and runs
+  `buf lint` and `buf breaking`. The Go plugins (`protoc-gen-go`,
+  `protoc-gen-go-grpc`) write Go. Rust comes from `tonic-prost-build`
+  (`//tools/protogen`), fed buf's descriptor set, so the generated code and
+  the tonic runtime are pinned together in `Cargo.lock`. buf's own Rust
+  plugins lag tonic's releases and are not used.
+- **Pinned by `go.mod`.** buf and the Go plugins are `tool` directives.
+  `tools/gen-proto` builds them with the Go distribution that Buck2
+  downloads. Buck2 cannot build buf itself: buf refuses to run without the
+  module build information that only the `go` command embeds. Normal
+  builds never run code generation.
+- **No network services.** No Buf Schema Registry dependency and no remote
+  plugin. A third-party `.proto` file is vendored under
+  `proto/third_party/` with its source recorded.
+- **The breaking-change baseline** is `proto/` at the parent revision,
+  read with `sl cat`, because the working copy is a Sapling checkout, not
+  a git one. `buf breaking` uses the `PACKAGE` rules, which compare by
+  package and type, so moving a file within its package is not breaking.
 
 ## Every tool is pinned
 
@@ -123,7 +190,7 @@ Contended benchmarks and Linux test runs use a container, so that they are
 one command from any checkout ([plan 0016](../plans/0016-bf-tree-concurrency.md)):
 
 ```sh
-tools/linux-run tools/buck2 test //crates/bf-tree/...
+tools/linux-run tools/buck2 test //lib/bf-tree/...
 ```
 
 - **Why Linux.** The engine targets Linux, and the macOS standard
@@ -158,7 +225,7 @@ disagree.
   specific need.
 - **Third-party crates are exempt.** The prelude builds them with
   `--cap-lints=allow`, so the toolchain's lint levels never reach them.
-- **Current allowlist:** `crates/bf-tree-circular-buffer`, whose slab hands
+- **Current allowlist:** `lib/bf-tree-circular-buffer`, whose slab hands
   out disjoint byte ranges of one allocation
   ([plan 0010](../plans/0010-bf-tree-circular-buffer.md)). Within it, only
   `slab.rs` and `block.rs` lower the lint.
@@ -170,7 +237,7 @@ reports undefined behaviour. Every crate that may contain unsafe code runs
 its tests under it, through Buck2 like every other check:
 
 ```sh
-tools/buck2 test @build/mode/miri '//crates/<crate>:<crate>-unittest[miri]'
+tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
 ```
 
 - **The prelude does the interpreting.** If the Rust toolchain provides a

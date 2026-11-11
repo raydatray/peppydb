@@ -136,7 +136,7 @@ so its owner must keep child ranges, heights, and parent separators consistent.
 Routing is one binary search over the slot directory. Each probe compares the
 slot's four zero-padded inline bytes, read as a big-endian `u32`, with a query
 word that `route` computes once from the key's first four bytes
-(`inline_word` in `crates/bf-tree-inner/src/read.rs`). Only when the words are
+(`inline_word` in `lib/bf-tree-inner/src/read.rs`). Only when the words are
 equal does it compare the full separator with `KeyRef::cmp_bytes` over the
 inline and tail parts. Most comparisons therefore stay inside the slot
 directory and make no out-of-line `memcmp` call. A strict inequality of

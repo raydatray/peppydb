@@ -1,0 +1,21 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The BF-Tree component's entry crate. Other components depend on this crate
+# only; the bf-tree-* crates are internal.
+peppy_rust_library(
+    name = "bf-tree",
+    deps = [
+        "//lib/bf-tree-circular-buffer:bf-tree-circular-buffer",
+        "//lib/bf-tree-inner:bf-tree-inner",
+        "//lib/bf-tree-mini-page:bf-tree-mini-page",
+        "//lib/bf-tree-node-id:bf-tree-node-id",
+        "//lib/bf-tree-page:bf-tree-page",
+        "//lib/bf-tree-store:bf-tree-store",
+        "//lib/bf-tree-sync:bf-tree-sync",
+        "//third-party/rust:arc-swap",
+        "//third-party/rust:thiserror",
+        "//third-party/rust:zerocopy",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["PUBLIC"],
+)

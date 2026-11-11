@@ -501,7 +501,7 @@ their caveats, and Linux numbers once the Linux run is done.
 
 ### Mini-pages, write-through, eviction, and caching (plans 0012 to 0015)
 
-`tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`
+`tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline`
 (both `baseline_throughput` and `baseline_file_store`), on an Apple M4 Pro:
 one million random 8-byte keys with 16-byte values and the default
 configuration. "Before 0012" is the resident-copy design of plan 0008,
@@ -572,7 +572,7 @@ They were not measured again for the current design.
 
 #### Page cache (`baseline_file_store`)
 
-`tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline_file`:
+`tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture baseline_file`:
 one million random 8-byte keys with 16-byte values, default configuration,
 8692 leaves, 34 MiB file, written and reopened immediately, so every read is
 a page-cache hit.
@@ -592,7 +592,7 @@ The in-memory `Tree::in_memory` baseline is unchanged by the mapping table: abou
 #### Larger than memory (`disk_baseline`)
 
 `PEPPYDB_DISK_GIB=96 tools/buck2 run @build/mode/release
-//crates/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline`. Nothing evicted in that design, so a tree could not be
+//lib/bf-tree:bf-tree-unittest -- --ignored --nocapture disk_baseline`. Nothing evicted in that design, so a tree could not be
 built through `put` beyond RAM; the benchmark writes the file directly in
 the on-disk format (sorted keys, three 1000-byte records per 4 KiB leaf),
 opens it, and measures 200,000 random gets, 5,000 scans of 100 records,

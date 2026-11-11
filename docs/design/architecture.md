@@ -32,16 +32,34 @@ engine: open with recovery, durable writes, atomic write batches, reads,
 background checkpoints that truncate the WAL, and close. The
 [engine design](engine.md#the-db) records its guarantees.
 
+Phase 2 starts with a network server. `peppydb serve` (plan 0026) puts one
+`engine::Db` behind the `peppydb.kv.v1` gRPC API; the
+[server design](server.md) records its semantics and guarantees. The
+[server roadmap](../plans/0025-server-roadmap.md) continues from there to
+Raft replication with openraft, and records the expected shape of phase 3:
+μshards mapped to p-shards, one Raft group per server, and a placement
+manager on its own etcd cluster.
+
 ## Code layout
 
 The repository is one [Buck2](build-system.md) build for Rust and Go.
 
-| Component | Crates | Role |
+Directories are organized by role
+([build system](build-system.md#layout-by-role-not-by-language)):
+`bin/` holds every executable, `lib/` every library, and `proto/` every
+API with its generated code, whatever the language.
+
+| Component | Directories | Role |
 | --- | --- | --- |
-| BF-Tree | `bf-tree` (entry), `bf-tree-node-id`, `bf-tree-page`, `bf-tree-inner`, `bf-tree-store` | node identifiers, the shared page format, inner nodes, the page store, and the tree that composes them |
-| Engine | `engine` (entry, `PUBLIC`), `engine-wal` (internal) | `Db`, the application-facing [embedded database](engine.md#the-db): recovery, durable writes, batches, reads, and the checkpoint policy; and the [write-ahead log](engine.md): segment files, group commit, replay, and truncation |
-| Executable | `bin/peppydb` | thin wiring |
-| Go services | `go/` | the planned gateway and placement driver; a hello-world program for now |
+| BF-Tree | `lib/bf-tree` (entry), `lib/bf-tree-*` (internal) | node identifiers, the shared page format, inner nodes, mini-pages, the circular buffer, the page store, and the tree that composes them |
+| Engine | `lib/engine` (entry, `PUBLIC`), `lib/engine-wal` (internal) | `Db`, the application-facing [embedded database](engine.md#the-db): recovery, durable writes, batches, reads, and the checkpoint policy; and the [write-ahead log](engine.md): segment files, group commit, replay, and truncation |
+| Server | `lib/server` (entry), `lib/server-raft` (internal), `bin/peppydb` | the [gRPC server](server.md): the `peppydb.kv.v1` services over one `engine::Db`, the stored key layout, the blocking bridge, shutdown, fail-stop, and the `peppydb` command line; `bin/peppydb` only calls `server::cli`. [Server Raft](server-raft.md): openraft behind peppydb types, with storage models and a deterministic simulator |
+| KV API | `proto/kv/v1` (`kv.proto`, `rust/` crate `kv-proto`, `go/` package `kvv1`) | the `peppydb.kv.v1` gRPC API and its generated code |
+| Load generator | `bin/peppydb-load`, `lib/load` (Go) | drives a running server and reports throughput and latency |
+
+Later: `lib/server-raft-log` and `lib/server-keys` (Rust, server
+component), `proto/raft/v1`, `bin/peppydb-gateway` and
+`bin/peppydb-placement` (Go).
 
 Each component exposes one entry crate. Buck2 visibility rules stop other
 components from depending on internal crates, such as `bf-tree-page`.

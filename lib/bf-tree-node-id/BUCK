@@ -1,0 +1,13 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+peppy_rust_library(
+    name = "bf-tree-node-id",
+    visibility = [
+        "//lib/bf-tree-circular-buffer:",
+        "//lib/bf-tree-inner:",
+        "//lib/bf-tree-mini-page:",
+        "//lib/bf-tree-page:",
+        "//lib/bf-tree-store:",
+        "//lib/bf-tree:",
+    ],
+)

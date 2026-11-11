@@ -1,0 +1,16 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The only crate allowed to contain unsafe code (tools/check-unsafe); see
+# docs/plans/0010-bf-tree-circular-buffer.md for the safety argument.
+peppy_rust_library(
+    name = "bf-tree-circular-buffer",
+    deps = [
+        "//lib/bf-tree-node-id:bf-tree-node-id",
+        "//lib/bf-tree-sync:bf-tree-sync",
+        "//third-party/rust:thiserror",
+    ],
+    visibility = [
+        "//lib/bf-tree-mini-page:",
+        "//lib/bf-tree:",
+    ],
+)

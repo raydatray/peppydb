@@ -867,6 +867,6 @@ hot-leaf `get_with` component regresses about 15 percent, above the plan's
   peppydb differs by reading immutable images instead of bytes in place,
   by blocking bottom-up propagation instead of split-on-descent, and by
   allocating fresh frames complete.
-- [Plan 0009](0009-buck2-build.md) (shuttle needs a feature, not
+- [Plan 0009](0009-workspace-buck2-build.md) (shuttle needs a feature, not
   `cfg(test)`; Linux setup) and the
   [build-system design](../design/build-system.md#build-modes-are-platforms).

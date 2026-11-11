@@ -10,5 +10,8 @@ publish = false
 name = "peppydb"
 path = "src/main.rs"
 
+[dependencies]
+server = { path = "../../lib/server" }
+
 [lints]
 workspace = true

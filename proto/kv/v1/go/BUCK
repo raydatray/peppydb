@@ -1,0 +1,16 @@
+# Generated Go code for proto/kv/v1 (peppydb.kv.v1). tools/gen-proto writes
+# the *.pb.go files; do not edit them. The package is named kvv1; importers
+# alias it, because the directory name `go` is a keyword.
+go_library(
+    name = "kvv1",
+    package_name = "peppydb/proto/kv/v1/go",
+    srcs = glob(["*.pb.go"]),
+    deps = [
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/status",
+        "//third-party/go:google.golang.org/protobuf/reflect/protoreflect",
+        "//third-party/go:google.golang.org/protobuf/runtime/protoimpl",
+    ],
+    visibility = ["//bin/peppydb-load:"],
+)
