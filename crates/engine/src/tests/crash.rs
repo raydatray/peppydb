@@ -89,8 +89,16 @@ fn slow() -> Options {
 }
 
 /// A put that is applied but not waited for: under a long flush interval
-/// it stays unsynced.
+/// it stays unsynced. Holds the write gate in shared mode, as `Db::put`
+/// does: without it, the put can take and apply a later sequence while a
+/// concurrent `Db::write` holds the gate between its WAL append and its
+/// apply, and the batch is then refused as out of order.
 fn unsynced_put(db: &Db, key: &[u8], value: &[u8]) -> u64 {
+    let _single = db
+        .shared
+        .gate
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     db.shared
         .tree
         .put_logged(&WalLog(db.shared.wal.as_ref().unwrap()), key, value)
