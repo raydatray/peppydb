@@ -22,9 +22,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: peppydb/kv/v1/kv.proto
+// source: kv/v1/kv.proto
 
-package kvpb
+package kvv1
 
 import (
 	context "context"
@@ -281,7 +281,7 @@ var KvService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "peppydb/kv/v1/kv.proto",
+	Metadata: "kv/v1/kv.proto",
 }
 
 const (
@@ -429,5 +429,5 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "peppydb/kv/v1/kv.proto",
+	Metadata: "kv/v1/kv.proto",
 }

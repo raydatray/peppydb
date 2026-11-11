@@ -12,6 +12,6 @@ if [ ! -x "$OUT" ]; then
 fi
 # The driver runs `buck2` from PATH; make that the pinned tools/buck2.
 export PATH="$ROOT/tools:$PATH"
-export GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS="${GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS:-root//bin/... root//lib/... root//go/...}"
+export GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS="${GOPACKAGESDRIVER_BUCK_ALL_PACKAGES_TARGET_EXPRS:-root//bin/... root//lib/... root//proto/...}"
 cd "$ROOT"
 exec "$OUT" "$@"

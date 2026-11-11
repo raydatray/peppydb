@@ -129,8 +129,8 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   checks it. Buck2 `visibility`, not Go's `internal/`, limits importers.
   The `go` command and gopls work from the root.
 - The API lives in `proto/`. After changing a `.proto` file, run
-  `tools/gen-proto` and commit the generated Rust (`crates/server-proto`)
-  and Go (`go/kvpb`) code. It lints with buf and checks for breaking
+  `tools/gen-proto` and commit the generated code beside it: Rust in
+  `proto/<api>/<version>/rust/` and Go in `proto/<api>/<version>/go/`. It lints with buf and checks for breaking
   changes against the parent revision.
 - To add a Go dependency, import it, run `go get` and `go mod tidy`,
   run `tools/gobuckify-remote`, and add `//third-party/go:<import path>` to
@@ -149,7 +149,7 @@ Before completing work that changes code or `BUCK` files, run:
 ```sh
 tools/fmt.sh
 tools/clippy.sh
-tools/buck2 test //bin/... //lib/... //crates/... //go/...
+tools/buck2 test //bin/... //lib/... //proto/...
 tools/autocargo --check
 tools/gobuckify-remote --check
 tools/gen-proto --check

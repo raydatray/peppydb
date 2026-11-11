@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use server_proto::kv::v1::{DeleteRequest, GetRequest, PutRequest};
+use kv_proto::kv::v1::{DeleteRequest, GetRequest, PutRequest};
 use tonic::Code;
 
 use super::{Rng, Server};

@@ -27,7 +27,7 @@ case "${1:-}" in
     *) sed -n '2,8p' "$0" >&2; exit 2 ;;
 esac
 
-rust_out=crates/server-proto/src/generated
+rust_out=proto/kv/v1/rust/src/generated
 
 goroot=$(tools/buck2 build toolchains//:go-root --show-full-simple-output 2>/dev/null)
 go="$goroot/bin/go"
@@ -96,5 +96,5 @@ compare() {
     done
 }
 compare "$tmp/out/rust" "$rust_out" '*.rs'
-compare "$tmp/out/go/kvpb" go/kvpb '*.pb.go'
+compare "$tmp/out/proto/kv/v1/go" proto/kv/v1/go '*.pb.go'
 exit "$status"

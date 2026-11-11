@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"peppydb/go/kvpb"
 	"peppydb/lib/load"
+	kvv1 "peppydb/proto/kv/v1/go"
 )
 
 type options struct {
@@ -96,14 +96,14 @@ func run(o options) error {
 	if _, err := load.NewDistribution(o.distribution, o.keys, o.seed); err != nil {
 		return err
 	}
-	clients := make([]kvpb.KvServiceClient, o.conns)
+	clients := make([]kvv1.KvServiceClient, o.conns)
 	for i := range clients {
 		conn, err := grpc.NewClient(o.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return err
 		}
 		defer conn.Close()
-		clients[i] = kvpb.NewKvServiceClient(conn)
+		clients[i] = kvv1.NewKvServiceClient(conn)
 	}
 	if o.preload {
 		if err := preload(o, clients); err != nil {
@@ -135,9 +135,9 @@ func run(o options) error {
 				var err error
 				if mix.IntN(100) < reads {
 					op = &r.get
-					_, err = client.Get(context.Background(), &kvpb.GetRequest{Key: key})
+					_, err = client.Get(context.Background(), &kvv1.GetRequest{Key: key})
 				} else {
-					_, err = client.Put(context.Background(), &kvpb.PutRequest{Key: key, Value: load.Value(i, o.valueSize)})
+					_, err = client.Put(context.Background(), &kvv1.PutRequest{Key: key, Value: load.Value(i, o.valueSize)})
 				}
 				if began.Before(measureFrom) {
 					continue
@@ -180,14 +180,14 @@ func run(o options) error {
 }
 
 // preload writes every key once, with the workers in parallel.
-func preload(o options, clients []kvpb.KvServiceClient) error {
+func preload(o options, clients []kvv1.KvServiceClient) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, o.concurrency)
 	for w := range o.concurrency {
 		wg.Go(func() {
 			client := clients[w%len(clients)]
 			for i := uint64(w); i < o.keys; i += uint64(o.concurrency) {
-				req := &kvpb.PutRequest{Key: load.Key(i, o.keySize), Value: load.Value(i, o.valueSize)}
+				req := &kvv1.PutRequest{Key: load.Key(i, o.keySize), Value: load.Value(i, o.valueSize)}
 				if _, err := client.Put(context.Background(), req); err != nil {
 					errs <- fmt.Errorf("preload key %d: %w", i, err)
 					return
