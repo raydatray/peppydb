@@ -101,6 +101,9 @@ pub struct LogConfig {
     pub max_flush_delay: Duration,
     /// The seed of the flush delays.
     pub seed: u64,
+    /// **A deliberate bug, for testing the checker:** `save_vote` returns
+    /// before the vote is durable, so a crash can lose a granted vote.
+    pub lazy_votes: bool,
 }
 
 impl Default for LogConfig {
@@ -108,6 +111,7 @@ impl Default for LogConfig {
         Self {
             max_flush_delay: Duration::ZERO,
             seed: 0,
+            lazy_votes: false,
         }
     }
 }
@@ -129,6 +133,7 @@ struct Inner<RT: AsyncRuntime> {
     crashed: bool,
     rng: Rng,
     config: LogConfig,
+    observer: super::Observed,
 }
 
 impl<RT: AsyncRuntime> Inner<RT> {
@@ -213,11 +218,23 @@ impl<RT: AsyncRuntime> MemLog<RT> {
             crashed: false,
             rng: Rng::new(config.seed),
             config,
+            observer: None,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
             _rt: PhantomData,
         }
+    }
+
+    /// Report this log's votes to `observer` as `node`'s.
+    // Only the simulator, which is test-only, observes the models.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn observe(
+        &self,
+        node: crate::types::NodeId,
+        observer: std::sync::Arc<dyn super::Observer>,
+    ) {
+        self.lock().observer = Some((node, observer));
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner<RT>> {
@@ -227,6 +244,19 @@ impl<RT: AsyncRuntime> MemLog<RT> {
     /// What survives a crash now.
     pub fn durable(&self) -> LogImage {
         self.lock().durable.clone()
+    }
+
+    /// Whether `log_id` is durable: held, or below the durable purge point.
+    pub fn is_durable(&self, log_id: OrLogId) -> bool {
+        let inner = self.lock();
+        let durable = &inner.durable;
+        durable
+            .entries
+            .get(&log_id.index)
+            .is_some_and(|entry| entry.log_id == log_id)
+            || durable
+                .purged
+                .is_some_and(|purged| purged.index >= log_id.index)
     }
 
     /// What readers see now.
@@ -311,7 +341,12 @@ impl<RT: AsyncRuntime> RaftLogStorage<Types<RT>> for MemLog<RT> {
         let mut inner = self.lock();
         inner.check()?;
         inner.submit(Write::Vote(*vote), None);
-        inner.flush_all();
+        if !inner.config.lazy_votes {
+            inner.flush_all();
+        }
+        if let Some((node, observer)) = &inner.observer {
+            observer.vote_saved(*node, *vote, &inner.live);
+        }
         Ok(())
     }
 
@@ -386,6 +421,7 @@ mod tests {
         LogConfig {
             max_flush_delay: Duration::from_millis(5),
             seed: 1,
+            ..LogConfig::default()
         }
     }
 

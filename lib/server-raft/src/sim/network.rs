@@ -25,6 +25,7 @@ use openraft::AsyncRuntime;
 use openraft::storage::RaftStateMachine;
 
 use crate::rng::Rng;
+use crate::sim::Probe;
 use crate::sim::Router;
 use crate::sim::Trace;
 use crate::transport::AppendEntries;
@@ -97,6 +98,7 @@ where
     router: Arc<Router<SM, RT>>,
     state: Mutex<State>,
     trace: Trace,
+    probe: Mutex<Option<Arc<dyn Probe>>>,
 }
 
 impl<SM, RT> SimNetwork<SM, RT>
@@ -114,7 +116,20 @@ where
                 blocked: BTreeSet::new(),
             }),
             trace,
+            probe: Mutex::new(None),
         })
+    }
+
+    /// Show every request and reply to `probe`.
+    pub fn set_probe(&self, probe: Arc<dyn Probe>) {
+        *self.probe.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+
+    fn probe(&self) -> Option<Arc<dyn Probe>> {
+        self.probe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -270,16 +285,20 @@ where
         to: NodeId,
         req: AppendEntries,
     ) -> Result<AppendReply, Unreachable> {
-        self.send(
-            "append",
-            from,
-            to,
-            req,
-            true,
-            move |router, req| async move {
-                delivered(router.node(to)?.handle_append_entries(req).await)
-            },
-        )
+        let probe = self.probe();
+        if let Some(probe) = &probe {
+            probe.request(from, "append", &req.vote);
+        }
+        self.send("append", from, to, req, true, move |router, req| {
+            let probe = probe.clone();
+            async move {
+                let reply = delivered(router.node(to)?.handle_append_entries(req).await)?;
+                if let Some(probe) = &probe {
+                    probe.append_reply(to, &reply);
+                }
+                Ok(reply)
+            }
+        })
         .await
     }
 
@@ -289,8 +308,19 @@ where
         to: NodeId,
         req: VoteRequest,
     ) -> Result<VoteReply, Unreachable> {
-        self.send("vote", from, to, req, true, move |router, req| async move {
-            delivered(router.node(to)?.handle_vote(req).await)
+        let probe = self.probe();
+        if let Some(probe) = &probe {
+            probe.request(from, "vote", &req.vote);
+        }
+        self.send("vote", from, to, req, true, move |router, req| {
+            let probe = probe.clone();
+            async move {
+                let reply = delivered(router.node(to)?.handle_vote(req.clone()).await)?;
+                if let Some(probe) = &probe {
+                    probe.vote_reply(to, &req, &reply);
+                }
+                Ok(reply)
+            }
         })
         .await
     }

@@ -17,6 +17,8 @@
 //! Built for this crate's tests and, with the `sim` feature, for the tests
 //! of other server crates. Production code never enables the feature.
 
+#[cfg(test)]
+pub mod checker;
 mod mem_log;
 mod model_sm;
 mod network;
@@ -39,3 +41,36 @@ pub use network::NetStats;
 pub use network::SimNetwork;
 pub use router::Router;
 pub use trace::Trace;
+
+use std::sync::Arc;
+
+use crate::transport::AppendReply;
+use crate::transport::Vote;
+use crate::transport::VoteReply;
+use crate::transport::VoteRequest;
+use crate::types::NodeId;
+use crate::types::OrEntry;
+use crate::types::OrVote;
+
+/// Receives what the storage models do, for the safety checks.
+pub(crate) trait Observer: Send + Sync {
+    /// `node` made `vote` durable; `live` is its log at that moment.
+    fn vote_saved(&self, node: NodeId, vote: OrVote, live: &LogImage);
+    /// `node`'s state machine applied `entry` (redeliveries are skipped
+    /// and not reported).
+    fn applied(&self, node: NodeId, entry: &OrEntry);
+}
+
+/// A model's observer and the node it reports as.
+pub(crate) type Observed = Option<(NodeId, Arc<dyn Observer>)>;
+
+/// Sees messages as the simulated network delivers them, for the
+/// persist-before-send check.
+pub trait Probe: Send + Sync {
+    /// `from` sends a message that carries its `vote`.
+    fn request(&self, from: NodeId, kind: &str, vote: &Vote);
+    /// `to` answers a vote request.
+    fn vote_reply(&self, to: NodeId, req: &VoteRequest, reply: &VoteReply);
+    /// `to` answers an append request.
+    fn append_reply(&self, to: NodeId, reply: &AppendReply);
+}
