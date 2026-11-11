@@ -5,6 +5,7 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "server-raft",
     deps = [
+        "//third-party/rust:futures-util",
         "//third-party/rust:openraft",
         "//third-party/rust:openraft-rt-tokio",
         "//third-party/rust:thiserror",
@@ -18,6 +19,7 @@ peppy_rust_library(
     feature_variants = {
         "sim": {
             "deps": [
+                "//third-party/rust:futures-util",
                 "//third-party/rust:openraft",
                 "//third-party/rust:openraft-rt-tokio",
                 "//third-party/rust:thiserror",
