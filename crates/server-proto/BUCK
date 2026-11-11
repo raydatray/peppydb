@@ -10,5 +10,5 @@ peppy_rust_library(
         "//third-party/rust:tonic",
         "//third-party/rust:tonic-prost",
     ],
-    visibility = ["//crates/server:"],
+    visibility = ["//lib/server:"],
 )

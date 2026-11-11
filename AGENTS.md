@@ -113,7 +113,8 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   `//third-party/rust:<name>` to the `deps` of the targets that use it. If
   reindeer warns about a build script, add
   `third-party/rust/fixups/<crate>/fixups.toml` with `buildscript.run = true`.
-- To add a crate, create its directory with a `BUCK` file that uses
+- To add a crate, create its directory under `lib/` (or `bin/` for an
+  executable) with a `BUCK` file that uses
   `peppy_rust_library` from `//build:defs.bzl`, list exactly the targets that
   may depend on it in `visibility`, and run `tools/autocargo`. Do not run
   `cargo init` or `cargo new`.
@@ -134,9 +135,9 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 
 ## Verification
 Run commands from the repository root. During iteration, use focused checks
-such as `tools/buck2 test //crates/bf-tree/...`, or run one unit-test
+such as `tools/buck2 test //lib/bf-tree/...`, or run one unit-test
 binary with a filter:
-`tools/buck2 run //crates/bf-tree:bf-tree-unittest -- open::`.
+`tools/buck2 run //lib/bf-tree:bf-tree-unittest -- open::`.
 For Linux runs and contended benchmarks, prefix a command with
 `tools/linux-run` (a pinned Docker container; see `tools/linux/Dockerfile`).
 
@@ -145,7 +146,7 @@ Before completing work that changes code or `BUCK` files, run:
 ```sh
 tools/fmt.sh
 tools/clippy.sh
-tools/buck2 test //crates/... //bin/... //go/...
+tools/buck2 test //bin/... //lib/... //crates/... //go/...
 tools/autocargo --check
 tools/gobuckify-remote --check
 tools/gen-proto --check
@@ -157,7 +158,7 @@ For each crate allowed to contain `unsafe` code (the `tools/check-unsafe`
 allowlist), also run its tests under Miri:
 
 ```sh
-tools/buck2 test @build/mode/miri '//crates/<crate>:<crate>-unittest[miri]'
+tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
 ```
 
 `buck2 test` reports one result per target; use `tools/buck2 run` on a

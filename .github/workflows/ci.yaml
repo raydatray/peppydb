@@ -24,7 +24,7 @@ jobs:
       - name: Run clippy
         run: tools/clippy.sh
       - name: Run tests
-        run: tools/buck2 test //crates/... //bin/... //go/...
+        run: tools/buck2 test //bin/... //lib/... //crates/... //go/...
 
   cargo:
     runs-on: ubuntu-latest

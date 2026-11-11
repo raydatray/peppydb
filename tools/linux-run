@@ -2,8 +2,8 @@
 # Run a command in the pinned Linux container (tools/linux/Dockerfile) with
 # this checkout mounted, for example:
 #
-#   tools/linux-run tools/buck2 test //crates/bf-tree/...
-#   tools/linux-run tools/buck2 run @build/mode/release //crates/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
+#   tools/linux-run tools/buck2 test //lib/bf-tree/...
+#   tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
 #
 # The image is rebuilt when its inputs change. Linux build outputs live in
 # named volumes mounted over buck-out/ and target/, so they never mix with

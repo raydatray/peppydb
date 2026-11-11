@@ -30,7 +30,7 @@ def peppy_rust_library(name, deps = [], test_deps = [], visibility = [], feature
     test_only = [
         d
         for d in deps
-        if not (d.startswith("//crates/") and [t for t in test_deps if t.startswith(d + "-")])
+        if not (d.startswith(("//lib/", "//lib/")) and [t for t in test_deps if t.startswith(d + "-")])
     ]
     native.rust_test(name = name + "-unittest", deps = test_only + test_deps, **common)
     for feature, variant in feature_variants.items():
