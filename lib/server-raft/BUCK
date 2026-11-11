@@ -5,7 +5,12 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "server-raft",
     deps = [
+        "//third-party/rust:openraft",
+        "//third-party/rust:openraft-rt-tokio",
         "//third-party/rust:thiserror",
+    ],
+    test_deps = [
+        "//third-party/rust:openraft-rt-sim",
     ],
     visibility = ["//lib/server:"],
 )
