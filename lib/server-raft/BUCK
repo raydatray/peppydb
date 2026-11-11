@@ -1,0 +1,11 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# Raft for the server component (plan 0028): openraft behind peppydb's own
+# types. Internal to the server component; `server` is its only dependent.
+peppy_rust_library(
+    name = "server-raft",
+    deps = [
+        "//third-party/rust:thiserror",
+    ],
+    visibility = ["//lib/server:"],
+)
