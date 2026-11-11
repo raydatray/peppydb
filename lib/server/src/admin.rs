@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use server_proto::kv::v1::admin_service_server::AdminService;
-use server_proto::kv::v1::{CheckpointRequest, CheckpointResponse, StatusRequest, StatusResponse};
+use kv_proto::kv::v1::admin_service_server::AdminService;
+use kv_proto::kv::v1::{CheckpointRequest, CheckpointResponse, StatusRequest, StatusResponse};
 use tonic::{Request, Response, Status};
 
 use crate::VERSION;

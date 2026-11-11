@@ -6,6 +6,14 @@ modules:
 lint:
   use:
     - STANDARD
+  except:
+    # Packages are peppydb.<api>.<version>, but files are at
+    # proto/<api>/<version>/: the peppydb level is implied by the
+    # repository, and the package keeps the wire names namespaced
+    # (plan 0027).
+    - PACKAGE_DIRECTORY_MATCH
 breaking:
+  # Compare by package and type, not by file path, so that moving a file
+  # within its package is not a breaking change (plan 0027).
   use:
-    - FILE
+    - PACKAGE

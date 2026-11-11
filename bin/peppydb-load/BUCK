@@ -4,7 +4,7 @@ go_binary(
     srcs = glob(["*.go"]),
     deps = [
         "//lib/load:load",
-        "//go/kvpb:kvpb",
+        "//proto/kv/v1/go:kvv1",
         "//third-party/go:google.golang.org/grpc",
         "//third-party/go:google.golang.org/grpc/credentials/insecure",
         "//third-party/go:google.golang.org/grpc/status",

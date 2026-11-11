@@ -13,8 +13,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use server_proto::kv::v1::kv_service_client::KvServiceClient;
-use server_proto::kv::v1::{GetRequest, PutRequest};
+use kv_proto::kv::v1::kv_service_client::KvServiceClient;
+use kv_proto::kv::v1::{GetRequest, PutRequest};
 
 /// Set in the child: the command-line arguments, separated by newlines.
 const CHILD_ARGS: &str = "PEPPYDB_TEST_CHILD_ARGS";

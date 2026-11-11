@@ -21,7 +21,7 @@ syntax = "proto3";
 
 package peppydb.kv.v1;
 
-option go_package = "peppydb/go/kvpb;kvpb";
+option go_package = "peppydb/proto/kv/v1/go;kvv1";
 
 // Reads and writes of single keys, and range scans.
 //

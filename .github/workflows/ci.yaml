@@ -24,7 +24,12 @@ jobs:
       - name: Run clippy
         run: tools/clippy.sh
       - name: Run tests
-        run: tools/buck2 test //bin/... //lib/... //crates/... //go/...
+        run: tools/buck2 test //bin/... //lib/... //proto/...
+      # Without a Sapling checkout there is no parent revision to compare,
+      # so CI runs lint and checks the generated code; the breaking-change
+      # check runs locally.
+      - name: Check generated protobuf code
+        run: tools/gen-proto --check
 
   cargo:
     runs-on: ubuntu-latest

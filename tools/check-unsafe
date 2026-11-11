@@ -19,7 +19,7 @@ attr='(allow|warn|expect)[[:space:]]*\([^)]*unsafe_code'
 flag='-[AW][[:space:]]*unsafe_code|--(allow|warn)[= ]unsafe_code|--cap-lints'
 
 status=0
-for file in $(find bin lib crates \( -name '*.rs' -o -name BUCK \) -type f | sort); do
+for file in $(find bin lib proto \( -name '*.rs' -o -name BUCK \) -type f | sort); do
     allowed=false
     for dir in $ALLOWLIST; do
         case "$file" in "$dir"/*) allowed=true ;; esac

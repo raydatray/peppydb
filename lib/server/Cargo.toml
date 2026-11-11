@@ -10,7 +10,7 @@ publish = false
 arc-swap.workspace = true
 clap.workspace = true
 engine = { path = "../engine" }
-server-proto = { path = "../../crates/server-proto" }
+kv-proto = { path = "../../proto/kv/v1/rust" }
 thiserror.workspace = true
 tokio.workspace = true
 tonic.workspace = true

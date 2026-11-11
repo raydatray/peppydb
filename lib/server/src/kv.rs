@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use server_proto::kv::v1::kv_service_server::KvService;
-use server_proto::kv::v1::{
+use kv_proto::kv::v1::kv_service_server::KvService;
+use kv_proto::kv::v1::{
     DeleteRequest, DeleteResponse, GetRequest, GetResponse, KeyValue, PutRequest, PutResponse,
     ScanRequest, ScanResponse,
 };
