@@ -500,7 +500,8 @@ next to the engine's numbers.
   leader discovery and preference (decision 11), `iptables` for network
   faults (decision 12), and system keys for the Raft applied state.
 
-The next step is the S4 plan: the Raft core on openraft.
+The next step is the S4 plan: the Raft core on openraft (plan 0028, after
+the [workspace layout](0027-workspace-language-agnostic-layout.md)).
 
 ## Sources
 
