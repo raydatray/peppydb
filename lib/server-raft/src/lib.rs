@@ -9,17 +9,21 @@
 //!   async runtime: Tokio in production, the deterministic simulator in
 //!   tests.
 //! - [`Command`] is the replicated payload, with a stable binary codec.
+//! - [`Transport`] is what a node needs from the network, over the peer
+//!   messages in [`transport`]. `server` implements it (S7).
 
 mod command;
 #[cfg(any(test, feature = "sim"))]
 pub mod rng;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
+pub mod transport;
 mod types;
 
 pub use command::CodecError;
 pub use command::Command;
 pub use command::Op;
+pub use transport::Transport;
 pub use types::LeaderId;
 pub use types::Membership;
 pub use types::NodeId;
