@@ -35,6 +35,11 @@ impl Rng {
     pub fn range(&mut self, lo: u64, hi: u64) -> u64 {
         lo + self.below(hi - lo + 1)
     }
+
+    /// A new stream derived from this one, for an independent component.
+    pub fn fork(&mut self) -> Rng {
+        Rng::new(self.next_u64())
+    }
 }
 
 #[cfg(test)]
