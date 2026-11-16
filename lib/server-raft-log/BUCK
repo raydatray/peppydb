@@ -1,0 +1,25 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The on-disk Raft log (plan 0029). Internal to the server component: only
+# server-raft, which adapts it to openraft, may depend on it. It does not
+# depend on openraft.
+peppy_rust_library(
+    name = "server-raft-log",
+    deps = [
+        "//lib/wal-segments:wal-segments",
+        "//third-party/rust:thiserror",
+    ],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = ["//lib/server-raft:"],
+    # `SimFs`, the simulated file system with a power-loss model, for the
+    # tests of server-raft. Production targets never enable it.
+    feature_variants = {
+        "sim": {
+            "deps": [
+                "//lib/wal-segments:wal-segments",
+                "//third-party/rust:thiserror",
+            ],
+            "visibility": ["//lib/server-raft:"],
+        },
+    },
+)
