@@ -96,8 +96,8 @@ impl<RT: AsyncRuntime> RaftTypeConfig for Types<RT> {
     type Vote = openraft::impls::Vote<LeaderId>;
     type Membership = Membership;
     type MembershipEdit = openraft::impls::ChangeMembers<NodeId, PeerInfo>;
-    type Payload = openraft::impls::EntryPayload<Command, Membership>;
-    type Entry = openraft::impls::Entry<CommittedLeaderId, Self::Payload>;
+    type Payload = OrPayload;
+    type Entry = OrEntry;
     type AsyncRuntime = RT;
     type Responder<T>
         = openraft::impls::OneshotResponder<Self, T>
@@ -110,13 +110,29 @@ impl<RT: AsyncRuntime> RaftTypeConfig for Types<RT> {
     type ErrorSource = openraft::AnyError;
 }
 
+// Used by the simulator's models now, and by the transport later.
+#[cfg(any(test, feature = "sim"))]
+/// openraft's vote under [`Types`].
+pub(crate) type OrVote = openraft::impls::Vote<LeaderId>;
+#[cfg(any(test, feature = "sim"))]
+/// openraft's log id under [`Types`].
+pub(crate) type OrLogId = openraft::impls::LogId<CommittedLeaderId>;
+/// openraft's entry payload under [`Types`].
+pub(crate) type OrPayload = openraft::impls::EntryPayload<Command, Membership>;
+/// openraft's log entry under [`Types`].
+pub(crate) type OrEntry = openraft::impls::Entry<CommittedLeaderId, OrPayload>;
+
+/// A log id from a term and an index.
+#[cfg(test)]
+pub(crate) fn log_id(term: u64, index: u64) -> OrLogId {
+    OrLogId::new_term_index(term, index)
+}
+
 #[cfg(test)]
 mod tests {
     use openraft_rt_tokio::TokioRuntime;
 
     use super::*;
-
-    type OrVote = openraft::impls::Vote<LeaderId>;
 
     fn assert_config<C: RaftTypeConfig>() {}
 
