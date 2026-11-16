@@ -46,6 +46,7 @@ use crate::sim::Router;
 use crate::sim::SimNetwork;
 use crate::sim::StoredSnapshot;
 use crate::sim::Trace;
+use crate::sim::checker::Checker;
 use crate::types::NodeId;
 use crate::types::PeerInfo;
 
@@ -71,6 +72,9 @@ pub struct SimConfig {
     pub chaos: bool,
     pub max_flush_delay: Duration,
     pub raft: RaftConfig,
+    /// Inject the `MemLog` bug that loses unflushed votes, to show that
+    /// the checker catches it.
+    pub lazy_votes: bool,
 }
 
 impl SimConfig {
@@ -98,6 +102,7 @@ impl SimConfig {
                 keep_below_snapshot: rng.range(0, 10),
                 ..RaftConfig::default()
             },
+            lazy_votes: false,
         }
     }
 }
@@ -146,6 +151,23 @@ pub struct Report {
     pub partitions: u64,
     pub transfers: u64,
     pub snapshots: u64,
+    /// How many times a node became leader.
+    pub elections: u64,
+    pub violations: Vec<String>,
+}
+
+impl Report {
+    /// Panic with every violation and the command that reproduces the run.
+    pub fn assert_safe(&self) {
+        if self.violations.is_empty() {
+            return;
+        }
+        panic!(
+            "seed {} violates safety:\n  {}",
+            self.seed,
+            self.violations.join("\n  "),
+        );
+    }
 }
 
 /// Microseconds of virtual time since the runtime started.
@@ -167,6 +189,7 @@ pub struct Cluster {
     config: SimConfig,
     rng: Mutex<Rng>,
     trace: Trace,
+    checker: Arc<Checker>,
 }
 
 impl Cluster {
@@ -213,6 +236,29 @@ impl Cluster {
         self.lock()[&id].log.clone()
     }
 
+    pub fn checker(&self) -> &Arc<Checker> {
+        &self.checker
+    }
+
+    /// Every node's log: live if it is up, durable if it is down.
+    pub fn images(&self) -> BTreeMap<NodeId, LogImage> {
+        self.lock()
+            .iter()
+            .map(|(id, slot)| {
+                let image = match slot.node {
+                    Some(_) => slot.log.live(),
+                    None => slot.log.durable(),
+                };
+                (*id, image)
+            })
+            .collect()
+    }
+
+    /// Run the log matching check now.
+    pub fn check_logs(&self) {
+        self.checker.check_logs(now(), &self.images());
+    }
+
     /// Start `id` over storage restored from `image` and `durable`.
     async fn start(&self, id: NodeId, image: LogImage, durable: Option<StoredSnapshot>) -> Node {
         let seed = self
@@ -223,10 +269,14 @@ impl Cluster {
         let log_config = LogConfig {
             max_flush_delay: self.config.max_flush_delay,
             seed,
+            lazy_votes: self.config.lazy_votes,
         };
         let log = MemLog::from_image(image, log_config);
         let hook = log.clone();
         let sm = Sm::from_durable(durable, Arc::new(move || hook.sync()));
+        log.observe(id, Arc::clone(&self.checker) as _);
+        sm.observe(id, Arc::clone(&self.checker) as _);
+        self.checker.register(id, log.clone(), sm.clone());
         let node = Node::start(
             id,
             &self.config.raft,
@@ -306,6 +356,70 @@ impl Cluster {
     }
 }
 
+impl Cluster {
+    /// A cluster for `seed` and `config` whose nodes are not started yet.
+    /// Call it inside the seed's `SimRuntime`.
+    pub fn new(seed: u64, config: SimConfig, trace: Trace) -> Arc<Self> {
+        let mut rng = Rng::new(seed);
+        let net = SimNetwork::new(Router::new(), rng.next_u64(), config.faults, trace.clone());
+        let checker = Arc::new(Checker::default());
+        net.set_probe(Arc::clone(&checker) as _);
+        trace.record(format_args!("seed {seed} config {config:?}"));
+        Arc::new(Cluster {
+            slots: Mutex::new(BTreeMap::new()),
+            net,
+            config,
+            rng: Mutex::new(rng),
+            trace,
+            checker,
+        })
+    }
+
+    /// Start every node and form the cluster.
+    pub async fn boot(&self) {
+        for id in self.ids() {
+            self.start(id, LogImage::default(), None).await;
+        }
+        let voters: BTreeMap<_, _> = self
+            .ids()
+            .into_iter()
+            .map(|id| (id, PeerInfo::default()))
+            .collect();
+        let (first, _) = self.node(1).expect("node 1 is up");
+        first
+            .initialize(voters)
+            .await
+            .expect("a new cluster initializes");
+    }
+
+    /// A random stream derived from the cluster's seed.
+    fn fork_rng(&self) -> Rng {
+        self.rng
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fork()
+    }
+
+    /// Heal, wait for quiescence, run the final checks, and return each
+    /// node's user data and the violations.
+    pub async fn finish(&self, history: &[ClientOp]) -> (BTreeMap<NodeId, Contents>, Vec<String>) {
+        quiesce(self).await;
+        let contents = self
+            .ids()
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    self.node(id).expect("up after healing").1.user_contents(),
+                )
+            })
+            .collect();
+        self.check_logs();
+        self.checker.check_history(history, &contents);
+        (contents, self.checker.violations())
+    }
+}
+
 /// Run one simulation for `seed` with `config`, calling `observe` with the
 /// cluster after quiescence and before shutdown.
 pub fn run_with(
@@ -316,31 +430,8 @@ pub fn run_with(
 ) -> Report {
     let mut rt = SimRuntime::with_seed(seed);
     rt.block_on(async move {
-        let mut rng = Rng::new(seed);
-        let router = Router::new();
-        let net = SimNetwork::new(router, rng.next_u64(), config.faults, trace.clone());
-        let cluster = Arc::new(Cluster {
-            slots: Mutex::new(BTreeMap::new()),
-            net,
-            config: config.clone(),
-            rng: Mutex::new(rng.fork()),
-            trace: trace.clone(),
-        });
-        trace.record(format_args!("seed {seed} config {config:?}"));
-
-        for id in cluster.ids() {
-            cluster.start(id, LogImage::default(), None).await;
-        }
-        let voters: BTreeMap<_, _> = cluster
-            .ids()
-            .into_iter()
-            .map(|id| (id, PeerInfo::default()))
-            .collect();
-        let (first, _) = cluster.node(1).expect("node 1 is up");
-        first
-            .initialize(voters)
-            .await
-            .expect("a new cluster initializes");
+        let cluster = Cluster::new(seed, config.clone(), trace.clone());
+        cluster.boot().await;
 
         let deadline = now() + config.duration.as_micros() as u64;
         let history = Arc::new(Mutex::new(Vec::new()));
@@ -348,32 +439,17 @@ pub fn run_with(
             .map(|client| {
                 let cluster = Arc::clone(&cluster);
                 let history = Arc::clone(&history);
-                let rng = rng.fork();
+                let rng = cluster.fork_rng();
                 SimRuntime::spawn(client_loop(client, rng, cluster, history, deadline))
             })
             .collect();
-        let stats = scheduler(&cluster, rng.fork(), deadline).await;
+        let stats = scheduler(&cluster, cluster.fork_rng(), deadline).await;
         for client in clients {
             client.await.expect("a client task panicked");
         }
 
-        quiesce(&cluster).await;
-
-        let contents = cluster
-            .ids()
-            .into_iter()
-            .map(|id| {
-                (
-                    id,
-                    cluster
-                        .node(id)
-                        .expect("up after healing")
-                        .1
-                        .user_contents(),
-                )
-            })
-            .collect();
         let history = std::mem::take(&mut *history.lock().unwrap_or_else(PoisonError::into_inner));
+        let (contents, violations) = cluster.finish(&history).await;
         let report = Report {
             seed,
             config,
@@ -386,6 +462,8 @@ pub fn run_with(
             partitions: stats.partitions,
             transfers: stats.transfers,
             snapshots: stats.snapshots,
+            elections: cluster.checker.elections(),
+            violations,
         };
         observe(&cluster, &report);
         cluster.shutdown().await;
@@ -423,6 +501,7 @@ async fn scheduler(cluster: &Cluster, mut rng: Rng, deadline: u64) -> ChaosStats
         let (lo, hi) = config.fault_interval;
         let pause = rng.range(lo.as_micros() as u64, hi.as_micros() as u64);
         Rt::sleep(Duration::from_micros(pause)).await;
+        cluster.check_logs();
         let roll = rng.below(100);
         let up = cluster.up();
         let down = cluster.down();
