@@ -70,6 +70,7 @@ struct Inner {
     durable: Option<StoredSnapshot>,
     crashed: bool,
     sync: SyncHook,
+    observer: super::Observed,
 }
 
 impl Inner {
@@ -117,11 +118,19 @@ impl<RT> ModelSm<RT> {
             durable,
             crashed: false,
             sync,
+            observer: None,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
             _rt: PhantomData,
         }
+    }
+
+    /// Report this state machine's applies to `observer` as `node`'s.
+    // Only the simulator, which is test-only, observes the models.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn observe(&self, node: crate::types::NodeId, observer: Arc<dyn super::Observer>) {
+        self.lock().observer = Some((node, observer));
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -226,6 +235,9 @@ impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for ModelSm<RT> {
                         }
                     }
                     live.insert(APPLIED_KEY.to_vec(), encode_log_id(&entry.log_id));
+                    if let Some((node, observer)) = &inner.observer {
+                        observer.applied(*node, &entry);
+                    }
                 }
             }
             if let Some(responder) = responder {
