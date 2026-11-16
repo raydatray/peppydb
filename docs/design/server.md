@@ -40,6 +40,7 @@ flowchart LR
 | `lib/server/src/status.rs` | `engine::Error` to gRPC status |
 | `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
 | `lib/server/src/tests/` | In-process tests and the process tests |
+| `lib/server-raft` | Crate `server-raft`: openraft behind peppydb types, storage models, and the Raft simulator ([server Raft](server-raft.md)); not used by `serve` until roadmap S7 |
 | `bin/peppydb-load`, `lib/load` | The load generator (Go) |
 | `tools/gen-proto`, `tools/protogen` | Code generation |
 
@@ -313,10 +314,12 @@ double open still fails. Production servers do not fork.
 
 ## Extension points
 
-- **Phase 2 (roadmap S7):** `serve` keeps its signature; it builds an
-  openraft node instead of a standalone `Db`. Writes call `client_write`,
-  reads call `ensure_linearizable` and then the bridge, and a non-leader
-  answers `UNAVAILABLE` with a leader hint in the status details.
+- **Phase 2 (roadmap S7):** `serve` keeps its signature; it builds a
+  `server_raft::RaftNode` instead of a standalone `Db`. Writes call
+  `RaftNode::propose`, reads call `RaftNode::read_barrier` and then the
+  bridge, and a non-leader answers `UNAVAILABLE` with the leader hint in
+  the status details. `server` implements `server_raft::Transport` over
+  gRPC ([server Raft](server-raft.md#the-transport)).
 - **API:** new RPCs and fields are compatible changes to `kv.v1`: a
   streaming scan, transactions, conditional writes, or a write's index in
   `PutResponse`.

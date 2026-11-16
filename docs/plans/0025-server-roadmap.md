@@ -122,7 +122,7 @@ commits or reserved plan numbers.
 | S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppy-load`, an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
 | S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppy-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). |
 | S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
-| S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote (openraft substitutes a lease check; see plan 0028), replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. |
+| S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix compaction, torn-tail repair; a crash model like the engine's. |
 | S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. |
 | S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. |
@@ -504,9 +504,11 @@ next to the engine's numbers.
   faults (decision 12), and system keys for the Raft applied state.
 
 - [x] Draft and agree on [the Raft core](0028-server-raft-core.md) (S4).
-- [ ] Implement and verify the Raft core stack, completing S4.
+- [x] Implement and verify the Raft core stack, completing S4
+  ([plan 0028](0028-server-raft-core.md), recorded in the
+  [server Raft design](../design/server-raft.md)).
 
-The next step is implementing plan 0028; the S5 plan (Raft log) follows.
+The next step is the S5 plan: the Raft log (`server-raft-log`).
 
 ## Sources
 
