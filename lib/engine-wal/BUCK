@@ -5,16 +5,19 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "engine-wal",
     deps = [
-        "//third-party/rust:crc32c",
+        "//lib/wal-segments:wal-segments",
         "//third-party/rust:thiserror",
     ],
-    test_deps = ["//third-party/rust:tempfile"],
+    test_deps = [
+        "//third-party/rust:crc32c",
+        "//third-party/rust:tempfile",
+    ],
     visibility = ["//lib/engine:"],
     # `fail_next_sync` for the engine's fault-injection variant (plan 0026).
     feature_variants = {
         "fault-injection": {
             "deps": [
-                "//third-party/rust:crc32c",
+                "//lib/wal-segments:wal-segments",
                 "//third-party/rust:thiserror",
             ],
             "visibility": ["//lib/engine:"],
