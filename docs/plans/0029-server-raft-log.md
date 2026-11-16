@@ -1,11 +1,12 @@
 # 0029: The on-disk Raft log
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S5
 (decision 13, "The Raft log").
 
-**Design references:** [Server Raft](../design/server-raft.md) (the
+**Design references:** [Server Raft log](../design/server-raft-log.md)
+(the result), [server Raft](../design/server-raft.md) (the
 `MemLog` contract this log must keep), [engine](../design/engine.md)
 (the write-ahead log whose mechanics this log borrows),
 [build system](../design/build-system.md),
@@ -528,19 +529,73 @@ committed log id is never below the purge point ([Recovery](#recovery)).
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] 2/10 `wal-segments`.
-- [ ] 3/10 file-system trait and `SimFs`.
-- [ ] 4/10 format and recovery.
-- [ ] 5/10 ordered write queue.
-- [ ] 6/10 crash tests.
-- [ ] 7/10 openraft adapter.
-- [ ] 8/10 simulator over the real log.
-- [ ] 9/10 benchmarks.
-- [ ] 10/10 design document; stack-wide verification.
+- [x] 2/10 `wal-segments`.
+- [x] 3/10 file-system trait and `SimFs`.
+- [x] 4/10 format and recovery.
+- [x] 5/10 ordered write queue.
+- [x] 6/10 crash tests.
+- [x] 7/10 openraft adapter.
+- [x] 8/10 simulator over the real log.
+- [x] 9/10 benchmarks.
+- [x] 10/10 design documents; stack-wide verification.
+
+## Verification outcomes (2026-11-15)
+
+On macOS (Apple M4 Pro, 12 cores); Docker was not used.
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 36 Rust targets clean |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass: 35 targets |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test ./...` | Pass |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (unchanged; no new `unsafe`) |
+| `engine-wal` and `engine` tests after the extraction | Pass unchanged; the golden old-segment test passes |
+| Crash tests | Every operation of three scripted workloads, 6 tears each; 2,000 random workloads (20,000 once, 4 s); the negative control fails the oracle |
+| openraft's storage suite on `DiskLog` | Pass over `SimFs` (two flush delays) and real files |
+| Simulator default tier (debug) | 400 seeds and the regression seed in 18 s wall |
+| Long tier (release), base 976989910000 | 4 seeds panicked before the fix below; 100,000 seeds pass after it |
+| Long tier (release), base 995530922000 | 100,000 seeds in 125 s, none failing |
+| Injected file-system failures | 12 seeds: every run safe and convergent; nodes fail-stopped |
+| Benchmarks | Recorded in [server Raft log](../design/server-raft-log.md#measurements) |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`truncate_after` past the last entry.** openraft's storage suite
+  truncates after an index above the last entry and expects nothing to
+  change. The first queue moved the view's last entry up to the
+  truncation point. Fixed in diff 5, with a test; the crash workloads
+  never truncated past the end, so only the suite caught it.
+- **A model bug that the long tier found.** `ModelSm::install_snapshot`
+  made the snapshot durable before the log's queued truncation of the
+  entries it replaced. A crash between the two left a log whose last
+  entry was below the applied log id in term but not in index, and
+  openraft refused to start the node ("inverted log order"). It happened
+  with `MemLog` too (4 of 100,000 seeds at base 976989910000), so it is
+  older than this stack; plan 0028's long tier had not hit it.
+  `install_snapshot` now calls the log's sync hook first, as
+  `build_snapshot` does, and the seed is in `sim/regressions.rs`. The S6
+  state machine must keep this rule. The long tier now reports a
+  panicking seed instead of aborting.
+- **`StoredVote::node` is an `Option`.** openraft's standard leader id
+  always names a node, but the log does not assume it.
+- **`truncate_after` takes a `LogPos`, not an index,** so the view knows
+  the term of its new last entry without a read.
+- **`Fs::list` returns names, not paths,** and `Fs` gained
+  `create_dir_all`; `FsFile` gained `is_empty` (clippy).
+- **A commit point with no segment is dropped,** not written to a
+  segment named by a guessed index: the committed log id is a lower
+  bound.
+- **Recovery finishes an interrupted purge.** A purge past the last
+  entry deletes every segment; if the crash came after the `state` write,
+  `open` deletes the leftover segments, so the next append starts a new
+  segment after the purge point.
+- **Benchmarks count flushes.** `RaftLog::flushes` (and
+  `DiskLog::flushes`) count flushes that had writes, for the
+  entries-per-sync figures. The thread driver also flushes for
+  committed-log-id writes, so with one writer there are more syncs than
+  writes.
 
 ## Agent notes
 
@@ -552,6 +607,11 @@ None yet.
   - `lib/server-raft/src/sim/simulator.rs`: where crashes and restarts
     happen;
   - `lib/engine/src/tests/crash.rs`: the engine's process-crash tests.
+- **Commands:**
+  - `tools/buck2 test //lib/wal-segments/... //lib/engine-wal/... //lib/server-raft-log/... //lib/server-raft/...`
+  - long tier: `tools/buck2 run @build/mode/release //lib/server-raft:server-raft-unittest -- --ignored long_tier`
+  - benchmarks: `tools/buck2 run @build/mode/release //lib/server-raft-log:server-raft-log-unittest -- --ignored --nocapture tests::bench::`
+    and the same for `//lib/server-raft:server-raft-unittest`.
 - The disk benchmark from plan 0028's discussion is saved outside the
   repository; diff 9 rewrites it over the real log.
 - `RT::spawn_blocking` returns `Unsupported` on `SimRuntime`; the adapter

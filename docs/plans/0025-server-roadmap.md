@@ -508,7 +508,13 @@ next to the engine's numbers.
   ([plan 0028](0028-server-raft-core.md), recorded in the
   [server Raft design](../design/server-raft.md)).
 
-The next step is the S5 plan: the Raft log (`server-raft-log`).
+- [x] Draft and agree on [the Raft log](0029-server-raft-log.md) (S5).
+- [x] Implement and verify the Raft log stack, completing S5
+  ([plan 0029](0029-server-raft-log.md), recorded in the
+  [server Raft log design](../design/server-raft-log.md)).
+
+The next step is the S6 plan: the replicated state machine over
+`engine::Db` in external mode.
 
 ## Sources
 
