@@ -7,7 +7,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+openraft.workspace = true
+openraft-rt-tokio.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+openraft-rt-sim.workspace = true
 
 [lints]
 workspace = true
