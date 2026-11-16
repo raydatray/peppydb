@@ -1,0 +1,15 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# Checksummed records in numbered segment files (plan 0029): the framing,
+# segment headers, segment names, and the torn-tail scan shared by the
+# engine's write-ahead log and the Raft log. Its own component; only the
+# two logs may depend on it.
+peppy_rust_library(
+    name = "wal-segments",
+    deps = ["//third-party/rust:crc32c"],
+    test_deps = ["//third-party/rust:tempfile"],
+    visibility = [
+        "//lib/engine-wal:",
+        "//lib/server-raft-log:",
+    ],
+)

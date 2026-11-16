@@ -140,3 +140,43 @@ fn segment_headers_round_trip_and_reject_damage() {
     assert_eq!(decode_header(&bad), Err("unsupported version"));
     assert_eq!(decode_header(&header[..31]), Err("short header"));
 }
+
+/// Segments written before the move onto `wal-segments` (plan 0029): the
+/// encoder must produce these bytes exactly, and they must still decode.
+#[test]
+fn segments_from_before_wal_segments_are_unchanged() {
+    const GOLDEN: &str = "504550505957414c010000000000000001000000000000000650e6bd\
+        0000000014000000df9cc37301000000000000000001000000020000006b7631\
+        0e000000e6467b16020000000000000001010000006b1d000000d4881fb10300\
+        000000000000020200000000010000000000000061010100000062";
+    let golden: Vec<u8> = (0..GOLDEN.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&GOLDEN[at..at + 2], 16).unwrap())
+        .collect();
+    let put_a = Op::Put {
+        key: b"a",
+        value: b"",
+    };
+    let mut buf = encode_header(1).to_vec();
+    encode_op(
+        &mut buf,
+        1,
+        Op::Put {
+            key: b"k",
+            value: b"v1",
+        },
+    );
+    encode_op(&mut buf, 2, Op::Delete { key: b"k" });
+    encode_batch(&mut buf, 3, &[put_a, Op::Delete { key: b"b" }]);
+    assert_eq!(buf, golden);
+
+    assert_eq!(decode_header(&golden), Ok(1));
+    let mut offset = HEADER_BYTES;
+    let mut seqs = Vec::new();
+    while let Some((record, used)) = decode(&golden[offset..]) {
+        seqs.push(record.seq);
+        offset += used;
+    }
+    assert_eq!(seqs, [1, 2, 3]);
+    assert_eq!(offset, golden.len());
+}

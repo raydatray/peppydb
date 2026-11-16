@@ -1,4 +1,5 @@
-//! Record and segment-header encoding.
+//! Record and segment-header encoding, over `wal-segments`' framing
+//! (plan 0029), whose bytes are unchanged from plan 0020.
 //!
 //! ```text
 //! segment header, 32 bytes:
@@ -20,19 +21,27 @@
 //! lower bound, so a zero-filled tail (whose CRC32C over nothing is 0) never
 //! decodes as a record.
 
+use wal_segments::{Format, u32_at, u64_at};
+
 use super::{Op, Record};
 
 /// The largest record body (`len`): bounds one write or one batch, and the
 /// memory that replay and the pending buffer hold for one record.
 pub const MAX_RECORD_BYTES: usize = 16 << 20;
 
-pub(crate) const HEADER_BYTES: usize = 32;
-const MAGIC: &[u8; 8] = b"PEPPYWAL";
-const VERSION: u32 = 1;
-/// `len` and `crc` before the body.
-pub(crate) const PREFIX_BYTES: usize = 8;
+pub(crate) use wal_segments::{HEADER_BYTES, PREFIX_BYTES};
 /// `seq` and `kind`: the smallest body.
 const MIN_BODY: usize = 9;
+
+/// The engine WAL's segment format: unpadded frames.
+pub(crate) const FORMAT: Format = Format {
+    magic: *b"PEPPYWAL",
+    version: 1,
+    extension: "wal",
+    min_body: MIN_BODY,
+    max_body: MAX_RECORD_BYTES,
+    align: 1,
+};
 
 const PUT: u8 = 0;
 const DELETE: u8 = 1;
@@ -40,28 +49,12 @@ const BATCH: u8 = 2;
 
 /// The 32-byte header of a segment whose first record has `first_seq`.
 pub(crate) fn encode_header(first_seq: u64) -> [u8; HEADER_BYTES] {
-    let mut header = [0; HEADER_BYTES];
-    header[..8].copy_from_slice(MAGIC);
-    header[8..12].copy_from_slice(&VERSION.to_le_bytes());
-    header[16..24].copy_from_slice(&first_seq.to_le_bytes());
-    let crc = crc32c::crc32c(&header[..24]);
-    header[24..28].copy_from_slice(&crc.to_le_bytes());
-    header
+    FORMAT.encode_header(first_seq)
 }
 
 /// The `first_seq` of a segment header, or why it is not one.
 pub(crate) fn decode_header(bytes: &[u8]) -> Result<u64, &'static str> {
-    let header = bytes.get(..HEADER_BYTES).ok_or("short header")?;
-    if &header[..8] != MAGIC {
-        return Err("bad magic");
-    }
-    if header[24..28] != crc32c::crc32c(&header[..24]).to_le_bytes() {
-        return Err("bad header checksum");
-    }
-    if u32_at(header, 8) != VERSION {
-        return Err("unsupported version");
-    }
-    Ok(u64_at(header, 16))
+    FORMAT.decode_header(bytes)
 }
 
 /// Append one encoded single-operation record.
@@ -120,34 +113,23 @@ fn encode_payload(buf: &mut Vec<u8>, op: Op<'_>) {
 }
 
 fn encode(buf: &mut Vec<u8>, seq: u64, kind: u8, payload: impl FnOnce(&mut Vec<u8>)) {
-    let start = buf.len();
-    buf.extend([0; PREFIX_BYTES]);
-    buf.extend(seq.to_le_bytes());
-    buf.push(kind);
-    payload(buf);
-    let len = (buf.len() - start - PREFIX_BYTES) as u32;
-    buf[start..start + 4].copy_from_slice(&len.to_le_bytes());
-    let crc = crc32c::crc32c_append(
-        crc32c::crc32c(&len.to_le_bytes()),
-        &buf[start + PREFIX_BYTES..],
-    );
-    buf[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+    FORMAT.frame(buf, |buf| {
+        buf.extend(seq.to_le_bytes());
+        buf.push(kind);
+        payload(buf);
+    });
 }
 
 /// Decode the record at the start of `bytes`: the record and the bytes it
 /// spans. `None` if the bytes do not hold a whole, intact, well-formed
 /// record.
 pub(crate) fn decode(bytes: &[u8]) -> Option<(Record<'_>, usize)> {
-    let prefix = bytes.get(..PREFIX_BYTES)?;
-    let len = u32_at(prefix, 0) as usize;
-    if !(MIN_BODY..=MAX_RECORD_BYTES).contains(&len) {
-        return None;
-    }
-    let body = bytes.get(PREFIX_BYTES..PREFIX_BYTES + len)?;
-    let crc = crc32c::crc32c_append(crc32c::crc32c(&prefix[..4]), body);
-    if crc != u32_at(prefix, 4) {
-        return None;
-    }
+    let (body, used) = FORMAT.decode_frame(bytes)?;
+    Some((decode_body(body)?, used))
+}
+
+/// Decode a record body: its sequence, kind, and payload.
+pub(crate) fn decode_body(body: &[u8]) -> Option<Record<'_>> {
     let seq = u64_at(body, 0);
     let mut cursor = Cursor(&body[MIN_BODY..]);
     let ops = match body[8] {
@@ -167,10 +149,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<(Record<'_>, usize)> {
         }
         _ => return None,
     };
-    cursor
-        .0
-        .is_empty()
-        .then_some((Record { seq, ops }, PREFIX_BYTES + len))
+    cursor.0.is_empty().then_some(Record { seq, ops })
 }
 
 /// A reader over a record's payload.
@@ -213,12 +192,4 @@ impl<'a> Cursor<'a> {
             _ => None,
         }
     }
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
 }

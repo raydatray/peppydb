@@ -4,7 +4,7 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use super::record::{HEADER_BYTES, decode, decode_header};
+use super::record::{FORMAT, HEADER_BYTES, decode, decode_body, decode_header};
 use super::segment::{self, io};
 use super::{Record, Wal, WalError};
 
@@ -79,8 +79,8 @@ impl Wal {
                     }
                     // A tail only if no intact record follows.
                     let after = previous.unwrap_or(0);
-                    let follows = (offset + 1..bytes.len()).any(|at| {
-                        decode(&bytes[at..]).is_some_and(|(record, _)| record.seq > after)
+                    let follows = FORMAT.intact_frame_after(&bytes, offset, |body| {
+                        decode_body(body).is_some_and(|record| record.seq > after)
                     });
                     if follows {
                         return Err(corrupt(offset, "damage before intact records").into());
