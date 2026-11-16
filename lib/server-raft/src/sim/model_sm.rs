@@ -22,7 +22,6 @@
 //!   renames the new store file into place.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -39,12 +38,17 @@ use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
 
 use crate::command::Op;
-use crate::types::Membership;
+use crate::encoding::Reader;
+use crate::encoding::decode_log_id;
+use crate::encoding::decode_membership_config;
+use crate::encoding::encode_log_id;
+use crate::encoding::encode_membership_config;
+use crate::encoding::put_bytes;
+use crate::encoding::put_u32;
 use crate::types::OrLogId;
 use crate::types::OrSnapshot;
 use crate::types::OrSnapshotMeta;
 use crate::types::OrStoredMembership;
-use crate::types::PeerInfo;
 use crate::types::Types;
 
 /// `0x00 ‖ "raft/applied"`: the last applied log id, `term u64 | index u64`.
@@ -307,13 +311,6 @@ fn meta_of(contents: &Contents) -> OrSnapshotMeta {
 // The encodings of the system keys and of a snapshot. Integers are
 // little-endian; lengths are u32.
 
-fn encode_log_id(log_id: &OrLogId) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16);
-    out.extend_from_slice(&log_id.leader_id.term.to_le_bytes());
-    out.extend_from_slice(&log_id.index.to_le_bytes());
-    out
-}
-
 fn encode_membership(stored: &OrStoredMembership) -> Vec<u8> {
     let mut out = Vec::new();
     match stored.log_id() {
@@ -323,20 +320,7 @@ fn encode_membership(stored: &OrStoredMembership) -> Vec<u8> {
         }
         None => out.push(0),
     }
-    let configs = stored.get_joint_config();
-    put_u32(&mut out, configs.len());
-    for config in configs {
-        put_u32(&mut out, config.len());
-        for id in config {
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-    }
-    let nodes: Vec<_> = stored.nodes().collect();
-    put_u32(&mut out, nodes.len());
-    for (id, node) in nodes {
-        out.extend_from_slice(&id.to_le_bytes());
-        put_bytes(&mut out, node.addr.as_bytes());
-    }
+    encode_membership_config(&mut out, stored.membership());
     out
 }
 
@@ -346,17 +330,7 @@ fn decode_membership(bytes: &[u8]) -> Result<OrStoredMembership, io::Error> {
         0 => None,
         _ => Some(decode_log_id(&mut reader)?),
     };
-    let configs = (0..reader.u32()?)
-        .map(|_| (0..reader.u32()?).map(|_| reader.u64()).collect())
-        .collect::<Result<Vec<BTreeSet<u64>>, io::Error>>()?;
-    let nodes = (0..reader.u32()?)
-        .map(|_| {
-            let id = reader.u64()?;
-            let addr = String::from_utf8(reader.bytes()?).map_err(io::Error::other)?;
-            Ok((id, PeerInfo { addr }))
-        })
-        .collect::<Result<BTreeMap<u64, PeerInfo>, io::Error>>()?;
-    let membership = Membership::new(configs, nodes).map_err(io::Error::other)?;
+    let membership = decode_membership_config(&mut reader)?;
     Ok(OrStoredMembership::new(log_id, membership))
 }
 
@@ -381,54 +355,6 @@ fn decode_contents(bytes: &[u8]) -> Result<Contents, io::Error> {
     }
 }
 
-fn put_u32(out: &mut Vec<u8>, n: usize) {
-    let n = u32::try_from(n).unwrap_or_else(|_| panic!("{n} does not fit in u32"));
-    out.extend_from_slice(&n.to_le_bytes());
-}
-
-fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    put_u32(out, bytes.len());
-    out.extend_from_slice(bytes);
-}
-
-fn decode_log_id(reader: &mut Reader<'_>) -> Result<OrLogId, io::Error> {
-    let term = reader.u64()?;
-    let index = reader.u64()?;
-    Ok(OrLogId::new_term_index(term, index))
-}
-
-struct Reader<'a>(&'a [u8]);
-
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], io::Error> {
-        if self.0.len() < n {
-            return Err(io::Error::other("a system value ends early"));
-        }
-        let (head, tail) = self.0.split_at(n);
-        self.0 = tail;
-        Ok(head)
-    }
-
-    fn u8(&mut self) -> Result<u8, io::Error> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, io::Error> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(io::Error::other)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn u64(&mut self) -> Result<u64, io::Error> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(io::Error::other)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    fn bytes(&mut self) -> Result<Vec<u8>, io::Error> {
-        let len = self.u32()? as usize;
-        Ok(self.take(len)?.to_vec())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
@@ -445,8 +371,10 @@ mod tests {
     use crate::command::Command;
     use crate::sim::LogConfig;
     use crate::sim::MemLog;
+    use crate::types::Membership;
     use crate::types::OrEntry;
     use crate::types::OrPayload;
+    use crate::types::PeerInfo;
     use crate::types::log_id;
 
     type Sm = ModelSm<SimRuntime>;

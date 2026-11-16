@@ -1312,6 +1312,8 @@ dependencies = [
  "openraft",
  "openraft-rt-sim",
  "openraft-rt-tokio",
+ "server-raft-log",
+ "tempfile",
  "thiserror",
 ]
 
