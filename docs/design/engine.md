@@ -66,10 +66,13 @@ internal crates. `engine-wal` is the first internal crate:
 peppy_rust_library(
     name = "engine-wal",
     deps = [
-        "//third-party/rust:crc32c",
+        "//lib/wal-segments:wal-segments",
         "//third-party/rust:thiserror",
     ],
-    test_deps = ["//third-party/rust:tempfile"],
+    test_deps = [
+        "//third-party/rust:crc32c",
+        "//third-party/rust:tempfile",
+    ],
     visibility = ["//lib/engine:"],
 )
 ```
@@ -80,6 +83,13 @@ peppy_rust_library(
   bytes, not trees. It is testable without a tree and cannot reach into tree
   internals. The CRC32C comes from the third-party `crc32c` crate, the same
   source that plan 0017 chose for the store, not from a `bf-tree` crate.
+- **Framing from `wal-segments`** (plan 0029). The segment header, the
+  `len | crc` frame, segment names and listing, the torn-tail check, and
+  `sync_dir` live in the shared [`wal-segments`](server-raft-log.md#wal-segments)
+  crate, which the Raft log uses too. `engine-wal` keeps its record bodies
+  and its semantics (sequences, gaps, replay). Its frames are unpadded,
+  so the bytes below are unchanged from plan 0020; a golden test holds
+  them.
 - **Its own `Op` type.** `engine_wal::Op` mirrors `bf_tree::Op`. Plan 0021
   converts between them by copying two slice references. Code in `engine`
   names the crate (`engine_wal::Op`); neither type is re-exported under the

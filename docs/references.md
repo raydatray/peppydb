@@ -79,3 +79,20 @@ dissertation, Stanford University, 2014.
 - **Use:** openraft is peppydb's Raft implementation
   ([server roadmap](plans/0025-server-roadmap.md), decision 9). etcd raft
   and raft-rs are references for Raft extensions and edge cases.
+
+## Write-ahead log formats
+
+- [LevelDB log format](https://github.com/google/leveldb/blob/main/doc/log_format.md):
+  per-record CRC32C and length in 32 KiB blocks.
+- [PostgreSQL WAL record header](https://github.com/postgres/postgres/blob/master/src/include/access/xlogrecord.h):
+  a total length and a CRC-32C per record.
+- [etcd WAL encoder](https://github.com/etcd-io/etcd/blob/main/server/storage/wal/encoder.go):
+  an 8-byte length frame padded to 8 bytes so a length is never torn,
+  and a rolling CRC per record.
+- [hashicorp/raft-wal](https://github.com/hashicorp/raft-wal) (`segment/format.go`,
+  `segment/writer.go`): 8-byte frame headers padded to 8 bytes, one CRC
+  per committed batch in a commit frame.
+- [TiKV raft-engine](https://github.com/tikv/raft-engine) (`src/log_batch.rs`):
+  one CRC per batch of entries.
+- **Use:** the framing, alignment, and torn-tail choices of the Raft log
+  ([server Raft log](design/server-raft-log.md), plan 0029).
