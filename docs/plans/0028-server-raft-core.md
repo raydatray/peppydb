@@ -1,6 +1,6 @@
 # 0028: Raft core and deterministic simulator
 
-**Status:** Agreed
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S4.
 
@@ -208,22 +208,31 @@ impl Command {
 
 ### The facade
 
+As built (the draft's shape is recorded under
+[Discoveries](#discoveries-and-plan-changes)):
+
 ```rust
-impl<RT: AsyncRuntime> RaftNode<RT> {
+// `SM` is the state machine: `ModelSm` in tests, `DbStateMachine` in S6.
+pub struct RaftNode<SM, RT = TokioRuntime> { /* openraft::Raft<Types<RT>, SM> */ }
+
+impl<SM, RT> RaftNode<SM, RT> {
     /// Returns once the entry is committed and applied on this node.
     pub async fn propose(&self, cmd: Command) -> Result<Proposed, ProposeError>;
     /// Read index (dissertation §6.4): confirms leadership and waits until
     /// applied >= the read point. The caller then reads its local state.
-    pub async fn read_barrier(&self) -> Result<ReadPoint, NotLeader>;
-    pub fn status(&self) -> Status;   // role, term, leader, commit, applied
-    pub async fn transfer_leader(&self, to: u64) -> Result<(), NotLeader>;
+    pub async fn read_barrier(&self) -> Result<ReadPoint, ReadError>;
+    pub fn status(&self) -> Status;   // role, term, vote, leader, commit, applied, ...
+    pub async fn transfer_leader(&self, to: u64) -> Result<(), StopError>;
+    // start, initialize, snapshot, shutdown, and handle_* for incoming messages
 }
 
 pub enum ProposeError {
     NotLeader(LeaderHint),   // nothing was proposed; safe to retry anywhere
-    OutcomeUnknown,          // leadership lost after append; the plan 0026 rule
-    Fatal(StorageFailure),   // the node stops (fail-stop, as in 0026)
+    OutcomeUnknown,          // appended, then discarded on a leader change
+    Stopped(String),         // the node stopped (fail-stop, as in 0026)
+    Internal(String),        // a server bug
 }
+pub enum ReadError { NotLeader(LeaderHint), NoQuorum, Stopped(String) }
 ```
 
 - `read_barrier` calls `ensure_linearizable(ReadPolicy::ReadIndex)`.
@@ -242,12 +251,12 @@ implements openraft's `RaftNetworkFactory` on top of that trait.
 // With standard leader IDs (above), a committed leader is identified by
 // its term alone, so a LogId is (term, index).
 pub struct LogId { pub term: u64, pub index: u64 }
-pub struct Vote { pub term: u64, pub voted_for: Option<u64>, pub committed: bool }
+pub struct Vote { pub term: u64, pub node: u64, pub committed: bool }
 
 pub enum EntryPayload {
-    Blank,                      // a new leader's no-op
-    Command(Bytes),             // the Command codec's bytes, opaque here
-    Membership(Membership),     // voters and learners with their PeerInfo
+    Blank,                        // a new leader's no-op
+    Command(Vec<u8>),             // the Command codec's bytes, opaque here
+    Membership(MembershipConfig), // voter sets and every member's PeerInfo
 }
 pub struct Entry { pub log_id: LogId, pub payload: EntryPayload }
 
@@ -257,19 +266,28 @@ pub struct AppendEntries {
     pub entries: Vec<Entry>,
     pub commit: Option<LogId>,
 }
-pub enum AppendEntriesReply { Success, Conflict, HigherVote(Vote) }
-pub struct VoteRequest { pub vote: Vote, pub last: Option<LogId> }
+pub enum AppendReply {
+    Accepted(Option<LogId>),
+    Conflict { log_id: LogId, hint: Option<Vec<LogId>> },
+    HigherVote(Vote),
+}
+pub struct VoteRequest { pub vote: Vote, pub last: Option<LogId>, pub transfer_from: Option<Vote> }
 pub struct VoteReply { pub vote: Vote, pub granted: bool, pub last: Option<LogId> }
 
-/// What server-raft needs from the network. S7 implements it in `server`
-/// over gRPC; tests use SimNetwork.
+/// What server-raft needs from the network. `from` lets a test network
+/// model partitions. S7 implements it in `server` over gRPC.
 pub trait Transport: Send + Sync + 'static {
-    fn append_entries(&self, to: u64, req: AppendEntries)
-        -> impl Future<Output = Result<AppendEntriesReply, Unreachable>> + Send;
-    fn vote(&self, to: u64, req: VoteRequest)
+    type SnapshotData: Send + 'static;  // the state machine's snapshot type
+    fn append_entries(&self, from: u64, to: u64, req: AppendEntries)
+        -> impl Future<Output = Result<AppendReply, Unreachable>> + Send;
+    fn vote(&self, from: u64, to: u64, req: VoteRequest)
         -> impl Future<Output = Result<VoteReply, Unreachable>> + Send;
-    fn snapshot(&self, to: u64, meta: SnapshotMeta, data: SnapshotReader)
+    fn pre_vote(&self, from: u64, to: u64, req: VoteRequest)
+        -> impl Future<Output = Result<VoteReply, Unreachable>> + Send;
+    fn snapshot(&self, from: u64, to: u64, vote: Vote, meta: SnapshotMeta, data: Self::SnapshotData)
         -> impl Future<Output = Result<Vote, Unreachable>> + Send;
+    fn transfer_leader(&self, from: u64, to: u64, req: TransferLeader)
+        -> impl Future<Output = Result<TransferReply, Unreachable>> + Send;
 }
 ```
 
@@ -391,26 +409,19 @@ election, although its stale log cannot win it.
 node asks whether it would win before it increments its term, so an
 isolated node never raises its term.
 
-**openraft has no pre-vote phase.** Its followers reject `RequestVote`
-while their leader lease is valid. This is the check in dissertation
-§4.2.3, which the dissertation describes for disruptive removed servers;
-it addresses the same problem by a different mechanism. The roadmap's S4
-row says "pre-vote", so this plan records the difference as a deliberate
-deviation.
+**Outcome: pre-vote is enabled.** The draft assumed openraft had no
+pre-vote phase. openraft 0.10.0 implements it behind
+`Config::enable_pre_vote` (off by default), with a separate `pre_vote`
+RPC. `RaftConfig::pre_vote` defaults to `true`, the transport carries the
+RPC, and the deviation the draft recorded does not exist.
 
-**What is not known yet.** The lease check rejects the vote, but the
-rejoining node's higher term can still reach the leader by another path,
-for example in its reply to the leader's next `AppendEntries`. Whether
-openraft's leader then steps down is decided by a scenario in diff 8: a
-partitioned node rejoins a stable cluster, and the leader must not change.
-
-- **If the scenario passes,** the lease check is accepted as the
-  substitute for pre-vote, and the design document records it.
-- **If it fails,** the result is a liveness cost, not a safety violation:
-  one election timeout of unavailability per rejoin. The plan records it
-  as a known limitation, and the decision between accepting it and adding
-  pre-vote to openraft upstream is made before S7, when real network
-  partitions become likely.
+openraft also rejects votes while a follower's leader lease is valid
+(dissertation §4.2.3). The lease stops a disruptive node from winning;
+pre-vote stops it from raising its term. The scenarios in diff 13 show
+that the difference matters: with pre-vote, a follower isolated for 5 s
+keeps its term and the leader is undisturbed; with pre-vote off, the
+isolated node raises its term, and the cluster moves to a higher term
+when it rejoins.
 
 ## Decisions and trade-offs
 
@@ -434,6 +445,13 @@ partitioned node rejoins a stable cluster, and the leader must not change.
   S5 and must stay stable across openraft and serde upgrades.
 - **Pin `=0.10.0`.** The first stable 0.10 release; the alphas are not
   pinned.
+- **Pre-vote on.** openraft offers it; it prevents rejoin disruption that
+  the lease check alone does not (scenario tests).
+- **The simulator and checker are test-only; the models are not.**
+  `MemLog`, `ModelSm`, `Router`, and `SimNetwork` are generic over the
+  runtime and built with the `sim` feature for S5 to S7 tests. The
+  simulator and checker are tied to `SimRuntime` and stay `cfg(test)`,
+  so the `sim` variant needs no `openraft-rt-sim` dependency.
 - **Standard leader IDs (`leader_id_std`).** One leader per term, as in
   the paper. *Alternative:* openraft's default advanced mode, which allows
   several leaders per term and can reduce split votes. It would be a
@@ -454,6 +472,9 @@ partitioned node rejoins a stable cluster, and the leader must not change.
 
 ## Proposed commit stack
 
+The stack was first nine diffs; it was split into fourteen after
+implementation so that each diff is smaller (see
+[Discoveries](#discoveries-and-plan-changes)).
 
 ### `[1/14][server-raft-core][plan] plan the Raft core and simulator`
 
@@ -568,41 +589,41 @@ partitioned node rejoins a stable cluster, and the leader must not change.
 
 ## Open questions
 
-None that need a decision before implementation. Two results are
-measured during the stack:
+None. The two results measured during the stack:
 
-- **N for the default tier,** from the cost per seed (diff 8).
-- **The rejoining-node scenario,** which decides whether the lease check
-  is recorded as the pre-vote substitute or as a known limitation
-  ([Pre-vote](#pre-vote)).
+- **N for the default tier** is 400 (0.34 s of CPU per seed in debug;
+  20 s of wall time in 8 parallel chunks on 12 cores).
+- **The rejoining-node scenario** led to enabling openraft's real
+  pre-vote ([Pre-vote](#pre-vote)).
 
 ## Verification strategy
 
-| Check | Command or procedure | Expected result |
-| --- | --- | --- |
-| Unit, model, and sim tests | `tools/buck2 test //lib/server-raft/...` | Pass |
-| Reproduce one seed | `PEPPY_SIM_SEED=<n> tools/buck2 run //lib/server-raft:server-raft-unittest -- sim::` | Same trace hash, same result |
-| Long run | the ignored test with `PEPPY_SIM_SEEDS=100000` under `tools/linux-run` | Pass; recorded here |
-| Checker sensitivity | the broken-`MemLog` test in diff 8 | Violation detected |
-| Workspace checks | the `AGENTS.md` list | Pass |
-| Miri | not required | `server-raft` has no `unsafe` code |
+| Check | Command or procedure | Expected result | Outcome (2026-11-11, macOS aarch64) |
+| --- | --- | --- | --- |
+| Unit, model, and sim tests | `tools/buck2 test //lib/server-raft/...` | Pass | Pass; 49 tests, 1 ignored (the long tier) |
+| Default tier | `tools/buck2 run //lib/server-raft:server-raft-unittest -- tests::sweep` | Pass in under 60 s | 400 seeds, 3 and 5 nodes, 20 s wall |
+| Reproduce one seed | `PEPPY_SIM_SEED=<n> tools/buck2 run //lib/server-raft:server-raft-unittest -- tests::sweep::one_seed --nocapture` | Same trace hash, same result | Seed 594594012345: hash `e892c9a2ff9bd84e` in two processes |
+| Long tier | `tools/buck2 run @build/mode/release //lib/server-raft:server-raft-unittest -- --ignored long_tier --nocapture` | Pass | 100,000 seeds from base 594594002000 in 148 s on 12 threads; no violations. Run on macOS, not under `tools/linux-run` |
+| Checker sensitivity | `sim/checker.rs` tests; `a_log_that_loses_votes_is_caught` | Violation detected | Every check detects its synthetic violation; the lazy-vote log fails 100 of 100 seeds (persist before send) |
+| Workspace checks | the `AGENTS.md` list | Pass | Pass: fmt; clippy (31 targets); 30 Buck2 test targets; `cargo test --workspace --locked`; autocargo, gobuckify-remote, and gen-proto checks; `go vet` and `go test` |
+| Miri | not required | `server-raft` has no `unsafe` code | Not run; `tools/check-unsafe` passes |
 
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] 2/14 dependencies.
-- [ ] 3/14 crate and codec.
-- [ ] 4/14 type config.
-- [ ] 5/14 `MemLog`.
-- [ ] 6/14 `ModelSm`.
-- [ ] 7/14 peer messages and `Transport`.
-- [ ] 8/14 facade.
-- [ ] 9/14 `SimNetwork`.
-- [ ] 10/14 simulator.
-- [ ] 11/14 safety checker.
-- [ ] 12/14 seed tiers.
-- [ ] 13/14 scenarios.
-- [ ] 14/14 design document; stack-wide verification.
+- [x] 2/14 dependencies.
+- [x] 3/14 crate and codec.
+- [x] 4/14 type config.
+- [x] 5/14 `MemLog`.
+- [x] 6/14 `ModelSm`.
+- [x] 7/14 peer messages and `Transport`.
+- [x] 8/14 facade.
+- [x] 9/14 `SimNetwork`.
+- [x] 10/14 simulator.
+- [x] 11/14 safety checker.
+- [x] 12/14 seed tiers.
+- [x] 13/14 scenarios.
+- [x] 14/14 design document; stack-wide verification.
 
 ## Discoveries and plan changes
 
@@ -626,6 +647,56 @@ measured during the stack:
   bytes). The first draft recommended an opaque envelope; rolling-upgrade
   compatibility under `buf breaking` changed the recommendation.
 
+During implementation:
+
+- **openraft 0.10.0 has pre-vote** (`Config::enable_pre_vote`, off by
+  default). The planned deviation was unnecessary; pre-vote is on, and
+  the transport carries its RPC. The scenario without pre-vote confirms
+  the disruption it prevents.
+- **The persist-before-send probe first reported 9 of 30 seeds.** A
+  follower accepted appends through an index whose entry was not in its
+  durable log. openraft sends that reply only after the IO for
+  `(vote, last)` is flushed, so the probe was suspect. The cause: the
+  follower had installed a snapshot covering the index, which is durable
+  in the state machine at once while the log's purge is still queued. The
+  probe now accepts "in the durable log, or at or below the durable
+  snapshot". A second hypothesis, a race with a conflict truncation, was
+  tested and found unnecessary (300 seeds pass without allowing it), so
+  the probe stays strict.
+- **The lazy-vote bug is caught by persist before send, not election
+  safety.** The plan expected election safety to catch it; in 100 seeds
+  it never did, because two leaders need a crash between a vote and its
+  flush. Persist before send catches it in every seed. Each check also
+  has a synthetic sensitivity test.
+- **Shapes changed from the draft:**
+  - The facade is `RaftNode<SM, RT>`, because openraft's `Raft` is
+    generic over the state machine.
+  - `read_barrier` returns `ReadError` (`NoQuorum` is a distinct
+    failure).
+  - `ProposeError::Fatal` became `Stopped` and `Internal`.
+  - A `Vote` names its node directly, because 0.10's standard leader id
+    has a non-optional node.
+  - The `Transport` trait gained `pre_vote`, `transfer_leader`, a
+    `from` argument, and an associated snapshot type.
+  - `Command::encode` returns an error for fields over `u32::MAX` bytes.
+- **The simulator and checker are `cfg(test)`;** the models are behind the
+  `sim` feature. The draft had all of `sim` behind the feature.
+- **The default tier runs in 8 chunks** so the test harness runs them in
+  parallel.
+- **The stack was split from nine diffs to fourteen** after
+  implementation, for review: the codec and the type config; the peer
+  messages and the facade; the network and the simulator; the checker,
+  the seed tiers, and the scenarios. For the split, the transport
+  conversions became `From`/`TryFrom` impls (methods would have been
+  dead code in the diff before the facade), and `SimNetwork` gained its
+  own tests.
+- **openraft's leader restore** (`Config::enable_leader_restore`, on by
+  default) makes a restarted former leader campaign at once in a higher
+  term. It is left on; the sweep covers it.
+- **The long tier ran on macOS,** not under `tools/linux-run`; the
+  simulator is single-threaded and deterministic, so the platform does
+  not change its results.
+
 ## Agent notes
 
 - **Entry points:**
@@ -638,5 +709,10 @@ measured during the stack:
 - In openraft 0.10, `SnapshotData` is an associated type of
   `RaftStateMachine`, not `RaftTypeConfig`. `try_create_snapshot_builder`
   replaces `get_snapshot_builder`.
-- `SimRuntime` reads its seed from `openraft_rt_sim::SEED_ENV`. Set it
-  from `PEPPY_SIM_SEED`, so that one variable controls every RNG.
+- The simulator calls `SimRuntime::with_seed(seed)` directly, so
+  `PEPPY_SIM_SEED` controls every RNG; `openraft_rt_sim::SEED_ENV` is not
+  used.
+- Reindeer needed build-script fixups for `num-traits`, `serde`,
+  `chrono-tz`, and `generic-array` (openraft's dependencies).
+- openraft's metrics field `committed` is deprecated; `Status` uses
+  `local_committed`.
