@@ -163,9 +163,10 @@ impl Report {
             return;
         }
         panic!(
-            "seed {} violates safety:\n  {}",
+            "seed {} violates safety:\n  {}\nreproduce: PEPPY_SIM_SEED={} tools/buck2 run //lib/server-raft:server-raft-unittest -- tests::sweep::one_seed --nocapture",
             self.seed,
             self.violations.join("\n  "),
+            self.seed
         );
     }
 }
