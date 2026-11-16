@@ -266,3 +266,30 @@ fn a_truncation_past_the_last_entry_removes_nothing() {
     log.flush().unwrap();
     assert_eq!(survivors(&fs), (0..=10).collect::<Vec<_>>());
 }
+
+#[test]
+fn durability_queries_follow_the_disk() {
+    let fs = SimFs::new();
+    let log = open(&fs, small());
+    log.append((1..=4).map(|i| entry(1, i)).collect()).unwrap();
+    let vote = StoredVote {
+        term: 1,
+        node: Some(2),
+        committed: false,
+    };
+    log.save_vote(vote).unwrap();
+    assert!(!log.is_durable(pos(1, 2)));
+    assert_eq!(log.durable_vote(), None);
+    log.flush().unwrap();
+    assert!(log.is_durable(pos(1, 2)));
+    assert!(!log.is_durable(pos(2, 2)), "another term at the index");
+    assert_eq!(log.durable_vote(), Some(vote));
+    log.purge(pos(1, 3)).unwrap();
+    log.flush().unwrap();
+    assert!(log.is_durable(pos(1, 1)), "at or below the purge point");
+    assert!(!log.is_failed());
+    fs.cut_power_at(Some(fs.ops()));
+    log.append(vec![entry(1, 5)]).unwrap();
+    assert!(log.flush().is_err());
+    assert!(log.is_failed());
+}

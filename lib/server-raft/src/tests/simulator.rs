@@ -91,3 +91,45 @@ fn a_log_that_loses_votes_is_caught() {
         );
     }
 }
+
+/// The simulator runs the real log by default (plan 0029); the `MemLog`
+/// reference model still runs and stays safe.
+#[test]
+fn both_logs_run_safely() {
+    use crate::sim::sim_log::LogKind;
+    for seed in 1..=4 {
+        for log in [LogKind::Disk, LogKind::Mem] {
+            let mut config = SimConfig::for_seed(seed);
+            assert_eq!(config.log, LogKind::Disk, "the real log is the default");
+            config.log = log;
+            let report = run_with(seed, config, Trace::default(), |cluster, _| {
+                let kind = match cluster.log(1) {
+                    crate::sim::sim_log::SimLog::Disk { .. } => LogKind::Disk,
+                    crate::sim::sim_log::SimLog::Mem(_) => LogKind::Mem,
+                };
+                assert_eq!(kind, log);
+            });
+            report.assert_safe();
+        }
+    }
+}
+
+/// Injected file-system failures stop only the failing node; the cluster
+/// stays safe and recovers once it restarts (plan 0029, fail-stop).
+#[test]
+fn injected_sync_failures_stop_only_the_failing_node() {
+    let mut fail_stops = 0;
+    for seed in 1..=12 {
+        let mut config = SimConfig::for_seed(seed);
+        config.sync_failures = true;
+        let report = run_with(seed, config, Trace::default(), |_, _| {});
+        report.assert_safe();
+        let first = report.contents.values().next().unwrap();
+        assert!(
+            report.contents.values().all(|c| c == first),
+            "seed {seed}: replicas converge"
+        );
+        fail_stops += report.fail_stops;
+    }
+    assert!(fail_stops > 0, "some node failed and stopped");
+}

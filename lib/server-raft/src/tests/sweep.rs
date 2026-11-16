@@ -140,9 +140,13 @@ fn long_tier() {
                     (base..base + count)
                         .filter(|seed| seed % threads == t)
                         .filter_map(|seed| {
-                            let report = run(seed);
-                            (!report.violations.is_empty())
-                                .then(|| format!("{}: {:?}", seed, report.violations))
+                            // A panic (a node that does not start, say) is
+                            // reported with its seed, like a violation.
+                            match std::panic::catch_unwind(|| run(seed)) {
+                                Ok(report) => (!report.violations.is_empty())
+                                    .then(|| format!("{}: {:?}", seed, report.violations)),
+                                Err(_) => Some(format!("{seed}: panicked")),
+                            }
                         })
                         .collect::<Vec<_>>()
                 })

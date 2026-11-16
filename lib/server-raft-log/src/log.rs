@@ -341,6 +341,27 @@ impl<F: Fs> RaftLog<F> {
         self.view().cache_first()
     }
 
+    /// Whether the entry at `pos` is durable: synced, or at or below the
+    /// durable purge point.
+    pub fn is_durable(&self, pos: LogPos) -> bool {
+        let disk = self.disk();
+        disk.term_at(pos.index) == Some(pos.term)
+            || disk
+                .state()
+                .purged
+                .is_some_and(|purged| purged.index >= pos.index)
+    }
+
+    /// The durable vote.
+    pub fn durable_vote(&self) -> Option<StoredVote> {
+        self.disk().state().vote
+    }
+
+    /// Whether a write or sync failed, so the log refuses writes.
+    pub fn is_failed(&self) -> bool {
+        self.view().failed.is_some()
+    }
+
     /// The readable view's state.
     pub fn state(&self) -> LogState {
         self.view().state

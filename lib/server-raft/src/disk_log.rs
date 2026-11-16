@@ -152,6 +152,8 @@ struct Shared<RT: AsyncRuntime, F: Fs> {
     wakeup: Condvar,
     #[cfg(any(test, feature = "sim"))]
     rng: Mutex<crate::rng::Rng>,
+    #[cfg(any(test, feature = "sim"))]
+    observer: Mutex<crate::sim::Observed>,
 }
 
 #[derive(Default)]
@@ -298,6 +300,8 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
                 Flusher::Task { seed, .. } => seed,
                 Flusher::Thread => 0,
             })),
+            #[cfg(any(test, feature = "sim"))]
+            observer: Mutex::new(None),
         });
         let thread = match flusher {
             Flusher::Thread => {
@@ -336,6 +340,55 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
         if self.shared.flusher == Flusher::Thread {
             self.shared.request(id, None);
         }
+    }
+}
+
+/// What the simulator's checks need (plan 0028's models report the same).
+#[cfg(any(test, feature = "sim"))]
+impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
+    /// Report this log's durable votes to `observer` as `node`'s.
+    // Only the simulator, which is test-only, observes the logs.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn observe(
+        &self,
+        node: crate::types::NodeId,
+        observer: Arc<dyn crate::sim::Observer>,
+    ) {
+        *lock(&self.shared.observer) = Some((node, observer));
+    }
+
+    /// What readers see now.
+    pub fn live(&self) -> crate::sim::LogImage {
+        let log = &self.shared.log;
+        let state = log.state();
+        let entries = log
+            .entries(..)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| to_or_entry(entry).ok())
+            .map(|entry| (entry.log_id.index, entry))
+            .collect();
+        crate::sim::LogImage {
+            vote: state.vote.map(to_or_vote),
+            entries,
+            purged: state.purged.map(log_id),
+            committed: state.committed.map(log_id),
+        }
+    }
+
+    /// Whether `id` is durable: synced, or below the durable purge point.
+    pub fn is_durable(&self, id: OrLogId) -> bool {
+        self.shared.log.is_durable(pos(&id))
+    }
+
+    /// The durable vote.
+    pub fn durable_vote(&self) -> Option<OrVote> {
+        self.shared.log.durable_vote().map(to_or_vote)
+    }
+
+    /// Whether a write or sync failed, so the log refuses writes.
+    pub fn is_failed(&self) -> bool {
+        self.shared.log.is_failed()
     }
 }
 
@@ -394,7 +447,12 @@ impl<RT: AsyncRuntime, F: Fs> RaftLogStorage<Types<RT>> for DiskLog<RT, F> {
         let (tx, rx) = Types::<RT>::oneshot();
         self.shared.request(id, Some(IOFlushed::signal(tx)));
         rx.await
-            .map_err(|_| io::Error::other("the Raft log flusher stopped"))?
+            .map_err(|_| io::Error::other("the Raft log flusher stopped"))??;
+        #[cfg(any(test, feature = "sim"))]
+        if let Some((node, observer)) = lock(&self.shared.observer).clone() {
+            observer.vote_saved(node, *vote, &self.live());
+        }
+        Ok(())
     }
 
     async fn save_committed(&mut self, committed: Option<OrLogId>) -> Result<(), io::Error> {

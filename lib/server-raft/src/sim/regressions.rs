@@ -5,4 +5,8 @@
 //! a fixed bug stays fixed.
 
 /// `(seed, what it found)`.
-pub const REGRESSIONS: &[(u64, &str)] = &[];
+pub const REGRESSIONS: &[(u64, &str)] = &[(
+    976_989_917_238,
+    "plan 0029: an installed snapshot became durable before the queued truncation of the \
+     entries it replaced; after a crash openraft refused to start (inverted log order)",
+)];
