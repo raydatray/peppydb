@@ -39,7 +39,6 @@ use crate::sim::Contents;
 use crate::sim::Faults;
 use crate::sim::LogConfig;
 use crate::sim::LogImage;
-use crate::sim::MemLog;
 use crate::sim::ModelSm;
 use crate::sim::NetStats;
 use crate::sim::Router;
@@ -47,6 +46,9 @@ use crate::sim::SimNetwork;
 use crate::sim::StoredSnapshot;
 use crate::sim::Trace;
 use crate::sim::checker::Checker;
+use crate::sim::sim_log::Durable;
+use crate::sim::sim_log::LogKind;
+use crate::sim::sim_log::SimLog;
 use crate::types::NodeId;
 use crate::types::PeerInfo;
 
@@ -73,8 +75,13 @@ pub struct SimConfig {
     pub max_flush_delay: Duration,
     pub raft: RaftConfig,
     /// Inject the `MemLog` bug that loses unflushed votes, to show that
-    /// the checker catches it.
+    /// the checker catches it. Runs over `MemLog` whatever `log` says.
     pub lazy_votes: bool,
+    /// The log the nodes run over: the real log by default.
+    pub log: LogKind,
+    /// Whether the scheduler makes a node's file system fail an
+    /// operation, which must stop that node alone (fail-stop).
+    pub sync_failures: bool,
 }
 
 impl SimConfig {
@@ -103,6 +110,8 @@ impl SimConfig {
                 ..RaftConfig::default()
             },
             lazy_votes: false,
+            log: LogKind::Disk,
+            sync_failures: false,
         }
     }
 }
@@ -148,6 +157,8 @@ pub struct Report {
     pub contents: BTreeMap<NodeId, Contents>,
     pub net: NetStats,
     pub crashes: u64,
+    /// Nodes stopped by an injected file-system failure.
+    pub fail_stops: u64,
     pub partitions: u64,
     pub transfers: u64,
     pub snapshots: u64,
@@ -178,9 +189,11 @@ pub fn now() -> u64 {
 
 /// A node's storage, which outlives crashes, and its running instance.
 struct Slot {
-    log: MemLog<Rt>,
+    log: SimLog,
     sm: Sm,
     node: Option<Node>,
+    /// What survived the last crash, while the node is down.
+    durable: Option<Durable>,
 }
 
 /// The cluster: every node's slot, and the shared network.
@@ -233,7 +246,7 @@ impl Cluster {
             .collect()
     }
 
-    pub fn log(&self, id: NodeId) -> MemLog<Rt> {
+    pub fn log(&self, id: NodeId) -> SimLog {
         self.lock()[&id].log.clone()
     }
 
@@ -246,9 +259,9 @@ impl Cluster {
         self.lock()
             .iter()
             .map(|(id, slot)| {
-                let image = match slot.node {
-                    Some(_) => slot.log.live(),
-                    None => slot.log.durable(),
+                let image = match &slot.durable {
+                    None => slot.log.live(),
+                    Some(durable) => SimLog::image(durable),
                 };
                 (*id, image)
             })
@@ -261,7 +274,12 @@ impl Cluster {
     }
 
     /// Start `id` over storage restored from `image` and `durable`.
-    async fn start(&self, id: NodeId, image: LogImage, durable: Option<StoredSnapshot>) -> Node {
+    async fn start(
+        &self,
+        id: NodeId,
+        log: Option<Durable>,
+        durable: Option<StoredSnapshot>,
+    ) -> Node {
         let seed = self
             .rng
             .lock()
@@ -272,7 +290,11 @@ impl Cluster {
             seed,
             lazy_votes: self.config.lazy_votes,
         };
-        let log = MemLog::from_image(image, log_config);
+        let kind = match self.config.lazy_votes {
+            true => LogKind::Mem,
+            false => self.config.log,
+        };
+        let log = SimLog::start(kind, log.as_ref(), log_config);
         let hook = log.clone();
         let sm = Sm::from_durable(durable, Arc::new(move || hook.sync()));
         log.observe(id, Arc::clone(&self.checker) as _);
@@ -294,6 +316,7 @@ impl Cluster {
                 log,
                 sm,
                 node: Some(node.clone()),
+                durable: None,
             },
         );
         node
@@ -302,11 +325,12 @@ impl Cluster {
     /// Crash `id`: storage loses everything that is not durable, and the
     /// node stops.
     pub async fn crash(&self, id: NodeId) {
+        let seed = self.fork_rng().next_u64();
         let node = {
             let mut slots = self.lock();
             let slot = slots.get_mut(&id).expect("a known node");
             let Some(node) = slot.node.take() else { return };
-            slot.log.crash();
+            slot.durable = Some(slot.log.crash(seed));
             slot.sm.crash();
             node
         };
@@ -317,15 +341,15 @@ impl Cluster {
 
     /// Restart a crashed node from its durable storage.
     pub async fn restart(&self, id: NodeId) {
-        let (image, durable) = {
+        let (log, durable) = {
             let slots = self.lock();
             let slot = &slots[&id];
             if slot.node.is_some() {
                 return;
             }
-            (slot.log.durable(), slot.sm.durable())
+            (slot.durable.clone(), slot.sm.durable())
         };
-        self.start(id, image, durable).await;
+        self.start(id, log, durable).await;
         self.trace.record(format_args!("{} restart {id}", now()));
     }
 
@@ -379,7 +403,7 @@ impl Cluster {
     /// Start every node and form the cluster.
     pub async fn boot(&self) {
         for id in self.ids() {
-            self.start(id, LogImage::default(), None).await;
+            self.start(id, None, None).await;
         }
         let voters: BTreeMap<_, _> = self
             .ids()
@@ -399,6 +423,22 @@ impl Cluster {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .fork()
+    }
+
+    /// Take down every up node whose log failed: it stopped itself
+    /// (fail-stop), and an operator restarts it. Returns how many.
+    pub async fn reap_failed(&self) -> u64 {
+        let failed: Vec<_> = self
+            .lock()
+            .iter()
+            .filter(|(_, slot)| slot.node.is_some() && slot.log.is_failed())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &failed {
+            self.trace.record(format_args!("{} fail-stop {id}", now()));
+            self.crash(*id).await;
+        }
+        failed.len() as u64
     }
 
     /// Heal, wait for quiescence, run the final checks, and return each
@@ -460,6 +500,7 @@ pub fn run_with(
             contents,
             net: cluster.net.stats(),
             crashes: stats.crashes,
+            fail_stops: stats.fail_stops,
             partitions: stats.partitions,
             transfers: stats.transfers,
             snapshots: stats.snapshots,
@@ -480,6 +521,7 @@ pub fn run(seed: u64) -> Report {
 #[derive(Default)]
 struct ChaosStats {
     crashes: u64,
+    fail_stops: u64,
     partitions: u64,
     transfers: u64,
     snapshots: u64,
@@ -502,6 +544,7 @@ async fn scheduler(cluster: &Cluster, mut rng: Rng, deadline: u64) -> ChaosStats
         let (lo, hi) = config.fault_interval;
         let pause = rng.range(lo.as_micros() as u64, hi.as_micros() as u64);
         Rt::sleep(Duration::from_micros(pause)).await;
+        stats.fail_stops += cluster.reap_failed().await;
         cluster.check_logs();
         let roll = rng.below(100);
         let up = cluster.up();
@@ -572,6 +615,14 @@ async fn scheduler(cluster: &Cluster, mut rng: Rng, deadline: u64) -> ChaosStats
                 cluster.net.heal();
                 cluster.trace.record(format_args!("{} heal", now()));
             }
+            75..80 if config.sync_failures => {
+                if let Some(id) = pick(&mut rng, &up) {
+                    cluster.log(id).fail_next_operation();
+                    cluster
+                        .trace
+                        .record(format_args!("{} fail an operation on {id}", now()));
+                }
+            }
             75..88 => {
                 if let Some((node, _)) = pick(&mut rng, &up).and_then(|id| cluster.node(id)) {
                     let _ = node.snapshot().await;
@@ -600,6 +651,7 @@ async fn scheduler(cluster: &Cluster, mut rng: Rng, deadline: u64) -> ChaosStats
 
 /// Heal everything and wait for a final write to commit on every node.
 async fn quiesce(cluster: &Cluster) {
+    cluster.reap_failed().await;
     cluster.net.heal();
     cluster.net.set_faults(Faults::NONE);
     for id in cluster.down() {

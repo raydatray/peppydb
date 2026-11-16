@@ -19,7 +19,8 @@
 //! - **Redelivered entries are skipped,** as `Db::apply` acknowledges an
 //!   entry at or below its applied sequence without effect.
 //! - **An installed snapshot is durable at once,** as `install_snapshot`
-//!   renames the new store file into place.
+//!   renames the new store file into place, after the log's sync hook
+//!   (plan 0029: a truncation queued before it must not outlive it).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -268,6 +269,13 @@ impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for ModelSm<RT> {
                 "a snapshot's metadata does not match its system keys",
             ));
         }
+        // The checkpoint hook, as for a built snapshot: openraft queues
+        // the truncation of log entries that conflict with the snapshot
+        // before it installs it. Were the image durable first, a crash
+        // could keep both, and openraft refuses to start over a log whose
+        // last entry is below the applied log id in term but not in index
+        // (plan 0029, discoveries).
+        (inner.sync)();
         inner.live = live;
         inner.durable = Some(StoredSnapshot {
             meta: meta.clone(),

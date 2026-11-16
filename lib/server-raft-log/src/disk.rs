@@ -244,6 +244,17 @@ impl<F: Fs> Disk<F> {
         })
     }
 
+    /// What the `state` file durably holds.
+    pub(crate) fn state(&self) -> State {
+        self.state
+    }
+
+    /// The term of the synced entry at `index`.
+    pub(crate) fn term_at(&self, index: u64) -> Option<u64> {
+        let at = usize::try_from(index.checked_sub(self.first)?).ok()?;
+        Some(self.locs.get(at)?.term)
+    }
+
     /// The synced entry at `index`, or `None` if there is none.
     pub(crate) fn read(&self, index: u64) -> Result<Option<LogEntry>, LogError> {
         let Some(loc) = index

@@ -26,12 +26,11 @@ use openraft::vote::RaftLeaderId;
 use crate::command::Op;
 use crate::sim::Contents;
 use crate::sim::LogImage;
-use crate::sim::MemLog;
 use crate::sim::Observer;
 use crate::sim::Probe;
+use crate::sim::sim_log::SimLog;
 use crate::sim::simulator::ClientOp;
 use crate::sim::simulator::Outcome;
-use crate::sim::simulator::Rt;
 use crate::sim::simulator::Sm;
 use crate::transport::AppendReply;
 use crate::transport::Vote;
@@ -51,7 +50,7 @@ struct State {
     /// Every applied entry, by index.
     applied: BTreeMap<u64, OrEntry>,
     /// Each node's current log and state machine, for durable-state probes.
-    logs: BTreeMap<NodeId, MemLog<Rt>>,
+    logs: BTreeMap<NodeId, SimLog>,
     sms: BTreeMap<NodeId, Sm>,
     violations: Vec<String>,
 }
@@ -88,15 +87,15 @@ impl Checker {
     }
 
     /// Record that `node` now runs over `log` and `sm`.
-    pub fn register(&self, node: NodeId, log: MemLog<Rt>, sm: Sm) {
+    pub fn register(&self, node: NodeId, log: SimLog, sm: Sm) {
         let mut state = self.lock();
         state.logs.insert(node, log);
         state.sms.insert(node, sm);
     }
 
-    fn durable(&self, node: NodeId) -> Option<LogImage> {
+    fn durable_vote(&self, node: NodeId) -> Option<OrVote> {
         let log = self.lock().logs.get(&node).cloned()?;
-        Some(log.durable())
+        log.durable_vote()
     }
 
     fn report(&self, message: String) {
@@ -295,7 +294,7 @@ impl Observer for Checker {
 
 impl Probe for Checker {
     fn request(&self, from: NodeId, kind: &str, vote: &Vote) {
-        let durable = self.durable(from).and_then(|image| image.vote);
+        let durable = self.durable_vote(from);
         if !covers(durable, (*vote).into()) {
             self.report(format!(
                 "persist before send: node {from} sent {kind} with vote {vote:?} but its durable vote is {durable:?}"
@@ -307,7 +306,7 @@ impl Probe for Checker {
         if !reply.granted {
             return;
         }
-        let durable = self.durable(to).and_then(|image| image.vote);
+        let durable = self.durable_vote(to);
         if !covers(durable, req.vote.into()) {
             self.report(format!(
                 "persist before send: node {to} granted {:?} but its durable vote is {durable:?}",
