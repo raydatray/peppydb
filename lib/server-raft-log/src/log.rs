@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::disk::Disk;
@@ -158,6 +159,8 @@ pub struct RaftLog<F: Fs> {
     view: Mutex<View>,
     disk: Mutex<Disk<F>>,
     options: LogOptions,
+    /// Flushes that wrote something, for measurements.
+    flushes: AtomicU64,
 }
 
 impl<F: Fs> RaftLog<F> {
@@ -184,6 +187,7 @@ impl<F: Fs> RaftLog<F> {
             view: Mutex::new(view),
             disk: Mutex::new(disk),
             options,
+            flushes: AtomicU64::new(0),
         };
         Ok((log, recovered))
     }
@@ -258,6 +262,9 @@ impl<F: Fs> RaftLog<F> {
             view.check()?;
             std::mem::take(&mut view.queue)
         };
+        if !queue.is_empty() {
+            self.flushes.fetch_add(1, Ordering::Relaxed);
+        }
         let mut durable = None;
         let result = Self::write(&mut disk, queue, &mut durable);
         drop(disk);
@@ -323,6 +330,12 @@ impl<F: Fs> RaftLog<F> {
             *durable = Some(grouped);
         }
         Ok(())
+    }
+
+    /// Flushes that had writes to make durable: a measure of group
+    /// commit, as appends per flush.
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::Relaxed)
     }
 
     /// The last write that is durable; 0 before any.

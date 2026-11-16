@@ -336,6 +336,11 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
         }
     }
 
+    /// Flushes that had writes to make durable, for measurements.
+    pub fn flushes(&self) -> u64 {
+        self.shared.log.flushes()
+    }
+
     fn after_write(&self, id: WriteId) {
         if self.shared.flusher == Flusher::Thread {
             self.shared.request(id, None);
