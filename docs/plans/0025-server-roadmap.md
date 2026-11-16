@@ -122,7 +122,7 @@ commits or reserved plan numbers.
 | S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppy-load`, an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
 | S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppy-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). |
 | S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
-| S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. |
+| S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote (openraft substitutes a lease check; see plan 0028), replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix compaction, torn-tail repair; a crash model like the engine's. |
 | S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. |
 | S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. |
@@ -229,8 +229,10 @@ in its plan.
    corrects.** See [Leader discovery and preference](#leader-discovery-and-preference).
 12. **Process-level network faults use `iptables`** inside
    `tools/linux-run`.
-13. **The Raft log is a new crate with its own format.** It lives in a
-   `raft` component and implements openraft's `RaftLogStorage`. It borrows
+13. **The Raft log is a new crate with its own format.** It is
+   `server-raft-log`, an internal crate of the server component
+   ([plan 0028](0028-server-raft-core.md#component-layout)), and
+   `server-raft` adapts it to openraft's `RaftLogStorage`. It borrows
    `engine-wal`'s proven mechanics but not its format. See
    [The Raft log](#the-raft-log). The S5 plan fixes the record layout.
 14. **Blocking work stays off the async threads.** One multi-threaded
@@ -295,7 +297,8 @@ Inspected on 2026-11-09:
   `raft-proto` generates code with `protoc` at build time, `prost-codec`
   uses prost 0.11, it requires `slog`, and its election timeout draws from
   the thread-local RNG, so seeded simulation needs a workaround.
-- *openraft*: active (0.10 alphas; 0.9 receives fixes only); pure Rust
+- *openraft*: active (0.10.0 released on 2026-11-10 after a long alpha
+  series; 0.9 receives fixes only); pure Rust
   dependencies; a deterministic runtime (`rt-sim`), a Turmoil fuzzer in
   every CI build, and a Jepsen suite. It supports a state machine that is
   durable only at snapshots, which matches External mode. Its API still
@@ -500,8 +503,10 @@ next to the engine's numbers.
   leader discovery and preference (decision 11), `iptables` for network
   faults (decision 12), and system keys for the Raft applied state.
 
-The next step is the S4 plan: the Raft core on openraft (plan 0028, after
-the [workspace layout](0027-workspace-language-agnostic-layout.md)).
+- [x] Draft and agree on [the Raft core](0028-server-raft-core.md) (S4).
+- [ ] Implement and verify the Raft core stack, completing S4.
+
+The next step is implementing plan 0028; the S5 plan (Raft log) follows.
 
 ## Sources
 

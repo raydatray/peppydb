@@ -57,7 +57,8 @@ API with its generated code, whatever the language.
 | KV API | `proto/kv/v1` (`kv.proto`, `rust/` crate `kv-proto`, `go/` package `kvv1`) | the `peppydb.kv.v1` gRPC API and its generated code |
 | Load generator | `bin/peppydb-load`, `lib/load` (Go) | drives a running server and reports throughput and latency |
 
-Later: `lib/raft*` (Rust), `proto/raft/v1`, `bin/peppydb-gateway` and
+Later: `lib/server-raft*` (Rust, part of the server component; plan 0028),
+`proto/raft/v1`, `bin/peppydb-gateway` and
 `bin/peppydb-placement` (Go).
 
 Each component exposes one entry crate. Buck2 visibility rules stop other
