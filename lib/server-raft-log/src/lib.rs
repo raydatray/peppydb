@@ -5,12 +5,10 @@
 //! knows nothing about openraft: entries are an index, a term, a kind, and
 //! payload bytes. `server-raft` adapts it to openraft.
 
-// Used only by tests until the write queue (plan 0029, diff 5) exists.
-#[cfg_attr(not(test), allow(dead_code))]
 mod disk;
-#[cfg_attr(not(test), allow(dead_code))]
 mod format;
 pub mod fs;
+mod log;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim_fs;
 
@@ -19,6 +17,7 @@ mod tests;
 
 pub use format::MAX_PAYLOAD_BYTES;
 pub use fs::{Fs, FsFile, RealFile, RealFs};
+pub use log::{LogState, RaftLog, WriteId};
 #[cfg(any(test, feature = "sim"))]
 pub use sim_fs::{SimFile, SimFs, SimImage};
 
@@ -127,7 +126,6 @@ pub enum LogError {
     EntryTooLarge { bytes: usize },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn io(op: &'static str) -> impl FnOnce(io::Error) -> LogError {
     move |source| LogError::Io { op, source }
 }
