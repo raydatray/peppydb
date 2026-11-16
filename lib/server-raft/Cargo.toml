@@ -14,5 +14,8 @@ thiserror.workspace = true
 [dev-dependencies]
 openraft-rt-sim.workspace = true
 
+[features]
+sim = []
+
 [lints]
 workspace = true

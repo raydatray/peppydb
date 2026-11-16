@@ -13,4 +13,16 @@ peppy_rust_library(
         "//third-party/rust:openraft-rt-sim",
     ],
     visibility = ["//lib/server:"],
+    # The simulator's models (`server_raft::sim`), for the tests of other
+    # server crates (plan 0028). Production targets never enable it.
+    feature_variants = {
+        "sim": {
+            "deps": [
+                "//third-party/rust:openraft",
+                "//third-party/rust:openraft-rt-tokio",
+                "//third-party/rust:thiserror",
+            ],
+            "visibility": ["//lib/server:server-unittest"],
+        },
+    },
 )
