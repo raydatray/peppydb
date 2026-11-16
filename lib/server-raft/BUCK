@@ -5,13 +5,17 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "server-raft",
     deps = [
+        "//lib/server-raft-log:server-raft-log",
         "//third-party/rust:futures-util",
         "//third-party/rust:openraft",
         "//third-party/rust:openraft-rt-tokio",
         "//third-party/rust:thiserror",
     ],
     test_deps = [
+        # SimFs, for the simulator and the adapter's tests.
+        "//lib/server-raft-log:server-raft-log-sim",
         "//third-party/rust:openraft-rt-sim",
+        "//third-party/rust:tempfile",
     ],
     visibility = ["//lib/server:"],
     # The simulator's models (`server_raft::sim`), for the tests of other
@@ -19,6 +23,7 @@ peppy_rust_library(
     feature_variants = {
         "sim": {
             "deps": [
+                "//lib/server-raft-log:server-raft-log",
                 "//third-party/rust:futures-util",
                 "//third-party/rust:openraft",
                 "//third-party/rust:openraft-rt-tokio",

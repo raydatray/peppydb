@@ -1,5 +1,6 @@
 //! Tests of the facade on the simulator's runtime.
 
+mod disk_log;
 mod facade;
 mod scenarios;
 mod simulator;

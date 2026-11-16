@@ -11,11 +11,15 @@
 //! - [`Command`] is the replicated payload, with a stable binary codec.
 //! - [`RaftNode`] is the facade: propose, read barrier, status, leader
 //!   transfer, and the handlers for incoming peer messages.
+//! - [`DiskLog`] is openraft's log storage over the on-disk Raft log
+//!   (`server-raft-log`, plan 0029).
 //! - [`Transport`] is what the node needs from the network, over the
 //!   peer messages in [`transport`]. `server` implements it (S7); tests
 //!   use the simulator's network.
 
 mod command;
+mod disk_log;
+mod encoding;
 mod error;
 mod network;
 mod node;
@@ -31,6 +35,8 @@ mod types;
 pub use command::CodecError;
 pub use command::Command;
 pub use command::Op;
+pub use disk_log::DiskLog;
+pub use disk_log::Flusher;
 pub use error::LeaderHint;
 pub use error::ProposeError;
 pub use error::ReadError;
@@ -43,6 +49,7 @@ pub use node::RaftNode;
 pub use node::ReadPoint;
 pub use node::Role;
 pub use node::Status;
+pub use server_raft_log::LogOptions;
 pub use transport::Transport;
 pub use types::LeaderId;
 pub use types::Membership;
