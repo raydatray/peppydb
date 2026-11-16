@@ -1319,6 +1319,7 @@ dependencies = [
 name = "server-raft-log"
 version = "0.1.0"
 dependencies = [
+ "crc32c",
  "tempfile",
  "thiserror",
  "wal-segments",
