@@ -1,0 +1,2 @@
+# Run the build script, as Cargo does.
+buildscript.run = true
