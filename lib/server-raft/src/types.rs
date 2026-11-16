@@ -122,6 +122,16 @@ pub(crate) type OrPayload = openraft::impls::EntryPayload<Command, Membership>;
 /// openraft's log entry under [`Types`].
 pub(crate) type OrEntry = openraft::impls::Entry<CommittedLeaderId, OrPayload>;
 
+#[cfg(any(test, feature = "sim"))]
+/// openraft's stored membership under [`Types`].
+pub(crate) type OrStoredMembership = openraft::StoredMembership<CommittedLeaderId, Membership>;
+#[cfg(any(test, feature = "sim"))]
+/// openraft's snapshot metadata under [`Types`].
+pub(crate) type OrSnapshotMeta = openraft::storage::SnapshotMeta<CommittedLeaderId, Membership>;
+#[cfg(any(test, feature = "sim"))]
+/// openraft's snapshot, with the bytes the models use as snapshot data.
+pub(crate) type OrSnapshot = openraft::storage::Snapshot<CommittedLeaderId, Membership, Vec<u8>>;
+
 /// A log id from a term and an index.
 #[cfg(test)]
 pub(crate) fn log_id(term: u64, index: u64) -> OrLogId {
