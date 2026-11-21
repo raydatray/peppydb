@@ -12,10 +12,12 @@ engine-wal = { path = "../engine-wal" }
 thiserror.workspace = true
 
 [dev-dependencies]
+bf-tree = { path = "../bf-tree", features = ["sim"] }
 tempfile.workspace = true
 
 [features]
 fault-injection = ["engine-wal/fault-injection"]
+sim = ["bf-tree/sim"]
 
 [lints]
 workspace = true

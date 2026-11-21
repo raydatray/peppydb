@@ -46,6 +46,8 @@ use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use bf_tree::{Entry, FileStore, Superblock, Tree};
+#[cfg(any(test, feature = "sim"))]
+pub use bf_tree::{SimImage, SimStore};
 use engine_wal::{Wal, WalOptions};
 
 pub use bf_tree::{Io, LogError, Op, Scan, TreeConfig, TreeError};
@@ -469,6 +471,18 @@ impl Db {
             return Err(Error::Options("a standalone WAL exists"));
         }
         let tree = open_or_create_tree(&path, &options)?;
+        Self::with_tree(path, options, tree, Some(lock))
+    }
+
+    /// The database over an open `tree`: replay and continue the WAL in
+    /// standalone mode, and start the policy thread.
+    fn with_tree(
+        path: PathBuf,
+        options: Options,
+        tree: Tree,
+        lock: Option<File>,
+    ) -> Result<Db, Error> {
+        let wal_dir = path.join("wal");
         let applied = tree.applied_seq();
         let wal = match options.mode {
             Mode::External => None,
@@ -521,8 +535,53 @@ impl Db {
             options,
             shared,
             policy_thread,
-            lock: Some(lock),
+            lock,
         })
+    }
+
+    /// An external-mode database over a simulated page store, for the Raft
+    /// simulator (plan 0030). A tree is created on a fresh store and opened
+    /// on a store from a crash image. There is no directory and no lock
+    /// file; the caller crashes the store with [`SimStore::crash`].
+    #[cfg(any(test, feature = "sim"))]
+    pub fn open_external_on(store: SimStore, options: Options) -> Result<Db, Error> {
+        let options = Options {
+            mode: Mode::External,
+            ..options
+        };
+        options.validate()?;
+        let tree = match store.is_fresh() {
+            true => Tree::create(options.tree, Box::new(store))?,
+            false => Tree::open_with(options.tree, Box::new(store))?,
+        };
+        Self::with_tree(PathBuf::new(), options, tree, None)
+    }
+
+    /// An empty simulated page store for a database with `options`.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn new_sim_store(options: &Options) -> Result<SimStore, Error> {
+        Ok(SimStore::new(Superblock::from(&options.tree)).map_err(TreeError::from)?)
+    }
+
+    /// [`Db::install_snapshot`] for a database over a simulated page store:
+    /// the snapshot becomes a new store, durable at once, as the file
+    /// install's rename is. Returns the database and its new store.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn install_snapshot_on(
+        self,
+        snapshot: &mut dyn std::io::Read,
+    ) -> Result<(Db, SimStore), Error> {
+        self.external()?;
+        let options = self.options;
+        drop(self);
+        let mut bytes = Vec::new();
+        snapshot
+            .read_to_end(&mut bytes)
+            .map_err(io("read the snapshot"))?;
+        let image = bf_tree::SimImage::from_file(&bytes).map_err(TreeError::from)?;
+        let store = SimStore::from_image(&image);
+        let db = Self::open_external_on(store.clone(), options)?;
+        Ok((db, store))
     }
 
     /// External mode: apply one entry of the owner's log. Sequences must
