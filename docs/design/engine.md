@@ -1412,6 +1412,24 @@ their own stack after plan 0023; the recommended design is MVCC.
   latency ([Measurements](#measurements)). Reference runs on a real device
   are pending.
 
+### The `sim` feature
+
+For the Raft simulator (plan 0030), `engine`'s `sim` feature (and its own
+tests) adds an external-mode database over `bf_tree::SimStore`, a page
+store with a power-loss model (in `bf-tree-store`; plan 0018's
+`FaultStore` moved there):
+
+- `Db::new_sim_store(&options)`: an empty simulated store.
+- `Db::open_external_on(store, options)`: creates a tree on a fresh store
+  and opens one from a crash image; no directory and no lock file.
+- `Db::install_snapshot_on(snapshot)`: the snapshot becomes a new store,
+  durable at once as the file install's rename is; returns it.
+
+`tests/sim.rs` crashes the store at every call of 1,500 applied entries
+with checkpoints: each reopen is a committed prefix no further than the
+hook made durable, and redelivery completes it. Production targets never
+enable the feature.
+
 ### Db extension points
 
 - **Plan 0022** added `Mode::External`, `Error::WrongMode`,
