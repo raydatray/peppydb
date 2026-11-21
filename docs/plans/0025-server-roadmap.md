@@ -119,8 +119,8 @@ commits or reserved plan numbers.
 
 | Milestone | Builds on | Reviewable outcome |
 | --- | --- | --- |
-| S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppy-load`, an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
-| S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppy-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). |
+| S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppydb-load` (renamed from `peppy-load` in plan 0027), an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
+| S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppydb-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). |
 | S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
 | S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. [Plan 0028](0028-server-raft-core.md). |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix purge, torn-tail repair; a power-loss crash model, stricter than the engine's; the simulator runs over it. [Plan 0029](0029-server-raft-log.md). |
