@@ -162,3 +162,210 @@ fn the_applier_thread_applies_in_order_and_answers_each_entry() {
         assert_eq!(sm.get(b"\x01k"), Some(200u64.to_le_bytes().to_vec()));
     });
 }
+
+mod snapshots {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use openraft::RaftSnapshotBuilder;
+    use openraft::StorageError;
+    use openraft::testing::log::StoreBuilder;
+    use openraft::testing::log::Suite;
+    use server_raft_log::LogOptions;
+    use server_raft_log::RealFs;
+    use server_raft_log::SimFs;
+
+    use super::*;
+    use crate::disk_log::DiskLog;
+    use crate::disk_log::Flusher;
+    use crate::types::Types;
+
+    fn log_dir() -> &'static Path {
+        Path::new("/raft-log")
+    }
+
+    fn hook<RT: AsyncRuntime, F: server_raft_log::Fs>(log: &DiskLog<RT, F>) -> SyncHook {
+        let log = log.clone();
+        Arc::new(move || log.sync())
+    }
+
+    struct SimBuilder;
+
+    impl StoreBuilder<Types<SimRuntime>, DiskLog<SimRuntime, SimFs>, DbStateMachine<SimRuntime>>
+        for SimBuilder
+    {
+        async fn build(
+            &self,
+        ) -> Result<
+            ((), DiskLog<SimRuntime, SimFs>, DbStateMachine<SimRuntime>),
+            StorageError<Types<SimRuntime>>,
+        > {
+            let flusher = Flusher::Task {
+                max_delay: Duration::from_millis(2),
+                seed: 3,
+            };
+            let log =
+                DiskLog::open(SimFs::new(), log_dir(), LogOptions::default(), flusher).unwrap();
+            let store = Db::new_sim_store(&options()).unwrap();
+            let sm =
+                DbStateMachine::open_sim(store, options(), hook(&log), Applier::Inline).unwrap();
+            Ok(((), log, sm))
+        }
+    }
+
+    struct RealBuilder;
+
+    impl
+        StoreBuilder<
+            Types<TokioRuntime>,
+            DiskLog<TokioRuntime>,
+            DbStateMachine<TokioRuntime>,
+            tempfile::TempDir,
+        > for RealBuilder
+    {
+        async fn build(
+            &self,
+        ) -> Result<
+            (
+                tempfile::TempDir,
+                DiskLog<TokioRuntime>,
+                DbStateMachine<TokioRuntime>,
+            ),
+            StorageError<Types<TokioRuntime>>,
+        > {
+            let tmp = tempfile::tempdir().unwrap();
+            let log = DiskLog::open(
+                RealFs,
+                &tmp.path().join("log"),
+                LogOptions::default(),
+                Flusher::Thread,
+            )
+            .unwrap();
+            let db = Db::open(tmp.path().join("db"), options()).unwrap();
+            let sm = DbStateMachine::open(db, hook(&log), Applier::Thread).unwrap();
+            Ok((tmp, log, sm))
+        }
+    }
+
+    #[test]
+    fn the_real_storage_passes_openraft_s_suite_on_simulated_files() {
+        SimRuntime::with_seed(5).block_on(async {
+            Suite::test_all(SimBuilder).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn the_real_storage_passes_openraft_s_suite_on_real_files() {
+        TokioRuntime::run(async {
+            Suite::test_all(RealBuilder).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn a_built_snapshot_is_current_and_installs_on_another_node() {
+        SimRuntime::with_seed(6).block_on(async {
+            let synced = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counter = Arc::clone(&synced);
+            let sync: SyncHook = Arc::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            });
+            let leader_store = Db::new_sim_store(&options()).unwrap();
+            let mut leader = DbStateMachine::<SimRuntime>::open_sim(
+                leader_store,
+                options(),
+                sync,
+                Applier::Inline,
+            )
+            .unwrap();
+            assert!(leader.get_current_snapshot().await.unwrap().is_none());
+            let membership = OrEntry::new(log_id(1, 1), OrPayload::Membership(members(&[1, 2])));
+            apply(&mut leader, vec![membership, put(1, 2, b"\x01k", b"v")]).await;
+
+            let snapshot = leader.build_snapshot().await.unwrap();
+            assert_eq!(
+                synced.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "the hook ran"
+            );
+            assert_eq!(snapshot.meta.last_log_id, Some(log_id(1, 2)));
+            assert_eq!(
+                snapshot.meta.last_membership.membership(),
+                &members(&[1, 2])
+            );
+            let current = leader.get_current_snapshot().await.unwrap().unwrap();
+            assert_eq!(current.meta, snapshot.meta);
+
+            let follower_store = Db::new_sim_store(&options()).unwrap();
+            let mut follower = DbStateMachine::<SimRuntime>::open_sim(
+                follower_store,
+                options(),
+                no_sync(),
+                Applier::Inline,
+            )
+            .unwrap();
+            follower
+                .install_snapshot(&snapshot.meta, snapshot.snapshot.clone())
+                .await
+                .unwrap();
+            assert_eq!(follower.get(b"\x01k"), Some(b"v".to_vec()));
+            assert_eq!(
+                follower.applied_state().await.unwrap().0,
+                Some(log_id(1, 2))
+            );
+            assert_eq!(
+                follower.get_current_snapshot().await.unwrap().unwrap().meta,
+                snapshot.meta
+            );
+
+            // The installed snapshot is durable: it survives a crash.
+            let image = follower.sim_store().unwrap().crash(9);
+            drop(follower);
+            let reopened = DbStateMachine::<SimRuntime>::open_sim(
+                engine::SimStore::from_image(&image),
+                options(),
+                no_sync(),
+                Applier::Inline,
+            )
+            .unwrap();
+            assert_eq!(reopened.get(b"\x01k"), Some(b"v".to_vec()));
+
+            // Metadata that does not match the image is refused.
+            let mut wrong = snapshot.meta.clone();
+            wrong.last_log_id = Some(log_id(1, 7));
+            let other_store = Db::new_sim_store(&options()).unwrap();
+            let mut other = DbStateMachine::<SimRuntime>::open_sim(
+                other_store,
+                options(),
+                no_sync(),
+                Applier::Inline,
+            )
+            .unwrap();
+            assert!(
+                other
+                    .install_snapshot(&wrong, snapshot.snapshot)
+                    .await
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn a_failing_sync_hook_aborts_the_snapshot() {
+        SimRuntime::with_seed(7).block_on(async {
+            let sync: SyncHook = Arc::new(|| Err(std::io::Error::other("the log failed")));
+            let store = Db::new_sim_store(&options()).unwrap();
+            let mut sm =
+                DbStateMachine::<SimRuntime>::open_sim(store, options(), sync, Applier::Inline)
+                    .unwrap();
+            apply(&mut sm, vec![put(1, 1, b"\x01k", b"v")]).await;
+            assert!(sm.build_snapshot().await.is_err());
+            assert!(
+                sm.get_current_snapshot().await.unwrap().is_none(),
+                "nothing committed"
+            );
+            let snapshot = sm.build_snapshot().await;
+            assert!(snapshot.is_err());
+        });
+    }
+}
