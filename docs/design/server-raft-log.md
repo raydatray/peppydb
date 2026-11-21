@@ -171,8 +171,10 @@ would report that as corruption, as the engine WAL does.
   async worker blocks on a sync.
 - **`Flusher::Thread`** (production) is a thread named `raft-log-flusher`:
   it waits for work, flushes, and fires callbacks; groups form while a
-  sync runs. It wakes on every write. The last `DiskLog` handle stops it
-  after a final flush.
+  sync runs. It wakes for appends and votes only: commit points,
+  truncations, and purges are queued and become durable with the next
+  flush, in order (plan 0030). The last `DiskLog` handle stops it after a
+  final flush.
 - **`Flusher::Task`** (simulator) flushes on the runtime after a seeded
   delay, as `MemLog` did, on appends and votes.
 - **Reads** come from the cache; a miss reads the segments on the
@@ -207,18 +209,24 @@ entries, one appender, one flusher thread:
 | 16 | 1,383 | 6.7 ms | 19.9 ms | 16.0 |
 | 256 | 23,494 | 7.8 ms | 21.1 ms | 189.4 |
 
-Three nodes in one process on Tokio over real files
+Three nodes in one process on one Tokio runtime over real files
 (`server-raft`'s `tests::bench::bench_three_nodes_on_disk`, release),
-100-byte writes to the leader:
+100-byte writes to the leader. Plan 0029's first run, when the flusher
+also woke for every commit point, then plan 0030's rerun (2026-11-21)
+after it stopped:
 
 | Writers | Writes/s | p50 | p99 | Writes per sync per node | Elections |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 58 | 16.1 ms | 24.0 ms | 0.7 | 0 |
-| 16 | 723 | 20.1 ms | 32.0 ms | 8.5 | 0 |
-| 256 | 10,410 | 20.9 ms | 48.0 ms | 127.8 | 0 |
+| 1 (plan 0029) | 58 | 16.1 ms | 24.0 ms | 0.7 | 0 |
+| 1 (plan 0030) | 90 | 12.0 ms | 12.7 ms | 1.0 | 0 |
+| 16 (plan 0029) | 723 | 20.1 ms | 32.0 ms | 8.5 | 0 |
+| 16 (plan 0030) | 801 | 20.0 ms | 26.3 ms | 9.5 | 0 |
+| 256 (plan 0029) | 10,410 | 20.9 ms | 48.0 ms | 127.8 | 0 |
+| 256 (plan 0030) | 12,076 | 20.0 ms | 56.0 ms | 150.1 | 0 |
 
-The thread driver also flushes for committed-log-id writes, so with one
-writer there are more syncs than writes. Linux numbers on
+Throughput grows with the writer count and latency stays near flat: the
+benchmark is latency-bound, not throughput-bound, with three nodes
+sharing one disk whose full flush takes about 5 ms. Linux numbers on
 `c4d-standard-8-lssd` (one fsync about 64 to 74 µs, plan 0024) wait for
 roadmap S2's remote runs.
 

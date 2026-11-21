@@ -340,12 +340,6 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
     pub fn flushes(&self) -> u64 {
         self.shared.log.flushes()
     }
-
-    fn after_write(&self, id: WriteId) {
-        if self.shared.flusher == Flusher::Thread {
-            self.shared.request(id, None);
-        }
-    }
 }
 
 /// What the simulator's checks need (plan 0028's models report the same).
@@ -461,12 +455,11 @@ impl<RT: AsyncRuntime, F: Fs> RaftLogStorage<Types<RT>> for DiskLog<RT, F> {
     }
 
     async fn save_committed(&mut self, committed: Option<OrLogId>) -> Result<(), io::Error> {
-        let id = self
-            .shared
+        // Queued only: it joins the next group commit.
+        self.shared
             .log
             .save_committed(committed.as_ref().map(pos))
             .map_err(to_io)?;
-        self.after_write(id);
         Ok(())
     }
 
@@ -493,18 +486,18 @@ impl<RT: AsyncRuntime, F: Fs> RaftLogStorage<Types<RT>> for DiskLog<RT, F> {
     }
 
     async fn truncate_after(&mut self, last_log_id: Option<OrLogId>) -> Result<(), io::Error> {
-        let id = self
-            .shared
+        // Queued only: no later write is durable before it.
+        self.shared
             .log
             .truncate_after(last_log_id.as_ref().map(pos))
             .map_err(to_io)?;
-        self.after_write(id);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: OrLogId) -> Result<(), io::Error> {
-        let id = self.shared.log.purge(pos(&log_id)).map_err(to_io)?;
-        self.after_write(id);
+        // Queued only: the next append's flush, a vote, or the sync hook
+        // makes it durable, in order (plan 0030).
+        self.shared.log.purge(pos(&log_id)).map_err(to_io)?;
         Ok(())
     }
 }
