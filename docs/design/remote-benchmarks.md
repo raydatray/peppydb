@@ -225,8 +225,21 @@ tools/gcp-bench run --dry-run                       # show every gcloud command
 tools/gcp-bench run                                 # the 0023 suite, reference numbers
 tools/gcp-bench run --step engine-bench --profile record,offcpu
 PEPPYDB_BENCH_MILLIS=5000 tools/gcp-bench run --step bf-tree-bench
+tools/gcp-bench run --suite raft-perf               # the Raft benchmarks (plans 0029, 0030)
 tools/gcp-bench cleanup                             # delete leftovers
 ```
+
+**Suites.**
+
+| Suite | Steps |
+| --- | --- |
+| `bf-io-perf` (default) | Direct-I/O preflight checks, then plan 0023's BF-Tree, circular-buffer, engine, and WAL benchmarks |
+| `raft-perf` | The Raft log alone, three nodes over the real log and the real engine (shared runtime and one runtime per node), and `Db::apply` beside a syncing file |
+
+The three-node benchmark sizes each node's Tokio runtime to a quarter of
+the cores, 2 threads on `c4d-standard-8-lssd`, so three nodes and the
+clients fit in 8 vCPUs; `PEPPYDB_BENCH_THREADS` overrides it. The nodes
+share the VM and its Local SSD; separate VMs per node are S7's.
 
 `PEPPYDB_BENCH_*` settings in the environment, except `PEPPYDB_BENCH_DIR`,
 reach the benchmarks through `bench.env`.

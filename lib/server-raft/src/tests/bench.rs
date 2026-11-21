@@ -23,7 +23,10 @@
 //! The nodes share one machine and one disk. `PEPPYDB_BENCH_DIR` sets the
 //! directory (default: the system temporary directory),
 //! `PEPPYDB_BENCH_MILLIS` the time per measurement (default 2000), and
-//! `PEPPYDB_BENCH_THREADS` each node runtime's worker threads (default 4).
+//! `PEPPYDB_BENCH_THREADS` each node runtime's worker threads (default: a
+//! quarter of the cores, at least one, so three nodes and the clients do
+//! not oversubscribe the machine; 3 on a 12-core laptop, 2 on GCP's
+//! 8-vCPU `c4d-standard-8-lssd`).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -59,6 +62,13 @@ fn env(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .map_or(default, |text| text.parse().expect("a number"))
+}
+
+/// Worker threads per node runtime: `PEPPYDB_BENCH_THREADS`, or a quarter
+/// of the cores.
+fn node_threads() -> usize {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    env("PEPPYDB_BENCH_THREADS", (cores / 4).max(1) as u64) as usize
 }
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
@@ -218,7 +228,7 @@ fn after<SM: Machine>(nodes: &[RaftNode<SM, Rt>], term: u64) -> (u64, u64) {
 /// Every node and the clients on one runtime.
 fn shared<SM: Machine>(writers: u64) -> Run {
     let dir = base();
-    Rt::new(env("PEPPYDB_BENCH_THREADS", 4) as usize * 3).block_on(async move {
+    Rt::new(node_threads() * 3).block_on(async move {
         let router = Router::new();
         let mut nodes = Vec::new();
         for id in 1..=3 {
@@ -264,7 +274,7 @@ fn per_node<SM: Machine>(writers: u64) -> Run {
                 tx.clone(),
             );
             std::thread::spawn(move || {
-                Rt::new(env("PEPPYDB_BENCH_THREADS", 4) as usize).block_on(async move {
+                Rt::new(node_threads()).block_on(async move {
                     let node = start::<SM>(id, &dir, &router).await;
                     tx.send(node.clone()).unwrap();
                     let late = probe(stop).await;
