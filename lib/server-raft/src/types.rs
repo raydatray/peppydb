@@ -124,7 +124,6 @@ pub(crate) type OrStoredMembership = openraft::StoredMembership<CommittedLeaderI
 /// openraft's snapshot metadata under [`Types`].
 pub(crate) type OrSnapshotMeta = openraft::storage::SnapshotMeta<CommittedLeaderId, Membership>;
 /// openraft's snapshot, with the bytes the models use as snapshot data.
-#[cfg(any(test, feature = "sim"))]
 pub(crate) type OrSnapshot = openraft::storage::Snapshot<CommittedLeaderId, Membership, Vec<u8>>;
 
 /// A log id from a term and an index.

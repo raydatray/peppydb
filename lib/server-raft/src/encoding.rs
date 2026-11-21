@@ -7,12 +7,11 @@ use std::collections::BTreeSet;
 use std::io;
 
 use crate::types::Membership;
-#[cfg(any(test, feature = "sim"))]
 use crate::types::OrLogId;
+use crate::types::OrStoredMembership;
 use crate::types::PeerInfo;
 
 /// A log id's value, in `server-keys`' layout.
-#[cfg(any(test, feature = "sim"))]
 pub(crate) fn encode_log_id(log_id: &OrLogId) -> Vec<u8> {
     server_keys::encode_log_id(log_id.leader_id.term, log_id.index).to_vec()
 }
@@ -60,7 +59,6 @@ pub(crate) fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-#[cfg(any(test, feature = "sim"))]
 pub(crate) fn decode_log_id(reader: &mut Reader<'_>) -> Result<OrLogId, io::Error> {
     let term = reader.u64()?;
     let index = reader.u64()?;
@@ -79,7 +77,6 @@ impl Reader<'_> {
         Ok(head)
     }
 
-    #[cfg(any(test, feature = "sim"))]
     pub(crate) fn u8(&mut self) -> Result<u8, io::Error> {
         Ok(self.take(1)?[0])
     }
@@ -98,4 +95,28 @@ impl Reader<'_> {
         let len = self.u32()? as usize;
         Ok(self.take(len)?.to_vec())
     }
+}
+
+/// A stored membership: `0 | config` or `1 | log id | config`.
+pub(crate) fn encode_stored_membership(stored: &OrStoredMembership) -> Vec<u8> {
+    let mut out = Vec::new();
+    match stored.log_id() {
+        Some(log_id) => {
+            out.push(1);
+            out.extend(encode_log_id(log_id));
+        }
+        None => out.push(0),
+    }
+    encode_membership_config(&mut out, stored.membership());
+    out
+}
+
+pub(crate) fn decode_stored_membership(bytes: &[u8]) -> Result<OrStoredMembership, io::Error> {
+    let mut reader = Reader(bytes);
+    let log_id = match reader.u8()? {
+        0 => None,
+        _ => Some(decode_log_id(&mut reader)?),
+    };
+    let membership = decode_membership_config(&mut reader)?;
+    Ok(OrStoredMembership::new(log_id, membership))
 }

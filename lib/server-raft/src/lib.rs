@@ -11,6 +11,8 @@
 //! - [`Command`] is the replicated payload, with a stable binary codec.
 //! - [`RaftNode`] is the facade: propose, read barrier, status, leader
 //!   transfer, and the handlers for incoming peer messages.
+//! - [`DbStateMachine`] is openraft's state machine over an external-mode
+//!   `engine::Db` (plan 0030).
 //! - [`DiskLog`] is openraft's log storage over the on-disk Raft log
 //!   (`server-raft-log`, plan 0029).
 //! - [`Transport`] is what the node needs from the network, over the
@@ -18,6 +20,8 @@
 //!   use the simulator's network.
 
 mod command;
+mod db_sm;
+mod db_snapshot;
 mod disk_log;
 mod encoding;
 mod error;
@@ -35,6 +39,9 @@ mod types;
 pub use command::CodecError;
 pub use command::Command;
 pub use command::Op;
+pub use db_sm::Applier;
+pub use db_sm::DbStateMachine;
+pub use db_sm::SyncHook;
 pub use disk_log::DiskLog;
 pub use disk_log::Flusher;
 pub use error::LeaderHint;
