@@ -1,7 +1,8 @@
-//! A fault-injecting store and a crash model against an oracle
-//! (plan 0018).
+//! A crash model against an oracle (plan 0018), over `SimStore`
+//! (`bf-tree-store`, feature `sim`; plan 0030 moved plan 0018's
+//! `FaultStore` there).
 //!
-//! `FaultStore` keeps a durable image and the writes since the last sync.
+//! The store keeps a durable image and the writes since the last sync.
 //! `sync` and `commit` make writes durable. A crash keeps the durable image
 //! and loses, lands, or tears each later write at 64-byte sectors. The store
 //! can also fail a commit before or after its superblock copy lands, and it
@@ -9,236 +10,19 @@
 //! middle of an operation (a pass, a split, an erase on open).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 
 use super::*;
+pub(super) use crate::CommitFault;
+pub(super) use crate::SimStore as FaultStore;
 
-const SECTOR: usize = 64;
-
-/// How the next commit fails.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CommitFault {
-    /// The superblock copy never lands; the old state stays durable.
-    BeforeCopy,
-    /// The copy lands, but the call reports an error.
-    AfterCopy,
+/// A new store for `config`.
+pub(super) fn new_store(config: &TreeConfig) -> FaultStore {
+    FaultStore::new(Superblock::from(config)).unwrap()
 }
 
-#[derive(Debug)]
-struct Disk {
-    /// The pages as the process sees them.
-    pages: Vec<Vec<u8>>,
-    freed: Vec<bool>,
-    free: Vec<usize>,
-    state: State,
-    /// What survives a crash.
-    durable: Vec<Vec<u8>>,
-    durable_state: State,
-    /// Writes since the last sync, in order.
-    pending: Vec<(usize, Vec<u8>)>,
-    /// Calls left before every call fails; `None` for no limit.
-    countdown: Option<u64>,
-    dead: bool,
-    commit_fault: Option<CommitFault>,
-}
-
-/// A handle to one simulated disk; clones share it.
-#[derive(Clone, Debug)]
-pub(super) struct FaultStore {
-    disk: Arc<Mutex<Disk>>,
-    superblock: Superblock,
-}
-
-fn dead() -> StoreError {
-    StoreError::Io {
-        op: "fault",
-        kind: std::io::ErrorKind::Other,
-        code: Some(5),
-    }
-}
-
-impl FaultStore {
-    pub(super) fn new(config: &TreeConfig) -> Self {
-        Self::from_durable(Superblock::from(config), Vec::new(), State::default())
-    }
-
-    fn from_durable(superblock: Superblock, durable: Vec<Vec<u8>>, state: State) -> Self {
-        let disk = Disk {
-            pages: durable.clone(),
-            freed: vec![false; durable.len()],
-            free: Vec::new(),
-            state,
-            durable,
-            durable_state: state,
-            pending: Vec::new(),
-            countdown: None,
-            dead: false,
-            commit_fault: None,
-        };
-        Self {
-            disk: Arc::new(Mutex::new(disk)),
-            superblock,
-        }
-    }
-
-    /// Fail every store call after `calls` more.
-    pub(super) fn die_after(&self, calls: u64) {
-        self.disk.lock().unwrap().countdown = Some(calls);
-    }
-
-    pub(super) fn fail_next_commit(&self, fault: CommitFault) {
-        self.disk.lock().unwrap().commit_fault = Some(fault);
-    }
-
-    pub(super) fn durable_state(&self) -> State {
-        self.disk.lock().unwrap().durable_state
-    }
-
-    /// The disk after a crash: the durable image, with each write since
-    /// the last sync lost, landed, or torn at 64-byte sectors.
-    pub(super) fn crash(&self, rng: &mut Rng) -> FaultStore {
-        let disk = self.disk.lock().unwrap();
-        let mut durable = disk.durable.clone();
-        for (index, bytes) in &disk.pending {
-            match rng.below(3) {
-                0 => {}
-                1 => durable[*index].clone_from(bytes),
-                _ => {
-                    for sector in 0..bytes.len() / SECTOR {
-                        if rng.below(2) == 0 {
-                            let range = sector * SECTOR..(sector + 1) * SECTOR;
-                            durable[*index][range.clone()].copy_from_slice(&bytes[range]);
-                        }
-                    }
-                }
-            }
-        }
-        FaultStore::from_durable(self.superblock, durable, disk.durable_state)
-    }
-}
-
-impl Disk {
-    /// Count one call; `Err` once the process has died.
-    fn call(&mut self) -> Result<(), StoreError> {
-        if let Some(left) = self.countdown.as_mut() {
-            if *left == 0 {
-                self.dead = true;
-            } else {
-                *left -= 1;
-            }
-        }
-        if self.dead { Err(dead()) } else { Ok(()) }
-    }
-
-    fn sync(&mut self) {
-        for (index, bytes) in self.pending.drain(..) {
-            self.durable[index] = bytes;
-        }
-    }
-
-    fn index(&self, page_number: PageNumber) -> Result<usize, StoreError> {
-        let index = page_number.raw() as usize;
-        if index < self.pages.len() {
-            Ok(index)
-        } else {
-            Err(StoreError::UnknownPage(page_number))
-        }
-    }
-}
-
-impl PageStore for FaultStore {
-    fn page_size(&self) -> usize {
-        self.superblock.page_size
-    }
-    fn page_count(&self) -> u64 {
-        self.disk.lock().unwrap().pages.len() as u64
-    }
-    fn alloc(&self) -> Result<PageNumber, StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        let index = match disk.free.pop() {
-            Some(index) => {
-                disk.freed[index] = false;
-                index
-            }
-            None => {
-                // The file grows with a zero page.
-                let zero = vec![0; self.superblock.page_size];
-                disk.pages.push(zero.clone());
-                disk.durable.push(zero);
-                disk.freed.push(false);
-                disk.pages.len() - 1
-            }
-        };
-        Ok(PageNumber::new(index as u64).unwrap())
-    }
-    fn free(&self, page_number: PageNumber) -> Result<(), StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        let index = disk.index(page_number)?;
-        if disk.freed[index] {
-            return Err(StoreError::FreedPage(page_number));
-        }
-        disk.freed[index] = true;
-        disk.free.push(index);
-        Ok(())
-    }
-    fn read(&self, page_number: PageNumber, buf: &mut [u8]) -> Result<(), StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        let index = disk.index(page_number)?;
-        buf.copy_from_slice(&disk.pages[index]);
-        Ok(())
-    }
-    fn write(&self, page_number: PageNumber, buf: &[u8]) -> Result<(), StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        let index = disk.index(page_number)?;
-        if disk.freed[index] {
-            return Err(StoreError::FreedPage(page_number));
-        }
-        disk.pages[index].copy_from_slice(buf);
-        disk.pending.push((index, buf.to_vec()));
-        Ok(())
-    }
-    fn sync(&self) -> Result<(), StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        disk.sync();
-        Ok(())
-    }
-    fn superblock(&self) -> &Superblock {
-        &self.superblock
-    }
-    fn state(&self) -> State {
-        self.disk.lock().unwrap().state
-    }
-    fn commit(&self, state: &State) -> Result<(), StoreError> {
-        let mut disk = self.disk.lock().unwrap();
-        disk.call()?;
-        if disk.state.checkpoint_id + 1 != state.checkpoint_id {
-            return Err(StoreError::CommitOrder {
-                current: disk.state.checkpoint_id,
-                got: state.checkpoint_id,
-            });
-        }
-        // A commit writes a superblock copy and syncs the file, which also
-        // makes every earlier page write durable.
-        match disk.commit_fault.take() {
-            Some(CommitFault::BeforeCopy) => Err(dead()),
-            Some(CommitFault::AfterCopy) => {
-                disk.sync();
-                disk.durable_state = *state;
-                Err(dead())
-            }
-            None => {
-                disk.sync();
-                disk.durable_state = *state;
-                disk.state = *state;
-                Ok(())
-            }
-        }
-    }
+/// The store after a crash, with each choice drawn from `rng`.
+pub(super) fn crashed(store: &FaultStore, rng: &mut Rng) -> FaultStore {
+    FaultStore::from_image(&store.crash_with(|bound| rng.below(bound)))
 }
 
 /// A deterministic generator.
@@ -321,10 +105,10 @@ pub(super) fn recover(store: FaultStore, config: TreeConfig, rng: &mut Rng) -> (
         }
         match Tree::open_with(config, Box::new(store.clone())) {
             Ok(tree) => {
-                store.disk.lock().unwrap().countdown = None;
+                store.live_on();
                 return (tree, store);
             }
-            Err(TreeError::Store(_)) => store = store.crash(rng),
+            Err(TreeError::Store(_)) => store = crashed(&store, rng),
             Err(error) => panic!("open after a crash failed: {error:?}"),
         }
     }
@@ -334,7 +118,7 @@ pub(super) fn recover(store: FaultStore, config: TreeConfig, rng: &mut Rng) -> (
 /// crash, each recovered from the crashed disk itself.
 fn run(config: TreeConfig, seed: u64, rounds: usize, ops: usize) {
     let mut rng = Rng(seed | 1);
-    let store = FaultStore::new(&config);
+    let store = new_store(&config);
     let mut tree = Tree::create(config, Box::new(store.clone())).unwrap();
     let mut store = store;
     let mut log = Log::default();
@@ -369,7 +153,7 @@ fn run(config: TreeConfig, seed: u64, rounds: usize, ops: usize) {
 
         // Crash and recover.
         drop(tree);
-        let crashed = store.crash(&mut rng);
+        let crashed = crashed(&store, &mut rng);
         let (recovered, recovered_store) = recover(crashed, config, &mut rng);
         tree = recovered;
         store = recovered_store;
@@ -471,7 +255,7 @@ fn apply_seq(tree: &Tree, op: &Op) -> Result<u64, TreeError> {
 
 fn crash_beside_writers(config: TreeConfig, seed: u64) {
     let mut rng = Rng(0xfeed + seed * 6151);
-    let store = FaultStore::new(&config);
+    let store = new_store(&config);
     let tree = Tree::create(config, Box::new(store.clone())).unwrap();
     store.die_after(200 + rng.below(3000));
     let mut log: Vec<(u64, Op)> = std::thread::scope(|scope| {
@@ -512,7 +296,7 @@ fn crash_beside_writers(config: TreeConfig, seed: u64) {
     let last = log.0.last().map_or(0, |(seq, _)| *seq);
     drop(tree);
 
-    let crashed = store.crash(&mut rng);
+    let crashed = crashed(&store, &mut rng);
     let (tree, _) = recover(crashed, config, &mut rng);
     let applied = tree.applied_seq();
     let context = format!("seed {seed} applied {applied} last {last}");

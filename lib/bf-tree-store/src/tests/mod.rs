@@ -4,6 +4,7 @@ mod contract;
 mod crc;
 mod direct;
 mod file;
+mod sim;
 mod superblock;
 
 /// A small configuration shared by the store tests.

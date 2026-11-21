@@ -34,10 +34,14 @@
 
 mod file;
 mod mem;
+#[cfg(any(test, feature = "sim"))]
+mod sim;
 mod superblock;
 
 pub use file::{FileStore, Io};
 pub use mem::MemStore;
+#[cfg(any(test, feature = "sim"))]
+pub use sim::{CommitFault, SECTOR, SimImage, SimStore};
 #[cfg(test)]
 use superblock::ENCODED_BYTES;
 
