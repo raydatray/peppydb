@@ -1,0 +1,13 @@
+load("//build:defs.bzl", "peppy_rust_library")
+
+# The stored key layout of the server component (plans 0026 and 0030):
+# namespace bytes, user keys, and the system keys. Internal to the server
+# component. It depends on neither tonic nor openraft, so `server` and
+# `server-raft` can both use it.
+peppy_rust_library(
+    name = "server-keys",
+    visibility = [
+        "//lib/server:",
+        "//lib/server-raft:",
+    ],
+)

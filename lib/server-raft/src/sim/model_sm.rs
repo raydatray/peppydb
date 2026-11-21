@@ -52,10 +52,8 @@ use crate::types::OrSnapshotMeta;
 use crate::types::OrStoredMembership;
 use crate::types::Types;
 
-/// `0x00 ‖ "raft/applied"`: the last applied log id, `term u64 | index u64`.
-pub const APPLIED_KEY: &[u8] = b"\x00raft/applied";
-/// `0x00 ‖ "raft/membership"`: the last applied membership and its log id.
-pub const MEMBERSHIP_KEY: &[u8] = b"\x00raft/membership";
+pub use server_keys::APPLIED_KEY;
+pub use server_keys::MEMBERSHIP_KEY;
 
 /// The contents of a model state machine: data and system keys together.
 pub type Contents = BTreeMap<Vec<u8>, Vec<u8>>;
