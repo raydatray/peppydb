@@ -8,6 +8,7 @@ mod fault;
 mod io;
 mod open;
 mod replica;
+mod sim;
 mod write;
 
 use crate::{Options, TreeConfig};
