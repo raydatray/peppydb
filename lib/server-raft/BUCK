@@ -5,6 +5,7 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "server-raft",
     deps = [
+        "//lib/engine:engine",
         "//lib/server-keys:server-keys",
         "//lib/server-raft-log:server-raft-log",
         "//third-party/rust:futures-util",
@@ -13,6 +14,8 @@ peppy_rust_library(
         "//third-party/rust:thiserror",
     ],
     test_deps = [
+        # SimStore under the engine, for the simulator (plan 0030).
+        "//lib/engine:engine-sim",
         # SimFs, for the simulator and the adapter's tests.
         "//lib/server-raft-log:server-raft-log-sim",
         "//third-party/rust:openraft-rt-sim",
@@ -24,6 +27,7 @@ peppy_rust_library(
     feature_variants = {
         "sim": {
             "deps": [
+                "//lib/engine:engine",
                 "//lib/server-keys:server-keys",
                 "//lib/server-raft-log:server-raft-log",
                 "//third-party/rust:futures-util",
