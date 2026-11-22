@@ -327,7 +327,7 @@ impl Probe for Checker {
         };
         // An installed snapshot makes its entries durable in the state
         // machine before the log's purge is durable.
-        let snapshot = sm.durable().and_then(|snapshot| snapshot.meta.last_log_id);
+        let snapshot = sm.durable_log_id();
         if snapshot.is_some_and(|snapshot| snapshot.index >= last.index) {
             return;
         }
