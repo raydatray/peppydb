@@ -11,12 +11,10 @@ use crate::types::Membership;
 use crate::types::OrLogId;
 use crate::types::PeerInfo;
 
+/// A log id's value, in `server-keys`' layout.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn encode_log_id(log_id: &OrLogId) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16);
-    out.extend_from_slice(&log_id.leader_id.term.to_le_bytes());
-    out.extend_from_slice(&log_id.index.to_le_bytes());
-    out
+    server_keys::encode_log_id(log_id.leader_id.term, log_id.index).to_vec()
 }
 
 /// A membership configuration: its voter sets, then every member's id and
