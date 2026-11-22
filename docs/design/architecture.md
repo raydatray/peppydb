@@ -54,11 +54,11 @@ API with its generated code, whatever the language.
 | BF-Tree | `lib/bf-tree` (entry), `lib/bf-tree-*` (internal) | node identifiers, the shared page format, inner nodes, mini-pages, the circular buffer, the page store, and the tree that composes them |
 | Engine | `lib/engine` (entry, `PUBLIC`), `lib/engine-wal` (internal) | `Db`, the application-facing [embedded database](engine.md#the-db): recovery, durable writes, batches, reads, and the checkpoint policy; and the [write-ahead log](engine.md): segment files, group commit, replay, and truncation |
 | WAL segments | `lib/wal-segments` | checksummed frames in numbered segment files, shared by the engine's write-ahead log and the Raft log ([server Raft log](server-raft-log.md#wal-segments)); its own component, so neither log owns the other's format |
-| Server | `lib/server` (entry), `lib/server-raft`, `lib/server-raft-log` (internal), `bin/peppydb` | the [gRPC server](server.md): the `peppydb.kv.v1` services over one `engine::Db`, the stored key layout, the blocking bridge, shutdown, fail-stop, and the `peppydb` command line; `bin/peppydb` only calls `server::cli`. [Server Raft](server-raft.md): openraft behind peppydb types, with storage models and a deterministic simulator; the [on-disk Raft log](server-raft-log.md) and its openraft adapter |
+| Server | `lib/server` (entry), `lib/server-raft`, `lib/server-raft-log`, `lib/server-keys` (internal), `bin/peppydb` | the [gRPC server](server.md): the `peppydb.kv.v1` services over one `engine::Db`, the stored key layout, the blocking bridge, shutdown, fail-stop, and the `peppydb` command line; `bin/peppydb` only calls `server::cli`. [Server Raft](server-raft.md): openraft behind peppydb types, with storage models and a deterministic simulator; the [on-disk Raft log](server-raft-log.md) and its openraft adapter; `DbStateMachine` over an external-mode `Db`; `server-keys`, the stored key layout shared by `server` and `server-raft` |
 | KV API | `proto/kv/v1` (`kv.proto`, `rust/` crate `kv-proto`, `go/` package `kvv1`) | the `peppydb.kv.v1` gRPC API and its generated code |
 | Load generator | `bin/peppydb-load`, `lib/load` (Go) | drives a running server and reports throughput and latency |
 
-Later: `lib/server-keys` (Rust, server component), `proto/raft/v1`, `bin/peppydb-gateway` and
+Later: `proto/raft/v1`, `bin/peppydb-gateway` and
 `bin/peppydb-placement` (Go).
 
 Each component exposes one entry crate. Buck2 visibility rules stop other
