@@ -5,6 +5,7 @@ load("//build:defs.bzl", "peppy_rust_library")
 peppy_rust_library(
     name = "server-raft",
     deps = [
+        "//lib/server-keys:server-keys",
         "//lib/server-raft-log:server-raft-log",
         "//third-party/rust:futures-util",
         "//third-party/rust:openraft",
@@ -23,6 +24,7 @@ peppy_rust_library(
     feature_variants = {
         "sim": {
             "deps": [
+                "//lib/server-keys:server-keys",
                 "//lib/server-raft-log:server-raft-log",
                 "//third-party/rust:futures-util",
                 "//third-party/rust:openraft",
