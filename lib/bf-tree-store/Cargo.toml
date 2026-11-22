@@ -17,5 +17,8 @@ zerocopy.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[features]
+sim = []
+
 [lints]
 workspace = true

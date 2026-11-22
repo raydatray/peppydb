@@ -7,6 +7,10 @@ const PAGE: usize = 128;
 
 type Factory = fn() -> Box<dyn PageStore>;
 
+fn sim() -> Box<dyn PageStore> {
+    Box::new(SimStore::new(superblock(PAGE)).unwrap())
+}
+
 fn mem() -> Box<dyn PageStore> {
     Box::new(MemStore::new(superblock(PAGE)).unwrap())
 }
@@ -59,7 +63,11 @@ fn file() -> Box<dyn PageStore> {
 }
 
 fn backends() -> Vec<(&'static str, Factory)> {
-    vec![("mem", mem as Factory), ("file", file as Factory)]
+    vec![
+        ("mem", mem as Factory),
+        ("file", file as Factory),
+        ("sim", sim as Factory),
+    ]
 }
 
 fn for_each_backend(scenario: impl Fn(&dyn PageStore)) {

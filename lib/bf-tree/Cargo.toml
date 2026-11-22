@@ -19,7 +19,11 @@ thiserror.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
+bf-tree-store = { path = "../bf-tree-store", features = ["sim"] }
 tempfile.workspace = true
+
+[features]
+sim = ["bf-tree-store/sim"]
 
 [lints]
 workspace = true
