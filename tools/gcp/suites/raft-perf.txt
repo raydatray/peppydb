@@ -1,0 +1,12 @@
+# The Raft benchmarks of plans 0029 and 0030 on the Local SSD: the Raft log
+# alone, three nodes over the real log and the real engine, and Db::apply
+# beside a syncing file. Informational, not gates.
+#
+# Each line is: NAME BINARY ARGS... (see bf-io-perf.txt). The benchmarks put
+# their files in PEPPYDB_BENCH_DIR, which the VM points at the Local SSD.
+# The three-node benchmark sizes each node's runtime to a quarter of the
+# cores (2 on c4d-standard-8-lssd); PEPPYDB_BENCH_THREADS overrides it, and
+# PEPPYDB_BENCH_MILLIS sets the time per measurement.
+raft-log-bench     server-raft-log-unittest  --ignored --nocapture --test-threads=1 tests::bench::
+raft-nodes-bench   server-raft-unittest      --ignored --nocapture --test-threads=1 tests::bench::bench_three_nodes_on_disk
+raft-apply-bench   server-raft-unittest      --ignored --nocapture --test-threads=1 tests::bench::bench_engine_apply_beside_a_syncing_file

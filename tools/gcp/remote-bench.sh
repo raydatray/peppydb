@@ -29,6 +29,10 @@ STATE=${PEPPYDB_REMOTE_STATE:-/var/lib/peppydb-bench}
 ARTIFACTS=$STATE/artifacts
 RESULTS=$STATE/results
 LOG=$STATE/startup-script.log
+# Seconds a step may run before its watchdog kills the test binary, so a
+# hung benchmark fails its step instead of holding the VM until --max-run.
+# PEPPYDB_BENCH_STEP_SECONDS (in bench.env) overrides it.
+STEP_SECONDS=1200
 # binutils provides addr2line, which perf report and perf script need for
 # inlined frames and source lines, and which fold-stacks.py uses.
 PACKAGES="linux-tools-common binutils bpftrace sysstat nvme-cli zstd"
@@ -410,6 +414,21 @@ run_profiled() {
     esac
 }
 
+# watchdog EXE SECONDS MARKER: after SECONDS, kill every process whose
+# command line starts with EXE (the test binary, not the profiler around
+# it, so the profiler still writes its output) and create MARKER if one was
+# killed. The caller kills the watchdog when the step ends. It sleeps one
+# second at a time, so it never outlives its step by more than that.
+watchdog() {
+    deadline=$(($(date +%s) + $2))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 1
+    done
+    if pkill -KILL -f "^$1"; then
+        : >"$3"
+    fi
+}
+
 # step_log NAME PROFILER: the file with the step's test output.
 step_log() {
     if [ "$2" = none ]; then
@@ -474,13 +493,24 @@ run_suite() {
         for profiler in $step_profilers; do
             log "step $name ($profiler): $bin $args"
             started=$(date +%s)
+            timed_out=$STATE/step-timed-out
+            rm -f "$timed_out"
+            # Not on fd 3 or stdout: the caller reads them to the end.
+            watchdog "$ARTIFACTS/bin/$bin" "$STEP_SECONDS" "$timed_out" \
+                </dev/null >/dev/null 2>&1 3>&- &
+            dog=$!
             # shellcheck disable=SC2086 # args split on whitespace by design
             files=$(run_profiled "$profiler" "$name" "$bin" $args 3>&1 </dev/null)
             rc=$?
+            kill "$dog" 2>/dev/null
+            wait "$dog" 2>/dev/null
             elapsed=$(($(date +%s) - started))
             note=ok
             [ "$rc" = 0 ] || note=exit-$rc
-            if problem=$(check_output "$name" "$(step_log "$name" "$profiler")"); then
+            if [ -e "$timed_out" ]; then
+                rc=124
+                note=timeout-${STEP_SECONDS}s
+            elif problem=$(check_output "$name" "$(step_log "$name" "$profiler")"); then
                 :
             else
                 [ "$rc" = 0 ] && rc=1
@@ -553,6 +583,11 @@ main() {
     }
     load_bench_env || {
         finish failed "bad bench.env"
+        return 1
+    }
+    STEP_SECONDS=${PEPPYDB_BENCH_STEP_SECONDS:-$STEP_SECONDS}
+    echo "$STEP_SECONDS" | grep -Eq '^[1-9][0-9]*$' || {
+        finish failed "bad PEPPYDB_BENCH_STEP_SECONDS: $STEP_SECONDS"
         return 1
     }
     prepare_profiling || {
