@@ -143,13 +143,11 @@ struct Job<RT: AsyncRuntime> {
 }
 
 /// What every handle shares.
-// `sync`, `committed`, `take_db`, and `put_db` serve snapshots (diff 7).
-#[allow(dead_code)]
 pub(crate) struct Shared<RT: AsyncRuntime> {
     /// The database; `None` while a snapshot install replaces it.
     db: Mutex<Option<Arc<Db>>>,
     pub(crate) sync: SyncHook,
-    applier: Applier,
+    pub(crate) applier: Applier,
     /// Held for each entry's apply, and by a snapshot build or read for
     /// its whole length, so they see entry boundaries only.
     pub(crate) gate: Mutex<()>,
@@ -171,7 +169,6 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[allow(dead_code)]
 impl<RT: AsyncRuntime> Shared<RT> {
     pub(crate) fn db(&self) -> Result<Arc<Db>, io::Error> {
         self.check()?;
@@ -322,6 +319,28 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
         })
     }
 
+    /// A state machine over an external database on a simulated page
+    /// store, for the simulator: a snapshot install replaces the store,
+    /// and [`DbStateMachine::sim_store`] returns the current one.
+    #[cfg(test)]
+    pub(crate) fn open_sim(
+        store: engine::SimStore,
+        options: engine::Options,
+        sync: SyncHook,
+        applier: Applier,
+    ) -> Result<Self, io::Error> {
+        let db = Db::open_external_on(store.clone(), options).map_err(io::Error::other)?;
+        let sm = Self::open(db, sync, applier)?;
+        *lock(&sm.shared.store) = Some(store);
+        Ok(sm)
+    }
+
+    /// The simulated store under the database now.
+    #[cfg(test)]
+    pub(crate) fn sim_store(&self) -> Option<engine::SimStore> {
+        lock(&self.shared.store).clone()
+    }
+
     /// The database, for reads after a read barrier (S7's `Kv` service).
     pub fn db(&self) -> Result<Arc<Db>, io::Error> {
         self.shared.db()
@@ -389,7 +408,7 @@ impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for DbStateMachine<RT> {
         meta: &OrSnapshotMeta,
         snapshot: Vec<u8>,
     ) -> Result<(), io::Error> {
-        crate::db_snapshot::install(&self.shared, meta, snapshot).await
+        crate::db_snapshot::install(&self.shared, meta.clone(), snapshot).await
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<OrSnapshot>, io::Error> {
