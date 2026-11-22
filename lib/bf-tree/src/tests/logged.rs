@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use super::crash::{CommitFault, FaultStore, Rng, recover};
+use super::crash::{CommitFault, Rng, crashed, new_store, recover};
 use super::*;
 
 /// One owned log record: a sequence and its operations.
@@ -119,7 +119,7 @@ fn contents(tree: &Tree) -> BTreeMap<Vec<u8>, Vec<u8>> {
 
 fn run(config: TreeConfig, seed: u64, rounds: usize) {
     let mut rng = Rng(seed | 1);
-    let store = FaultStore::new(&config);
+    let store = new_store(&config);
     let mut tree = Tree::create(config, Box::new(store.clone())).unwrap();
     let mut store = store;
     let mut log = LossyLog::default();
@@ -174,7 +174,7 @@ fn run(config: TreeConfig, seed: u64, rounds: usize) {
         // Crash the store and the log, and recover.
         drop(tree);
         let survivors = log.crash(&mut rng);
-        let (recovered, recovered_store) = recover(store.crash(&mut rng), config, &mut rng);
+        let (recovered, recovered_store) = recover(crashed(&store, &mut rng), config, &mut rng);
         tree = recovered;
         store = recovered_store;
         let applied = tree.applied_seq();
