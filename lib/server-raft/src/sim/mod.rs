@@ -28,6 +28,8 @@ mod router;
 #[cfg(test)]
 pub mod sim_log;
 #[cfg(test)]
+pub mod sim_sm;
+#[cfg(test)]
 pub mod simulator;
 mod trace;
 

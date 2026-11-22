@@ -39,21 +39,22 @@ use crate::sim::Contents;
 use crate::sim::Faults;
 use crate::sim::LogConfig;
 use crate::sim::LogImage;
-use crate::sim::ModelSm;
 use crate::sim::NetStats;
 use crate::sim::Router;
 use crate::sim::SimNetwork;
-use crate::sim::StoredSnapshot;
 use crate::sim::Trace;
 use crate::sim::checker::Checker;
 use crate::sim::sim_log::Durable;
 use crate::sim::sim_log::LogKind;
 use crate::sim::sim_log::SimLog;
+use crate::sim::sim_sm::SimSm;
+use crate::sim::sim_sm::SmDurable;
+use crate::sim::sim_sm::SmKind;
 use crate::types::NodeId;
 use crate::types::PeerInfo;
 
 pub type Rt = SimRuntime;
-pub type Sm = ModelSm<Rt>;
+pub type Sm = SimSm;
 pub type Node = RaftNode<Sm, Rt>;
 pub type Net = SimNetwork<Sm, Rt>;
 
@@ -79,6 +80,8 @@ pub struct SimConfig {
     pub lazy_votes: bool,
     /// The log the nodes run over: the real log by default.
     pub log: LogKind,
+    /// The state machine the nodes run: the real one by default.
+    pub sm: SmKind,
     /// Whether the scheduler makes a node's file system fail an
     /// operation, which must stop that node alone (fail-stop).
     pub sync_failures: bool,
@@ -111,6 +114,7 @@ impl SimConfig {
             },
             lazy_votes: false,
             log: LogKind::Disk,
+            sm: SmKind::Db,
             sync_failures: false,
         }
     }
@@ -194,6 +198,7 @@ struct Slot {
     node: Option<Node>,
     /// What survived the last crash, while the node is down.
     durable: Option<Durable>,
+    sm_durable: Option<SmDurable>,
 }
 
 /// The cluster: every node's slot, and the shared network.
@@ -274,12 +279,7 @@ impl Cluster {
     }
 
     /// Start `id` over storage restored from `image` and `durable`.
-    async fn start(
-        &self,
-        id: NodeId,
-        log: Option<Durable>,
-        durable: Option<StoredSnapshot>,
-    ) -> Node {
+    async fn start(&self, id: NodeId, log: Option<Durable>, durable: Option<SmDurable>) -> Node {
         let seed = self
             .rng
             .lock()
@@ -296,7 +296,14 @@ impl Cluster {
         };
         let log = SimLog::start(kind, log.as_ref(), log_config);
         let hook = log.clone();
-        let sm = Sm::from_durable(durable, Arc::new(move || hook.sync()));
+        let sm = SimSm::start(
+            self.config.sm,
+            durable.as_ref(),
+            Arc::new(move || {
+                hook.sync();
+                Ok(())
+            }),
+        );
         log.observe(id, Arc::clone(&self.checker) as _);
         sm.observe(id, Arc::clone(&self.checker) as _);
         self.checker.register(id, log.clone(), sm.clone());
@@ -317,6 +324,7 @@ impl Cluster {
                 sm,
                 node: Some(node.clone()),
                 durable: None,
+                sm_durable: None,
             },
         );
         node
@@ -331,7 +339,7 @@ impl Cluster {
             let slot = slots.get_mut(&id).expect("a known node");
             let Some(node) = slot.node.take() else { return };
             slot.durable = Some(slot.log.crash(seed));
-            slot.sm.crash();
+            slot.sm_durable = Some(slot.sm.crash(seed ^ 0x5eed_5eed));
             node
         };
         self.net.router().unregister(id);
@@ -347,7 +355,7 @@ impl Cluster {
             if slot.node.is_some() {
                 return;
             }
-            (slot.durable.clone(), slot.sm.durable())
+            (slot.durable.clone(), slot.sm_durable.clone())
         };
         self.start(id, log, durable).await;
         self.trace.record(format_args!("{} restart {id}", now()));
