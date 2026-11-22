@@ -12,4 +12,20 @@ peppy_rust_library(
     ],
     test_deps = ["//third-party/rust:tempfile"],
     visibility = ["//lib/bf-tree:"],
+    # `SimStore`, a page store with a power-loss model (plan 0030), for
+    # the crash tests of bf-tree and the simulator. Production targets
+    # never enable it.
+    feature_variants = {
+        "sim": {
+            "deps": [
+                "//lib/bf-tree-page:bf-tree-page",
+                "//lib/bf-tree-sync:bf-tree-sync",
+                "//third-party/rust:crc32c",
+                "//third-party/rust:libc",
+                "//third-party/rust:thiserror",
+                "//third-party/rust:zerocopy",
+            ],
+            "visibility": ["//lib/bf-tree:"],
+        },
+    },
 )

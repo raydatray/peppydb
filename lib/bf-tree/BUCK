@@ -16,6 +16,29 @@ peppy_rust_library(
         "//third-party/rust:thiserror",
         "//third-party/rust:zerocopy",
     ],
-    test_deps = ["//third-party/rust:tempfile"],
+    test_deps = [
+        # SimStore, for the crash tests (plan 0030).
+        "//lib/bf-tree-store:bf-tree-store-sim",
+        "//third-party/rust:tempfile",
+    ],
     visibility = ["PUBLIC"],
+    # Re-exports `SimStore` (plan 0030) for the engine's `sim` variant.
+    # Production targets never enable it.
+    feature_variants = {
+        "sim": {
+            "deps": [
+                "//lib/bf-tree-circular-buffer:bf-tree-circular-buffer",
+                "//lib/bf-tree-inner:bf-tree-inner",
+                "//lib/bf-tree-mini-page:bf-tree-mini-page",
+                "//lib/bf-tree-node-id:bf-tree-node-id",
+                "//lib/bf-tree-page:bf-tree-page",
+                "//lib/bf-tree-store:bf-tree-store-sim",
+                "//lib/bf-tree-sync:bf-tree-sync",
+                "//third-party/rust:arc-swap",
+                "//third-party/rust:thiserror",
+                "//third-party/rust:zerocopy",
+            ],
+            "visibility": ["//lib/engine:"],
+        },
+    },
 )

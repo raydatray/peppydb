@@ -43,6 +43,8 @@ use bf_tree_sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 pub use bf_tree_inner::InnerError;
 pub use bf_tree_node_id::LeafId;
 pub use bf_tree_page::PageError;
+#[cfg(any(test, feature = "sim"))]
+pub use bf_tree_store::{CommitFault, SimImage, SimStore};
 pub use bf_tree_store::{
     FileStore, Io, MemStore, PageNumber, PageStore, State, StoreError, Superblock,
 };
