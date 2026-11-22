@@ -228,6 +228,34 @@ run_remote PEPPYDB_FAKE_APT_FAIL=1
 expect_done failed "tool installation"
 expect_no_file preflight-store.log
 
+# --- A step that hangs is killed after PEPPYDB_BENCH_STEP_SECONDS, is
+# recorded as timed out, and the run continues. The hung binary is a copy
+# of sleep, so its command line starts with its own path, as a test
+# binary's does.
+new_case step-hangs
+cp "$(command -v sleep)" "$CASE_DIR/stage/bin/hang"
+printf 'bench-hang hang 600\nbench-one tree --ignored tests::bench::\n' \
+    >"$CASE_DIR/stage/suite.txt"
+printf 'PEPPYDB_BENCH_STEP_SECONDS=2\n' >"$CASE_DIR/stage/bench.env"
+publish
+hang_started=$(date +%s)
+run_remote
+[ $(($(date +%s) - hang_started)) -lt 60 ] || fail "the hung step was not stopped"
+expect_done failed "some steps failed"
+grep -q "^bench-hang none 124 .* timeout-2s$" "$(results)/status" ||
+    fail "timeout not recorded: $(cat "$(results)/status")"
+expect_status bench-one none 0
+if pgrep -f "^$CASE_DIR/state/artifacts/bin/hang" >/dev/null; then
+    fail "the hung binary survived"
+fi
+
+# --- The step time limit must be a positive number of seconds.
+new_case bad-step-seconds
+printf 'PEPPYDB_BENCH_STEP_SECONDS=0\n' >"$CASE_DIR/stage/bench.env"
+publish
+run_remote
+expect_done failed "bad PEPPYDB_BENCH_STEP_SECONDS"
+
 # --- bench.env may set only PEPPYDB_BENCH_* to plain values.
 new_case bad-env
 printf 'PATH=/evil\n' >"$CASE_DIR/stage/bench.env"

@@ -6,3 +6,5 @@ bf-tree-circular-buffer-unittest //lib/bf-tree-circular-buffer:bf-tree-circular-
 bf-tree-store-unittest           //lib/bf-tree-store:bf-tree-store-unittest
 engine-unittest                  //lib/engine:engine-unittest
 engine-wal-unittest              //lib/engine-wal:engine-wal-unittest
+server-raft-log-unittest         //lib/server-raft-log:server-raft-log-unittest
+server-raft-unittest             //lib/server-raft:server-raft-unittest
