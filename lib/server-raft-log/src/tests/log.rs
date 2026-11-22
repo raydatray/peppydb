@@ -1,3 +1,5 @@
+use std::sync::Barrier;
+
 use super::disk::{dir, entry, pos, small};
 use crate::{LogError, LogOptions, LogPos, RaftLog, SimFs, StoredVote};
 
@@ -292,4 +294,48 @@ fn durability_queries_follow_the_disk() {
     log.append(vec![entry(1, 5)]).unwrap();
     assert!(log.flush().is_err());
     assert!(log.is_failed());
+}
+
+/// Two flushes race for one write: the one that finds the queue empty
+/// must still report the write durable once the other has synced it.
+#[test]
+fn a_flush_that_finds_the_queue_taken_reports_the_other_flushs_write() {
+    const ROUNDS: u64 = 20_000;
+    let log = open(&SimFs::new(), LogOptions::default());
+    let start = Barrier::new(3);
+    let done = Barrier::new(3);
+    std::thread::scope(|scope| {
+        let flushers: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut stale = Vec::new();
+                    for _ in 0..ROUNDS {
+                        start.wait();
+                        let target = log.submitted();
+                        let durable = log.flush().unwrap();
+                        if durable < target {
+                            stale.push((target, durable));
+                        }
+                        done.wait();
+                    }
+                    stale
+                })
+            })
+            .collect();
+        for index in 1..=ROUNDS {
+            log.append(vec![entry(1, index)]).unwrap();
+            start.wait();
+            done.wait();
+        }
+        let stale: Vec<_> = flushers
+            .into_iter()
+            .flat_map(|flusher| flusher.join().unwrap())
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{} flushes reported an earlier write not durable, such as (submitted, durable) {:?}",
+            stale.len(),
+            stale.first()
+        );
+    });
 }
