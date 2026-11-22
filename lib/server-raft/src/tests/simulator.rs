@@ -133,3 +133,36 @@ fn injected_sync_failures_stop_only_the_failing_node() {
     }
     assert!(fail_stops > 0, "some node failed and stopped");
 }
+
+/// The simulator runs the real state machine by default (plan 0030); the
+/// `ModelSm` reference model still runs and stays safe, and both see
+/// snapshots and crashes.
+#[test]
+fn both_state_machines_run_safely() {
+    use crate::sim::sim_sm::SimSm;
+    use crate::sim::sim_sm::SmKind;
+    let (mut snapshots, mut crashes) = (0, 0);
+    for seed in 1..=4 {
+        for sm in [SmKind::Db, SmKind::Model] {
+            let mut config = SimConfig::for_seed(seed);
+            assert_eq!(
+                config.sm,
+                SmKind::Db,
+                "the real state machine is the default"
+            );
+            config.sm = sm;
+            let report = run_with(seed, config, Trace::default(), |cluster, _| {
+                let (_, running) = cluster.node(1).expect("node 1 is up");
+                let kind = match running {
+                    SimSm::Db(_) => SmKind::Db,
+                    SimSm::Model(_) => SmKind::Model,
+                };
+                assert_eq!(kind, sm);
+            });
+            report.assert_safe();
+            snapshots += report.snapshots;
+            crashes += report.crashes;
+        }
+    }
+    assert!(snapshots > 0 && crashes > 0);
+}

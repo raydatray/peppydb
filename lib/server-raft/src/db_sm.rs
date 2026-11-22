@@ -341,6 +341,35 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
         lock(&self.shared.store).clone()
     }
 
+    /// Crash: return what the simulated store keeps, tearing unsynced
+    /// writes with `seed`, and stop the store and the state machine.
+    #[cfg(test)]
+    pub(crate) fn crash(&self, seed: u64) -> engine::SimImage {
+        self.shared.fail("crashed".to_owned());
+        let store = self.sim_store().expect("a simulated store");
+        let image = store.crash(seed);
+        store.kill();
+        image
+    }
+
+    /// The last log id of the durable snapshot: the committed checkpoint.
+    #[cfg(test)]
+    pub(crate) fn durable_log_id(&self) -> Option<OrLogId> {
+        lock(&self.shared.committed)
+            .as_ref()
+            .and_then(|meta| meta.last_log_id)
+    }
+
+    /// Report this state machine's applies to `observer` as `node`'s.
+    #[cfg(test)]
+    pub(crate) fn observe(
+        &self,
+        node: crate::types::NodeId,
+        observer: Arc<dyn crate::sim::Observer>,
+    ) {
+        *lock(&self.shared.observer) = Some((node, observer));
+    }
+
     /// The database, for reads after a read barrier (S7's `Kv` service).
     pub fn db(&self) -> Result<Arc<Db>, io::Error> {
         self.shared.db()
