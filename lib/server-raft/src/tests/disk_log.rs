@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use openraft::AsyncRuntime;
@@ -270,5 +272,50 @@ fn a_failed_sync_stops_the_node() {
             Err(ProposeError::Stopped(_))
         ));
         node.shutdown().await;
+    });
+}
+
+/// A checkpoint's sync runs beside appends and the flusher thread. It must
+/// succeed: it waits only for the writes queued before it, and appends
+/// that arrive during it are not its concern.
+#[test]
+fn sync_succeeds_beside_appends_and_the_flusher_thread() {
+    const ENTRIES: u64 = 20_000;
+    TokioRuntime::new(2).block_on(async {
+        let mut log = DiskLog::<TokioRuntime, SimFs>::open(
+            SimFs::new(),
+            dir(),
+            LogOptions::default(),
+            Flusher::Thread,
+        )
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let syncer = {
+            let (log, stop) = (log.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut errors = Vec::new();
+                let mut syncs = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    if let Err(error) = log.sync() {
+                        errors.push(error.to_string());
+                    }
+                    syncs += 1;
+                }
+                (syncs, errors)
+            })
+        };
+        for index in 1..=ENTRIES {
+            let entry = OrEntry::new(log_id(1, index), OrPayload::Blank);
+            log.append([entry], IOFlushed::noop()).await.unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (syncs, errors) = syncer.join().unwrap();
+        assert!(
+            errors.is_empty(),
+            "{} of {syncs} syncs failed, such as: {:?}",
+            errors.len(),
+            errors.first()
+        );
+        log.sync().expect("the log syncs at rest");
     });
 }

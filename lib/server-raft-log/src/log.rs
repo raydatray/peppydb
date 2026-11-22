@@ -252,9 +252,10 @@ impl<F: Fs> RaftLog<F> {
     }
 
     /// Make every queued write durable, in order. Returns the last write
-    /// now durable. A failure is sticky: this and every later write and
-    /// flush fail, and nothing after the last successful sync is reported
-    /// durable.
+    /// now durable, which covers every write submitted before the call,
+    /// even one that a concurrent flush wrote. A failure is sticky: this
+    /// and every later write and flush fail, and nothing after the last
+    /// successful sync is reported durable.
     pub fn flush(&self) -> Result<WriteId, LogError> {
         let mut disk = self.disk();
         let queue = {
@@ -267,7 +268,8 @@ impl<F: Fs> RaftLog<F> {
         }
         let mut durable = None;
         let result = Self::write(&mut disk, queue, &mut durable);
-        drop(disk);
+        // Record the result before another flush can take the disk: a
+        // flush that then finds the queue empty reports this durability.
         let mut view = self.view();
         if let Some(durable) = durable {
             view.durable = view.durable.max(durable);
