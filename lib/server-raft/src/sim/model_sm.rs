@@ -41,9 +41,9 @@ use openraft::storage::RaftStateMachine;
 use crate::command::Op;
 use crate::encoding::Reader;
 use crate::encoding::decode_log_id;
-use crate::encoding::decode_membership_config;
+use crate::encoding::decode_stored_membership;
 use crate::encoding::encode_log_id;
-use crate::encoding::encode_membership_config;
+use crate::encoding::encode_stored_membership;
 use crate::encoding::put_bytes;
 use crate::encoding::put_u32;
 use crate::types::OrLogId;
@@ -234,7 +234,7 @@ impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for ModelSm<RT> {
                         EntryPayload::Membership(membership) => {
                             let stored =
                                 OrStoredMembership::new(Some(entry.log_id), membership.clone());
-                            live.insert(MEMBERSHIP_KEY.to_vec(), encode_membership(&stored));
+                            live.insert(MEMBERSHIP_KEY.to_vec(), encode_stored_membership(&stored));
                         }
                     }
                     live.insert(APPLIED_KEY.to_vec(), encode_log_id(&entry.log_id));
@@ -302,7 +302,8 @@ fn membership_of(contents: &Contents) -> OrStoredMembership {
     contents
         .get(MEMBERSHIP_KEY)
         .map(|bytes| {
-            decode_membership(bytes).unwrap_or_else(|error| panic!("bad membership key: {error}"))
+            decode_stored_membership(bytes)
+                .unwrap_or_else(|error| panic!("bad membership key: {error}"))
         })
         .unwrap_or_default()
 }
@@ -316,29 +317,6 @@ fn meta_of(contents: &Contents) -> OrSnapshotMeta {
 
 // The encodings of the system keys and of a snapshot. Integers are
 // little-endian; lengths are u32.
-
-fn encode_membership(stored: &OrStoredMembership) -> Vec<u8> {
-    let mut out = Vec::new();
-    match stored.log_id() {
-        Some(log_id) => {
-            out.push(1);
-            out.extend(encode_log_id(log_id));
-        }
-        None => out.push(0),
-    }
-    encode_membership_config(&mut out, stored.membership());
-    out
-}
-
-fn decode_membership(bytes: &[u8]) -> Result<OrStoredMembership, io::Error> {
-    let mut reader = Reader(bytes);
-    let log_id = match reader.u8()? {
-        0 => None,
-        _ => Some(decode_log_id(&mut reader)?),
-    };
-    let membership = decode_membership_config(&mut reader)?;
-    Ok(OrStoredMembership::new(log_id, membership))
-}
 
 fn encode_contents(contents: &Contents) -> Vec<u8> {
     let mut out = Vec::new();

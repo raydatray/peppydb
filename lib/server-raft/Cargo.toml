@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+engine = { path = "../engine" }
 futures-util.workspace = true
 openraft.workspace = true
 openraft-rt-tokio.workspace = true
@@ -15,6 +16,7 @@ server-raft-log = { path = "../server-raft-log" }
 thiserror.workspace = true
 
 [dev-dependencies]
+engine = { path = "../engine", features = ["sim"] }
 openraft-rt-sim.workspace = true
 server-raft-log = { path = "../server-raft-log", features = ["sim"] }
 tempfile.workspace = true
