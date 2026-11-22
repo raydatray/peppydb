@@ -168,8 +168,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl<RT: AsyncRuntime, F: Fs> Shared<RT, F> {
     /// Flush, then fire every callback whose write is durable; after a
-    /// failure, fire every waiting callback with the error.
-    fn flush_and_complete(&self) {
+    /// failure, fire every waiting callback with the error. Returns the
+    /// flush's result.
+    fn flush_and_complete(&self) -> Result<WriteId, LogError> {
         let result = self.log.flush();
         let durable = self.log.durable();
         let (done, failed) = {
@@ -187,12 +188,19 @@ impl<RT: AsyncRuntime, F: Fs> Shared<RT, F> {
         for (_, callback) in done {
             callback.io_completed(Ok(()));
         }
-        if let Err(error) = result {
+        if let Err(error) = &result {
             let message = error.to_string();
             for (_, callback) in failed {
                 callback.io_completed(Err(io::Error::other(message.clone())));
             }
         }
+        result
+    }
+
+    /// One flush by the driver. A failure reaches the waiting callbacks,
+    /// and openraft stops the node.
+    fn drive(&self) {
+        let _ = self.flush_and_complete();
     }
 
     /// Ask the driver to make `id` durable, firing `callback` then.
@@ -209,7 +217,7 @@ impl<RT: AsyncRuntime, F: Fs> Shared<RT, F> {
             Flusher::Task { max_delay, .. } => {
                 let max = max_delay.as_micros() as u64;
                 if max == 0 {
-                    self.flush_and_complete();
+                    self.drive();
                     return;
                 }
                 let delay = Duration::from_micros(lock(&self.rng).below(max + 1));
@@ -217,7 +225,7 @@ impl<RT: AsyncRuntime, F: Fs> Shared<RT, F> {
                 // Detached: a later flush covers this one if it is lost.
                 let _flush = RT::spawn(async move {
                     RT::sleep(delay).await;
-                    shared.flush_and_complete();
+                    shared.drive();
                 });
             }
         }
@@ -239,9 +247,9 @@ impl<RT: AsyncRuntime, F: Fs> Shared<RT, F> {
                 }
                 wake.work = false;
             }
-            self.flush_and_complete();
+            self.drive();
         }
-        self.flush_and_complete();
+        self.drive();
     }
 }
 
@@ -327,12 +335,17 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
     }
 
     /// Make every write queued so far durable, now: the hook of a
-    /// state-machine checkpoint (plan 0025, decision 2).
+    /// state-machine checkpoint (plan 0025, decision 2). Writes queued
+    /// while it runs are not its concern; the flusher thread may make
+    /// them durable at the same time. It fails only if the log failed.
     pub fn sync(&self) -> Result<(), io::Error> {
-        self.shared.flush_and_complete();
-        match self.shared.log.durable() >= self.shared.log.submitted() {
+        let target = self.shared.log.submitted();
+        let durable = self.shared.flush_and_complete().map_err(to_io)?;
+        match durable >= target {
             true => Ok(()),
-            false => Err(io::Error::other("the Raft log failed")),
+            false => Err(io::Error::other(format!(
+                "write {target} is not durable after a flush that reported write {durable}"
+            ))),
         }
     }
 

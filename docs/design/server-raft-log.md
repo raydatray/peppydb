@@ -98,6 +98,10 @@ committed log id) to its readable view at once and queues it with a
   the group is synced first, then the operation runs with its own syncs.
 - **No write is durable while an earlier one is lost.** In particular, no
   write after a truncation is durable before the truncation is.
+- **A flush covers every write submitted before it,** even when several
+  threads flush at once. A flush records what it made durable before it
+  releases the disk, so a flush that finds the queue already taken still
+  reports the other flush's writes as durable.
 - **Truncation works from the end backward:** it deletes the segments
   that start above the cut, syncing the directory after each, then
   shortens the segment that holds the first removed entry and syncs it. A
@@ -179,7 +183,11 @@ would report that as corruption, as the engine WAL does.
   blocking pool with the thread driver.
 - **A failed write or sync** fails every waiting callback and every later
   write, so openraft stops the node (fail-stop).
-- **`sync`** flushes inline: the state machine's checkpoint hook.
+- **`sync`** flushes inline: the state machine's checkpoint hook. It
+  waits for the writes queued before the call, not for writes that
+  arrive while it runs, and it fails only if the log failed. A false
+  failure here is fatal: openraft stops a node whose snapshot build
+  fails.
 
 ## Guarantees and tests
 
@@ -188,9 +196,9 @@ would report that as corruption, as the engine WAL does.
 | 1. Frames and headers round-trip, padded or not; damaged, cut, out-of-bounds, or non-zero-padded frames do not decode; segments written before the extraction are unchanged. | `lib/wal-segments/src/tests.rs`; `lib/engine-wal/src/tests/record.rs`: `segments_from_before_wal_segments_are_unchanged` |
 | 2. `SimFs` loses unsynced bytes and names, tears tails to a prefix, and fails chosen operations; `RealFs` behaves the same without crashes. | `lib/server-raft-log/src/tests/fs.rs` |
 | 3. Recovery repairs a torn tail at every byte, rejects corruption, removes a torn last header, finishes an interrupted purge, and never returns a committed log id below the purge point; a `state` write cut anywhere leaves the old or new state. | `lib/server-raft-log/src/tests/disk.rs` |
-| 4. Writes are readable at once and durable after a flush, in order; appends and commit points share one sync; a failure is sticky and reports nothing durable after it. | `lib/server-raft-log/src/tests/log.rs` |
+| 4. Writes are readable at once and durable after a flush, in order; appends and commit points share one sync; a failure is sticky and reports nothing durable after it; a flush that races another reports every write submitted before it as durable. | `lib/server-raft-log/src/tests/log.rs` |
 | 5. After a crash at every operation of scripted workloads (including a truncation followed by appends), and at random points of 2,000 random workloads, recovery returns a valid prefix; a log that reports durability early fails the oracle; on real files a write cut at every byte is repaired away. | `lib/server-raft-log/src/tests/crash.rs` |
-| 6. `DiskLog` passes openraft's storage suite over `SimFs` and over real files; a failed sync fails the waiting callback and every later write, and stops a node. | `lib/server-raft/src/tests/disk_log.rs` |
+| 6. `DiskLog` passes openraft's storage suite over `SimFs` and over real files; a failed sync fails the waiting callback and every later write, and stops a node; `sync` succeeds beside appends and the flusher thread. | `lib/server-raft/src/tests/disk_log.rs` |
 | 7. The simulator's safety checks hold with the real log over `SimFs`, with torn tails on crashes, and with injected file-system failures that stop only the failing node. | `lib/server-raft/src/tests/simulator.rs`, `tests/sweep.rs` |
 
 ## Measurements
