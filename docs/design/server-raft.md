@@ -7,7 +7,9 @@ the on-disk Raft log, and the deterministic simulator that checks Raft's
 safety properties. [Plan 0028](../plans/0028-server-raft-core.md) built
 it, as milestone S4 of the [server roadmap](../plans/0025-server-roadmap.md);
 [plan 0029](../plans/0029-server-raft-log.md) added the on-disk log (S5),
-described in [server Raft log](server-raft-log.md).
+described in [server Raft log](server-raft-log.md), and
+[plan 0030](../plans/0030-server-raft-state-machine.md) the state machine
+over the engine (S6).
 
 Related documents: [server](server.md) (the component that uses it),
 [engine external-log mode](engine.md#external-log-mode) (the contract
@@ -30,7 +32,7 @@ component, and its crates follow the internal naming rule
 | `server` (entry) | `lib/server` | `//bin/peppydb:` | Plan 0026; peer transport in S7 |
 | `server-raft` | `lib/server-raft` | `server`; the `:server-raft-sim` variant to `server`'s unit tests | This document |
 | `server-raft-log` | `lib/server-raft-log` | `server-raft`; the `:server-raft-log-sim` variant (`SimFs`) to `server-raft`'s unit tests | S5, plan 0029: the [on-disk Raft log](server-raft-log.md) |
-| `server-keys` | `lib/server-keys` | `server`, `server-raft` | S6: the key layout, moved out of `server` |
+| `server-keys` | `lib/server-keys` | `server`, `server-raft` | S6, plan 0030: the key layout and the Raft system keys |
 | `raft-proto` | `proto/raft/v1/rust` | `server` | S7: `peppydb.raft.v1` |
 
 ```mermaid
@@ -39,7 +41,9 @@ flowchart TB
     sraft --> openraft["openraft =0.10.0"]
     sraft --> srlog["server-raft-log"]
     srlog --> seg["wal-segments"]
-    sraft -. "S6" .-> engine["engine"]
+    sraft --> engine["engine (External)"]
+    sraft --> keys["server-keys"]
+    server --> keys
     server -. "S7: implements Transport" .-> sraft
 ```
 
@@ -47,8 +51,13 @@ flowchart TB
 
 - **openraft stays inside `server-raft`.** `server` sees only
   `server-raft`'s types, so an openraft upgrade (roadmap decision 9)
-  changes one crate. `node.rs`, `error.rs`, `network.rs`, and
-  `transport.rs` are the only modules that name openraft's API types.
+  changes one crate. `node.rs`, `error.rs`, `network.rs`,
+  `transport.rs`, and the storage adapters (`disk_log.rs`, `db_sm.rs`,
+  `db_snapshot.rs`) are the only production modules that name openraft's
+  API types.
+- **`server-keys` depends on neither tonic nor openraft.** It holds the
+  key names and the applied log id's value layout; the membership value's
+  encoding stays in `server-raft`, which owns openraft's membership type.
 - **`server-raft-log` does not depend on openraft.** `server-raft` adapts
   its API to `RaftLogStorage`, so the on-disk format and its crash tests
   do not change on an openraft upgrade.
@@ -66,7 +75,7 @@ peppydb implements, and peppydb calls a few entry points.
 | peppydb implements | openraft trait | Built in |
 | --- | --- | --- |
 | The Raft log | `RaftLogStorage` | `MemLog` (model, S4); `DiskLog` over `server-raft-log` (S5) |
-| The state machine | `RaftStateMachine` | `ModelSm` (model, S4); `DbStateMachine` over `engine::Db` (S6) |
+| The state machine | `RaftStateMachine` | `ModelSm` (model, S4); `DbStateMachine` over `engine::Db` (S6, plan 0030) |
 | The network | `RaftNetworkFactory` | The network adapter over `Transport` (S4); gRPC in `server` (S7) |
 
 ## Type configuration
@@ -244,6 +253,60 @@ bug runs on it, and `LogKind::Mem` runs the simulator over it.
 This is openraft's "transient state machine" pattern with
 `save_committed` implemented, which matches External mode.
 
+`DbStateMachine` now exists, and the simulator runs it by default.
+`ModelSm` stays as the reference model (`SmKind::Model`).
+
+## `DbStateMachine`
+
+`DbStateMachine<RT>` (`db_sm.rs`, `db_snapshot.rs`) is openraft's
+`RaftStateMachine` over one `engine::Db` in `Mode::External`
+([engine external-log mode](engine.md#external-log-mode)).
+
+- **Raft index `i` is engine sequence `i + 1`.** openraft's log starts at
+  index 0 (the initial membership); the engine's sequences start at 1,
+  with 0 meaning nothing applied. Each committed entry is one
+  `Db::apply(i + 1, ops)` (roadmap decision 1, shifted by one).
+- **Every entry writes the applied log id** (`APPLIED_KEY`, as
+  `server_keys::encode_log_id`); a membership entry writes
+  `MEMBERSHIP_KEY` too; a blank entry writes only the applied log id.
+  `Db::apply` is all or nothing after a crash, so the data and openraft's
+  applied state roll back together. `applied_state` reads both keys.
+- **Commands carry stored keys.** `server` maps user keys to `0x01 ‖ key`
+  before it proposes; the state machine applies operations as they are.
+  An entry the engine refuses (a key past the limits) stops the state
+  machine, so `server` must check limits before it proposes (S7).
+- **The applier.** `Applier::Thread` runs `Db::apply` on a thread named
+  `raft-applier` (roadmap decision 14): openraft's state-machine worker
+  hands it a batch and awaits a oneshot, and each entry's responder
+  resolves as the entry applies. `Applier::Inline` applies on the caller,
+  for the simulator's single-threaded runtime.
+- **Compaction is openraft's snapshot policy.** `build_snapshot` pauses
+  the applier at an entry boundary, commits a checkpoint with
+  `checkpoint_with` and the log's sync hook (decision 2), reads the
+  metadata from the system keys, and writes the committed image with
+  `write_snapshot`. openraft then purges the log below the snapshot.
+- **The committed checkpoint is the current snapshot.**
+  `get_current_snapshot` writes it on demand with the metadata kept from
+  the last build, install, or open (right after open, the database is at
+  its committed checkpoint).
+- **Install syncs the log first,** then `Db::install_snapshot`, then checks
+  the installed system keys against the metadata. In-progress readers
+  keep the old `Arc<Db>` until they finish.
+- **Engine calls block,** so with the applier thread, snapshot work runs
+  on the blocking pool; inline in the simulator.
+- **A failed apply or install stops the state machine;** every later
+  call fails, and openraft stops the node.
+- **Snapshot data is a `Vec<u8>` of the whole store image.** It must move
+  to a temporary file before databases grow past test sizes, and no later
+  than S8.
+
+**The sync hook and compaction.** With the applier paused while a
+checkpoint commits, a checkpoint never holds part of an entry, and a
+state machine that is ahead of its own log is allowed; the crash tests
+pass for compaction even with a hook that does nothing. The hook stays,
+as the engine's owner contract asks. A snapshot install does need it: the
+negative control without it breaks the log order.
+
 ## The simulator
 
 One seed fixes a whole run: the cluster size (3 or 5), fault rates,
@@ -260,6 +323,12 @@ scheduling and a virtual clock, so a run is reproducible and fast.
 | File-system failure: a node's next operation fails, the node stops (fail-stop) and is restarted | Scheduler, with `SimConfig::sync_failures` |
 | Snapshots, log purges, snapshot installs | Scheduler and openraft's policy (small thresholds) |
 | Leader transfer | Scheduler |
+
+**The state machine.** Nodes run `DbStateMachine` over an external `Db`
+on a `SimStore` by default (`sim/sim_sm.rs`, `SmKind::Db`), with
+`Applier::Inline` and a 256 KiB circular buffer so pages reach the store.
+A crash keeps the store's durable image with torn writes and kills the
+old store; a restart reopens the engine from it.
 
 **The log.** Nodes run `DiskLog` over `SimFs` by default
 (`sim/sim_log.rs`, `LogKind::Disk`), flushed by a seeded task. A crash
@@ -333,18 +402,21 @@ Test paths are relative to `lib/server-raft/src/`.
 | 4. Every peer message converts to openraft's type and back unchanged; commands travel as codec bytes. | `transport.rs` tests |
 | 5. A cluster elects a leader, replicates, and applies writes; followers answer with a leader hint; read barriers cover acknowledged writes; leadership moves on request. | `tests/facade.rs` |
 | 6. The network's faults occur and a cluster still converges; a partitioned node catches up. A seed fixes a run, and every fault type occurs. | `sim/network.rs` tests; `tests/simulator.rs` |
-| 7. Every safety check holds across 400 seeds of 3 and 5 nodes under every fault, over the real log with torn tails, and the cluster recovers after healing; both logs run safely. | `tests/sweep.rs`: `default_tier_*`, `regression_seeds`; `tests/simulator.rs`: `both_logs_run_safely` |
-| 10. A file-system failure stops only the failing node; the cluster stays safe and converges after it restarts. | `tests/disk_log.rs`: `a_failed_sync_stops_the_node`; `tests/simulator.rs`: `injected_sync_failures_stop_only_the_failing_node` |
+| 7. Every safety check holds across 400 seeds of 3 and 5 nodes under every fault, over the real log and the real engine with torn writes, and the cluster recovers after healing; both logs and both state machines run safely. | `tests/sweep.rs`: `default_tier_*`, `regression_seeds`; `tests/simulator.rs`: `both_logs_run_safely`, `both_state_machines_run_safely` |
 | 8. Each check detects its violation; a log that loses votes is caught. | `sim/checker.rs` tests; `tests/simulator.rs`: `a_log_that_loses_votes_is_caught` |
 | 9. An isolated leader is replaced and rejoins as a follower; with pre-vote a rejoining node does not disrupt the leader; a write discarded on a leader change reports `OutcomeUnknown` and applies nowhere. | `tests/scenarios.rs` |
+| 10. A file-system failure stops only the failing node; the cluster stays safe and converges after it restarts. | `tests/disk_log.rs`: `a_failed_sync_stops_the_node`; `tests/simulator.rs`: `injected_sync_failures_stop_only_the_failing_node` |
+| 11. `DbStateMachine` applies entries with the system keys, skips redeliveries, rolls back to its committed checkpoint on a crash, stops on an entry it cannot apply, and applies in order on its thread; with `DiskLog` it passes openraft's storage suite on simulated and real files; snapshots build, install, survive a crash, and are refused when the metadata does not match. | `tests/db_sm.rs` |
+| 12. With the log and the state machine cut at every operation of a compaction and of a snapshot install, then crashed with torn writes, every durable entry survives, the state machine is at or beyond the purge point with matching contents, redelivery catches up, and openraft starts; without the sync hook, the install breaks the log order. | `tests/crash_storage.rs` |
 
 ## Not guaranteed, and limits
 
-- **`ModelSm` is a model.** It keeps the contract of the S6 state
-  machine; `DbStateMachine` must still pass its own crash tests and run
-  in the simulator. The log is real since S5, over a simulated disk whose
-  limits [server Raft log](server-raft-log.md#the-file-system-trait)
-  records.
+- **Simulated disks.** The log and the engine are the real code since S5
+  and S6, over `SimFs` and `SimStore`, whose limits
+  [server Raft log](server-raft-log.md#the-file-system-trait) and
+  [BF-Tree persistence](bf-tree-persistence.md) record.
+- **Snapshots in memory.** Snapshot data is a `Vec<u8>` holding the whole
+  store image (above).
 - **Membership changes are not exercised.** Clusters are formed once with
   static voters; S8 adds changes.
 - **Reads are checked per key, in real time,** not for full
@@ -375,6 +447,47 @@ machine:
 | Default tier, debug | 400 seeds and the regression seed in 18 s wall (124 s CPU) |
 | Long tier, release, 12 threads | Base 976989910000: 4 seeds panicked (the install-snapshot bug above, also with `MemLog`); after the fix, 100,000 seeds in 121 s, none failing. Base 995530922000: 100,000 seeds in 125 s, none failing |
 
+Over the real log and the real engine (`DbStateMachine` over `SimStore`,
+plan 0030), 2026-11-21, same machine:
+
+| Run | Result |
+| --- | --- |
+| Default tier, debug | 400 seeds and the regression seed in 19 s wall (130 s CPU) |
+| Long tier, release, 12 threads | Base 87708801000: 100,000 seeds in 160 s, none failing. Base 264633921000: 100,000 seeds in 165 s, none failing |
+
+**Three nodes on real files** (`tests::bench::bench_three_nodes_on_disk`,
+release, 2 s per run, 100-byte writes, 4 worker threads per node
+runtime, one machine and one APFS disk whose full flush takes about
+5 ms):
+
+| Configuration | Writers | Writes/s | p50 | p99 | Timer late, p99 / max | Elections |
+| --- | --- | --- | --- | --- | --- | --- |
+| Shared runtime, `ModelSm` | 1 | 90 | 12.0 ms | 17.6 ms | 2.1 / 2.2 ms | 0 |
+| Runtime per node, `ModelSm` | 1 | 92 | 11.9 ms | 18.0 ms | 3.0 / 7.6 ms | 0 |
+| Runtime per node, engine | 1 | 92 | 11.9 ms | 18.1 ms | 3.0 / 7.1 ms | 0 |
+| Shared runtime, `ModelSm` | 64 | 3,221 | 20.0 ms | 31.8 ms | 3.0 / 5.5 ms | 0 |
+| Runtime per node, `ModelSm` | 64 | 3,254 | 20.0 ms | 32.1 ms | 3.6 / 5.6 ms | 0 |
+| Runtime per node, engine | 64 | 2,076 | 24.1 ms | 94.0 ms | 3.1 / 11.6 ms | 0 |
+| Shared runtime, `ModelSm` | 256 | 12,189 | 20.0 ms | 48.8 ms | 2.6 / 14.8 ms | 0 |
+| Runtime per node, `ModelSm` | 256 | 12,069 | 20.1 ms | 63.4 ms | 3.5 / 9.3 ms | 0 |
+| Runtime per node, engine | 256 | 5,127 | 31.9 ms | 174.2 ms | 3.5 / 13.1 ms | 0 |
+
+- **Heartbeats are not delayed enough to matter.** Timer lateness on each
+  node's runtime stays within a few milliseconds at the 99th percentile
+  and under 16 ms at worst, against a 50 ms heartbeat and a 150 to 300 ms
+  election timeout; no run had an election. Inside one process openraft
+  does not need a runtime separate from gRPC yet (roadmap decision 14).
+- **The engine limits throughput at high load on this machine.**
+  `tests::bench::bench_engine_apply_beside_a_syncing_file` shows why:
+  `Db::apply` takes 2 µs when the tree grows, but 69 µs beside another
+  file that syncs on the same disk; with a fixed set of keys it stays at
+  0.2 µs either way. On macOS, writes that grow the store file wait
+  behind other files' full flushes, so the applier falls behind the log.
+  The likely cause is `FileStore::alloc`, which extends the file one page
+  at a time; extending it in larger steps is a candidate fix. Linux
+  numbers come from the `raft-perf` suite on GCP
+  ([remote benchmarks](remote-benchmarks.md#usage)).
+
 The log's own benchmarks are in
 [server Raft log](server-raft-log.md#measurements).
 
@@ -382,11 +495,14 @@ The log's own benchmarks are in
 
 - **S5 (done, plan 0029):** `DiskLog` over `server-raft-log` replaces
   `MemLog`, and the simulator runs it over `SimFs`.
-- **S6:** `DbStateMachine` over `engine::Db` in `Mode::External` replaces
-  `ModelSm`, with the applier thread (roadmap decision 14) and the system
-  keys moved to `server-keys`.
+- **S6 (done, plan 0030):** `DbStateMachine` over `engine::Db` in
+  `Mode::External` replaces `ModelSm`, with the applier thread and the
+  system keys in `server-keys`; the simulator runs it over `SimStore`.
+- **Soon:** snapshot data in a temporary file instead of a `Vec<u8>`.
 - **S7:** `server` implements `Transport` over gRPC with `raft.v1`, and
-  `serve` builds a `RaftNode`.
+  `serve` builds a `RaftNode` over `DiskLog` and `DbStateMachine`; the
+  format marker moves under Raft; `server` checks key and value limits
+  before it proposes.
 - **Later:** leader leases for reads, membership changes, chunked
   snapshots, metrics. None of these changes `RaftNode`'s signature.
 

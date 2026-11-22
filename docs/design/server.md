@@ -36,11 +36,11 @@ flowchart LR
 | `lib/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
 | `lib/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
 | `lib/server/src/kv.rs`, `admin.rs` | The two services |
-| `lib/server/src/keys.rs` | The stored key layout and the format marker |
+| `lib/server/src/keys.rs` | The format check and the tonic mapping over the key layout in `lib/server-keys` (plan 0030), which `server-raft` shares |
 | `lib/server/src/status.rs` | `engine::Error` to gRPC status |
 | `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
 | `lib/server/src/tests/` | In-process tests and the process tests |
-| `lib/server-raft` | Crate `server-raft`: openraft behind peppydb types, storage models, and the Raft simulator ([server Raft](server-raft.md)); not used by `serve` until roadmap S7 |
+| `lib/server-raft` | Crate `server-raft`: openraft behind peppydb types, `DiskLog` and `DbStateMachine`, storage models, and the Raft simulator ([server Raft](server-raft.md)); not used by `serve` until roadmap S7 |
 | `bin/peppydb-load`, `lib/load` | The load generator (Go) |
 | `tools/gen-proto`, `tools/protogen` | Code generation |
 

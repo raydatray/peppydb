@@ -124,7 +124,7 @@ commits or reserved plan numbers.
 | S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
 | S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix compaction, torn-tail repair; a crash model like the engine's. |
-| S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. |
+| S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. [Plan 0030](0030-server-raft-state-machine.md). |
 | S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. |
 | S8. Membership and fault testing | S7, S3 | Add and remove nodes (learner first, then single-server changes); chunked, resumable snapshot transfer; randomized fault runs checked for linearizability. |
 | S9. Follower reads (optional) | S7, engine MVCC | Snapshot reads in the engine (its own engine stack; recommended MVCC), a read barrier, and bounded-staleness or read-index follower reads. |
@@ -181,10 +181,12 @@ later milestones add mechanisms rather than reshape earlier code:
 These hold across the stacks. A stack that needs to change one must say so
 in its plan.
 
-1. **The Raft index is the engine sequence.** Each committed data entry at
-   index `i` becomes `Db::apply(i, ops)`. Entries that carry no data (the
-   leader's no-op, configuration changes) leave gaps, which `apply`
-   allows. After a restart the driver redelivers from `applied_seq() + 1`.
+1. **The Raft index, plus one, is the engine sequence.** Each committed
+   entry at index `i` becomes `Db::apply(i + 1, ops)`: openraft's log
+   starts at index 0, the engine's sequences at 1. Every entry, the
+   leader's no-op and configuration changes included, writes the applied
+   log id, so none leaves a gap (plan 0030). After a restart openraft
+   redelivers from the applied log id that the system keys report.
 2. **The engine runs in `Mode::External`.** One fsync per write, in the
    Raft log. Compaction calls
    `checkpoint_with(|seq| raft_log.sync_to(seq))` and then discards
@@ -513,8 +515,17 @@ next to the engine's numbers.
   ([plan 0029](0029-server-raft-log.md), recorded in the
   [server Raft log design](../design/server-raft-log.md)).
 
-The next step is the S6 plan: the replicated state machine over
-`engine::Db` in external mode.
+- [x] Draft and agree on [the replicated state machine](0030-server-raft-state-machine.md)
+  (S6).
+- [x] Implement and verify the replicated state machine stack, completing
+  S6 ([plan 0030](0030-server-raft-state-machine.md), recorded in the
+  [server Raft design](../design/server-raft.md#dbstatemachine)).
+
+The next step, in the default order, is S2: operability, with remote
+benchmarks on Linux. They also answer plan 0030's open measurement: how
+much the engine's applies slow beside the Raft log's syncs on a Linux
+disk. Two follow-ups are recorded: snapshot data in a file instead of
+memory, and extending the store file in larger steps.
 
 ## Sources
 

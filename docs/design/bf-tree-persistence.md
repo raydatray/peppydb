@@ -1598,7 +1598,8 @@ Test paths are relative to each crate's `src/`. Tree tests are in
 | After any crash that the fault store injects, including deaths during operations and during open, and commit faults before and after the superblock copy lands, `open` succeeds at the last durable commit, `applied_seq` equals its `N`, the tree equals the oracle at `N`, and replay of all, some, or none of the lost operations matches the oracle, across many generations on the same disk | `tests/crash.rs`: `crashes_recover_the_committed_state_with_a_tiny_buffer`, `crashes_recover_the_committed_state_with_a_large_buffer` |
 | With checkpoints beside writers, after a crash each key holds the oracle's value at some sequence in `[N, last]`, and replay above `N` in sequence order gives the full oracle | `tests/crash.rs`: `crashes_with_checkpoints_beside_writers_recover_after_replay` |
 
-The fault store (`FaultStore` in `tests/crash.rs`) keeps a durable image
+The fault store (`FaultStore` in `tests/crash.rs`, now `SimStore` in
+`bf-tree-store` behind its `sim` feature, plan 0030) keeps a durable image
 and the writes since the last sync. A crash loses, lands, or tears each
 later write at 64-byte sectors. The store can fail a commit before or after
 its superblock copy lands, and it can fail every call after the `k`-th,
