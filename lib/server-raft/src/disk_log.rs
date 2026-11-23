@@ -43,6 +43,7 @@ use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
 use openraft::type_config::TypeConfigExt;
 use openraft::vote::RaftLeaderId;
+use openraft_rt_tokio::TokioRuntime;
 use server_raft_log::EntryKind;
 use server_raft_log::Fs;
 use server_raft_log::LogEntry;
@@ -271,7 +272,7 @@ impl<RT: AsyncRuntime, F: Fs> Drop for Owner<RT, F> {
 
 /// openraft's log storage over the on-disk Raft log. Clones share one
 /// log.
-pub struct DiskLog<RT: AsyncRuntime, F: Fs = RealFs> {
+pub struct DiskLog<RT: AsyncRuntime = TokioRuntime, F: Fs = RealFs> {
     shared: Arc<Shared<RT, F>>,
     _owner: Arc<Owner<RT, F>>,
     _rt: PhantomData<fn() -> RT>,
@@ -284,6 +285,14 @@ impl<RT: AsyncRuntime, F: Fs> Clone for DiskLog<RT, F> {
             _owner: Arc::clone(&self._owner),
             _rt: PhantomData,
         }
+    }
+}
+
+impl DiskLog<TokioRuntime, RealFs> {
+    /// Open a production Raft log in `dir` on the real filesystem with its
+    /// dedicated flusher thread.
+    pub fn open_real(dir: &Path, options: LogOptions) -> Result<Self, io::Error> {
+        Self::open(RealFs, dir, options, Flusher::Thread)
     }
 }
 
@@ -332,6 +341,12 @@ impl<RT: AsyncRuntime, F: Fs> DiskLog<RT, F> {
             _owner: owner,
             _rt: PhantomData,
         })
+    }
+
+    /// A sync hook suitable for [`crate::DbStateMachine::open`].
+    pub fn sync_hook(&self) -> crate::db_sm::SyncHook {
+        let log = self.clone();
+        Arc::new(move || log.sync())
     }
 
     /// Make every write queued so far durable, now: the hook of a
