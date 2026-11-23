@@ -21,6 +21,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 engine = { path = "../engine", features = ["fault-injection"] }
+futures-util.workspace = true
 tempfile.workspace = true
 
 [lints]
