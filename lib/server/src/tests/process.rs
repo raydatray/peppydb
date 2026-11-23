@@ -39,7 +39,7 @@ fn child_server() {
 }
 
 /// A child `peppydb serve` process.
-struct ServerProcess {
+pub(super) struct ServerProcess {
     child: Child,
     stderr: Arc<Mutex<String>>,
 }
@@ -47,10 +47,17 @@ struct ServerProcess {
 impl ServerProcess {
     /// Start `peppydb serve --data-dir <dir>` on a free loopback port.
     fn spawn(dir: &Path) -> (Self, mpsc::Receiver<SocketAddr>) {
-        let args = format!(
-            "serve\n--data-dir\n{}\n--listen\n127.0.0.1:0",
-            dir.display()
-        );
+        Self::spawn_args(&[
+            "serve".to_owned(),
+            "--data-dir".to_owned(),
+            dir.display().to_string(),
+            "--listen".to_owned(),
+            "127.0.0.1:0".to_owned(),
+        ])
+    }
+
+    pub(super) fn spawn_args(args: &[String]) -> (Self, mpsc::Receiver<SocketAddr>) {
+        let joined = args.join("\n");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -58,7 +65,7 @@ impl ServerProcess {
                 "--ignored",
                 "--nocapture",
             ])
-            .env(CHILD_ARGS, args)
+            .env(CHILD_ARGS, joined)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -82,6 +89,15 @@ impl ServerProcess {
         (Self { child, stderr }, addr_rx)
     }
 
+    /// Start a child with custom args and wait until it listens.
+    pub(super) fn start_args(args: &[String]) -> (Self, SocketAddr) {
+        let (child, addr) = Self::spawn_args(args);
+        let addr = addr
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("no address; stderr:\n{}", child.stderr()));
+        (child, addr)
+    }
+
     /// Start a child and wait until it listens.
     fn start(dir: &Path) -> (Self, SocketAddr) {
         let (child, addr) = Self::spawn(dir);
@@ -91,16 +107,16 @@ impl ServerProcess {
         (child, addr)
     }
 
-    fn stderr(&self) -> String {
+    pub(super) fn stderr(&self) -> String {
         self.stderr.lock().unwrap().clone()
     }
 
-    fn sigkill(&mut self) {
+    pub(super) fn sigkill(&mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
 
-    fn sigterm(&self) {
+    pub(super) fn sigterm(&self) {
         let status = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status()
@@ -108,7 +124,7 @@ impl ServerProcess {
         assert!(status.success());
     }
 
-    fn wait(&mut self) -> ExitStatus {
+    pub(super) fn wait(&mut self) -> ExitStatus {
         for _ in 0..600 {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
