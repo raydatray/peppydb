@@ -1,0 +1,18 @@
+# peppydb-gateway: thin CLI wrapper around lib/gateway (plan 0033).
+go_binary(
+    name = "peppydb-gateway",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    cgo_enabled = False,
+    deps = [
+        "//lib/gateway:gateway",
+    ],
+)
+
+go_test(
+    name = "peppydb-gateway-test",
+    srcs = glob(["*.go"]),
+    cgo_enabled = False,
+    deps = [
+        "//lib/gateway:gateway",
+    ],
+)
