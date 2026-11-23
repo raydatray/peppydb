@@ -120,7 +120,7 @@ commits or reserved plan numbers.
 | Milestone | Builds on | Reviewable outcome |
 | --- | --- | --- |
 | S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppydb-load` (renamed from `peppy-load` in plan 0027), an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
-| S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppydb-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). |
+| S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppydb-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). [Plan 0031](0031-server-operability.md). |
 | S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
 | S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. [Plan 0028](0028-server-raft-core.md). |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix purge, torn-tail repair; a power-loss crash model, stricter than the engine's; the simulator runs over it. [Plan 0029](0029-server-raft-log.md). |
@@ -522,11 +522,18 @@ next to the engine's numbers.
   S6 ([plan 0030](0030-server-raft-state-machine.md), recorded in the
   [server Raft design](../design/server-raft.md#dbstatemachine)).
 
-The next step, in the default order, is S2: operability, with remote
-benchmarks on Linux. They also answer plan 0030's open measurement: how
-much the engine's applies slow beside the Raft log's syncs on a Linux
-disk. Two follow-ups are recorded: snapshot data in a file instead of
-memory, and extending the store file in larger steps.
+- [x] Draft and agree on [server operability](0031-server-operability.md) (S2).
+- [x] Implement and verify the server operability stack, completing S2
+  ([plan 0031](0031-server-operability.md), recorded in
+  [server](../design/server.md) and
+  [remote benchmarks](../design/remote-benchmarks.md); live GCP runs of
+  `server-perf` and `raft-perf` are run by the user from the Linux build host).
+
+The next step, in the default order, is S7: the multi-node server over
+`peppydb.raft.v1`, wiring `peppydb serve` to `server-raft`. Two follow-ups
+from plan 0030 remain open: snapshot data in a file instead of memory (no
+later than S8), and extending the store file in larger steps if Linux
+`raft-perf` confirms macOS's finding.
 
 ## Sources
 

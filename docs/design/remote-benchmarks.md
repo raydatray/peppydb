@@ -226,6 +226,7 @@ tools/gcp-bench run                                 # the 0023 suite, reference 
 tools/gcp-bench run --step engine-bench --profile record,offcpu
 PEPPYDB_BENCH_MILLIS=5000 tools/gcp-bench run --step bf-tree-bench
 tools/gcp-bench run --suite raft-perf               # the Raft benchmarks (plans 0029, 0030)
+tools/gcp-bench run --suite server-perf             # separate server and client VMs (plan 0031)
 tools/gcp-bench cleanup                             # delete leftovers
 ```
 
@@ -235,6 +236,20 @@ tools/gcp-bench cleanup                             # delete leftovers
 | --- | --- |
 | `bf-io-perf` (default) | Direct-I/O preflight checks, then plan 0023's BF-Tree, circular-buffer, engine, and WAL benchmarks |
 | `raft-perf` | The Raft log alone, three nodes over the real log and the real engine (shared runtime and one runtime per node), and `Db::apply` beside a syncing file |
+| `server-perf` | Multi-VM (`# mode: client-server`): `peppydb serve` on a `c4d-standard-8-lssd` server VM and `peppydb-load` (`put` sweep, uniform `get`, `mixed:90` zipf, and `/metrics` scrapes) on a separate `n4-standard-8` client VM in the same zone |
+
+**Multi-VM runs (`# mode: client-server`).** A suite with `# mode: client-server`
+creates a `-server` VM (`--machine-type`, default `c4d-standard-8-lssd`) and a
+`-client` VM (`--client-machine-type`, default `n4-standard-8`) in the same
+`us-east1` zone. If the second VM hits a capacity error, the driver deletes
+the first VM and retries both in the next zone. Both VMs carry the same time
+limit, `DELETE` action, and `peppydb-bench=1` label; `on_exit`, preemption
+handling, and `cleanup` delete all created VMs. The server VM formats its
+Local SSD, starts the `server` line, and uploads its internal IP to
+`results/RUN_ID/server/ready`; the client VM polls `server/ready`, expands
+`$SERVER_ADDR` and `$METRICS_ADDR`, runs the workload steps, and uploads
+`results/RUN_ID/client/DONE`; the server VM then stops cleanly on `SIGTERM`
+and uploads `results/RUN_ID/server/DONE`.
 
 The three-node benchmark sizes each node's Tokio runtime to a quarter of
 the cores, 2 threads on `c4d-standard-8-lssd`, so three nodes and the

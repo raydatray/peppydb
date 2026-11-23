@@ -1,6 +1,6 @@
 # 0031: Server operability: streaming snapshots, metrics, and remote benchmarks
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S2.
 
@@ -204,7 +204,7 @@ sequenceDiagram
     participant D as tools/gcp-bench (driver)
     participant G as GCS bucket
     participant S as server VM (c4d-standard-8-lssd)
-    participant C as client VM (c4d-standard-8)
+    participant C as client VM (n4-standard-8)
 
     D->>G: upload artifacts/RUN/ (peppydb, peppydb-load, suite)
     D->>S: create in zone Z (max-run, DELETE)
@@ -237,7 +237,7 @@ sequenceDiagram
   firewall rules are added.
 - **Machine types:** Server uses `--machine-type` (default
   `c4d-standard-8-lssd` with Local SSD). Client uses `--client-machine-type`
-  (default `c4d-standard-8`, no Local SSD needed, so client skips `mkfs`).
+  (default `n4-standard-8`, no Local SSD needed, so client skips `mkfs`).
 - **Profiling:** `--profile` applies to the `peppydb serve` process on the
   server VM (`perf record`, `offcpu`, `stat`, `sched`). Sending `SIGTERM` to
   `peppydb serve` after `client/DONE` flushes profiler outputs cleanly.
@@ -404,17 +404,41 @@ None. Resolved in discussion:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] 1/8 Plan commit.
-- [ ] 2/8 `AdminService.Snapshot` proto and generated bindings.
-- [ ] 3/8 `AdminService.Snapshot` server implementation and tests.
-- [ ] 4/8 Server metrics and `--metrics-listen` HTTP endpoint.
-- [ ] 5/8 Multi-VM role coordination in `tools/gcp-bench` and `remote-bench.sh`.
-- [ ] 6/8 Offline multi-VM tests for `tools/gcp-bench`.
-- [ ] 7/8 `server-perf` benchmark suite and targets.
-- [ ] 8/8 Design docs and stack-wide verification.
+- [x] 2/8 `AdminService.Snapshot` proto and generated bindings.
+- [x] 3/8 `AdminService.Snapshot` server implementation and tests.
+- [x] 4/8 Server metrics and `--metrics-listen` HTTP endpoint.
+- [x] 5/8 Multi-VM role coordination in `tools/gcp-bench` and `remote-bench.sh`.
+- [x] 6/8 Offline multi-VM tests for `tools/gcp-bench`.
+- [x] 7/8 `server-perf` benchmark suite and targets.
+- [x] 8/8 Design docs and stack-wide verification.
+
+## Verification outcomes (2026-11-22)
+
+On macOS (Apple Silicon, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 41 Rust targets clean |
+| `tools/buck2 test -j 4 //bin/... //lib/... //proto/...` | Pass; 40 targets, 0 failures (`server-unittest`: 23 passed) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test ./...` | Pass |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (30 passed, no new `unsafe`) |
+| `sh tools/gcp/testing/test-remote.sh`, `sh tools/gcp/testing/test-driver.sh` | Pass (single-VM and multi-VM suites) |
+| `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench build --suite server-perf` and `--dry-run` | Stages `peppydb` and `peppydb-load`; dry-run creates and deletes `-server` and `-client` VMs in one zone. Live GCP runs (`server-perf`, `raft-perf`) are run by the user from the Linux build host |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`prometheus-client` and `parking_lot_core` build scripts:** Reindeer
+  warned about build scripts for both crates; added
+  `third-party/rust/fixups/{prometheus-client,parking_lot_core}/fixups.toml`
+  with `buildscript.run = true`.
+- **Fake `gcloud` VM cleanup on zone fallback:** During offline multi-VM
+  capacity-fallback tests, deleting the first VM in `us-east1-b` and
+  recreating it with the same name in `us-east1-c` initially reused the
+  old fake VM's `state/started` directory. Updated `tools/gcp/testing/bin/gcloud`
+  so `instances delete` terminates the fake VM process and removes its state
+  directory, matching real GCP.
 
 ## Agent notes
 

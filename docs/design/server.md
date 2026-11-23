@@ -35,7 +35,8 @@ flowchart LR
 | `proto/kv/v1/go` | Package `kvv1`: generated Go client and server |
 | `lib/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
 | `lib/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
-| `lib/server/src/kv.rs`, `admin.rs` | The two services |
+| `lib/server/src/kv.rs`, `admin.rs` | The two services (`KvService`, `AdminService` including streaming `Snapshot`) |
+| `lib/server/src/metrics.rs` | Prometheus metrics (`prometheus-client`) and the optional HTTP/1.1 `GET /metrics` listener |
 | `lib/server/src/keys.rs` | The format check and the tonic mapping over the key layout in `lib/server-keys` (plan 0030), which `server-raft` shares |
 | `lib/server/src/status.rs` | `engine::Error` to gRPC status |
 | `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
@@ -60,6 +61,7 @@ service KvService {
 service AdminService {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+  rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
 }
 ```
 
@@ -87,6 +89,23 @@ are `KvService` and `AdminService`.
 - **Outcome unknown.** A write whose call ends with `CANCELLED`,
   `DEADLINE_EXCEEDED`, `UNAVAILABLE`, or `INTERNAL` may have taken effect.
   `Put` and `Delete` are idempotent, so a retry is safe.
+- **Streaming snapshots (`AdminService.Snapshot`).** Streams the last
+  committed checkpoint (or commits a fresh one first when
+  `SnapshotRequest.checkpoint` is `true`) over `Db::write_snapshot` in chunks
+  of `Config::snapshot_chunk_bytes` (default 256 KiB), followed by a
+  `SnapshotTrailer` carrying `applied_seq`, `checkpoint_id`, `total_bytes`,
+  and a Castagnoli `crc32c`. A bounded channel (4 chunks) applies
+  backpressure; client cancellation aborts `write_snapshot` and releases its
+  snapshot pin and permits. Concurrency is capped at
+  `Config::max_concurrent_snapshots` (default 4) so snapshots cannot starve
+  KV requests.
+- **Metrics.** When `--metrics-listen <ADDR>` is set (or a listener is passed
+  to `serve_with_metrics`), an HTTP/1.1 listener serves Prometheus/OpenMetrics
+  text exposition (`prometheus-client`) on `GET /metrics` (404 on other
+  paths). It reports `peppydb_rpc_requests_total{method,code}`,
+  `peppydb_rpc_duration_seconds{method}`, `peppydb_inflight_requests`,
+  `peppydb_snapshot_active`, `peppydb_snapshot_bytes_total`,
+  `peppydb_engine_applied_seq`, and `peppydb_process_uptime_seconds`.
 - **Versioned.** Incompatible changes go to `peppydb.kv.v2`; `buf breaking`
   enforces it.
 
@@ -213,8 +232,8 @@ sequenceDiagram
 
 ```text
 peppydb serve --data-dir <DIR> [--listen 127.0.0.1:7420]
-              [--flush-interval-us 0] [--io cached|direct]
-              [--max-inflight 1024]
+              [--metrics-listen <ADDR>] [--flush-interval-us 0]
+              [--io cached|direct] [--max-inflight 1024]
 ```
 
 - The default address is loopback: there is no TLS or authentication.
@@ -277,6 +296,8 @@ Test paths are relative to `lib/server/src/tests/` unless noted.
 | 14. A second server on a locked database exits 1. | `process.rs`: `a_second_server_on_a_locked_database_exits_with_an_error` |
 | 15. The generated code matches `proto/`, which passes lint and the breaking-change check. | `tools/gen-proto --check` |
 | 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `lib/load/load_test.go` |
+| 17. `AdminService.Snapshot` streams a CRC32C-verified store image while writes run, restores via `Db::install_snapshot`, and releases permits on cancel. | `admin.rs`: `snapshot_streams_valid_image_and_restores_exact_state`, `snapshot_cancellation_releases_permits_and_allows_shutdown`, `snapshot_streams_cleanly_while_writes_run` |
+| 18. `GET /metrics` exports accurate RPC counts, latency histograms, snapshot bytes, and `applied_seq`; other paths return 404. | `metrics.rs`: `metrics_render_prometheus_exposition`; `admin.rs`: `metrics_endpoint_reports_rpcs_snapshots_and_applied_seq` |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
 `lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
@@ -295,7 +316,7 @@ double open still fails. Production servers do not fork.
   exposed), consistent scans across leaves or pages, and durability of a
   value a reader saw before its writer returned
   ([engine](engine.md#db-not-guaranteed-and-limits)).
-- **No TLS, no authentication, no metrics.**
+- **No TLS and no authentication.**
 - **The outcome of a failed write is unknown** to the client.
 - **One blocking thread per in-flight engine call.** A write holds a
   blocking-pool thread while it waits for its fsync, so the threads equal
