@@ -234,9 +234,30 @@ after it stopped:
 
 Throughput grows with the writer count and latency stays near flat: the
 benchmark is latency-bound, not throughput-bound, with three nodes
-sharing one disk whose full flush takes about 5 ms. Linux numbers on
-`c4d-standard-8-lssd` (one fsync about 64 to 74 µs, plan 0024) wait for
-roadmap S2's remote runs.
+sharing one disk whose full flush takes about 5 ms.
+
+**Linux.** GCP `c4d-standard-8-lssd` (8 vCPUs, ext4 on Local SSD),
+release build, run `20261122-214533-a15bd56a` of the `raft-perf` suite
+([remote benchmarks](remote-benchmarks.md#usage)), 2026-11-22. The log
+alone, 100-byte entries:
+
+| Entries in flight | Entries/s | p50 | p99 | p99.9 | Entries per sync |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 6,420 | 59.5 µs | 4.5 ms | 5.1 ms | 1.0 |
+| 4 | 13,297 | 119.6 µs | 5.1 ms | 5.6 ms | 2.1 |
+| 16 | 44,406 | 129.6 µs | 5.6 ms | 5.6 ms | 8.1 |
+| 64 | 137,881 | 144.6 µs | 6.1 ms | 6.2 ms | 32.2 |
+| 256 | 397,528 | 182.4 µs | 6.2 ms | 6.3 ms | 128.1 |
+
+- **A sync costs about 60 µs here,** against about 5 ms on macOS, so one
+  entry in flight is about 60 times faster. Group commit still scales:
+  entries per sync grow with the entries in flight.
+- **The p99 stays near 5 ms at every depth.** More than 1% of syncs take
+  about 5 ms, on two VMs. Because the tail does not grow with depth, it
+  is not queueing. The cause is not known; an ext4 journal commit when
+  appends grow the file is one candidate.
+- Numbers vary between Spot VMs: another VM ran the three-node benchmark
+  at one writer about twice as fast. Compare numbers within one run.
 
 ## Not guaranteed, and limits
 

@@ -1,6 +1,6 @@
 # 0030: The replicated state machine over the engine
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S6
 (decisions 1, 2, 3, 14, and [the system keyspace](0025-server-roadmap.md#the-system-keyspace)).
@@ -107,13 +107,13 @@ flowchart TB
 
 ### Entries become engine applies
 
-Each committed entry at index `i` becomes one `Db::apply(i, ops)`
-(decision 1). Every entry writes the applied log id, so the system keys
+Each committed entry at index `i` becomes one `Db::apply(i + 1, ops)`
+(decision 1, shifted by one; see [Discoveries](#discoveries-and-plan-changes)). Every entry writes the applied log id, so the system keys
 always name the last applied entry:
 
-| Entry | Ops passed to `Db::apply(i, ..)` |
+| Entry | Ops passed to `Db::apply(i + 1, ..)` |
 | --- | --- |
-| Normal (`Command`) | each `Op` on `0x01 ‖ key`, then `Put(APPLIED_KEY, (term, i))` |
+| Normal (`Command`) | each `Op` as proposed (keys already `0x01 ‖ key`), then `Put(APPLIED_KEY, (term, i))` |
 | Membership | `Put(MEMBERSHIP_KEY, (log id, config))`, `Put(APPLIED_KEY, (term, i))` |
 | Blank | `Put(APPLIED_KEY, (term, i))` |
 
@@ -364,7 +364,8 @@ of `ModelSm::user_contents`.
   would in its own process; the in-memory router hands messages between
   runtimes. Record heartbeat delays and elections. Plan 0029's benchmark
   ran every node on one runtime; rerun it this way too, so the numbers
-  compare.
+  compare. A stopped node, or no leader for 10 s, fails the run instead
+  of making it wait forever.
 - **Verification:** numbers recorded with the environment, stating that
   the nodes share one machine and one disk; a decision on whether, inside
   one process, openraft needs a runtime separate from gRPC (decision 14).
@@ -377,10 +378,13 @@ of `ModelSm::user_contents`.
   in `tools/gcp/targets.txt`; a `raft-perf` suite (the log benchmark, the
   three-node benchmark, the `Db::apply` benchmark); each node runtime
   sized to a quarter of the cores (2 on `c4d-standard-8-lssd`) unless
-  `PEPPYDB_BENCH_THREADS` is set; `remote-benchmarks.md`.
+  `PEPPYDB_BENCH_THREADS` is set; a watchdog that kills a step's test
+  binary after 20 minutes (`PEPPYDB_BENCH_STEP_SECONDS`), added after a
+  hung run held a VM; `remote-benchmarks.md`.
 - **Verification:** `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench build
   --suite raft-perf` stages both binaries, and each step's filter selects
-  one test. A real run needs a build on the x86_64 Ubuntu 24.04 host.
+  one test. A real run needs a build on the x86_64 Ubuntu 24.04 host; the
+  user runs it.
 
 ### `[12/12][server-raft-sm][docs] document the replicated state machine`
 
@@ -428,21 +432,111 @@ None. Resolved in discussion:
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] 2/12 `DiskLog` sync fix.
-- [ ] 3/12 `server-keys`.
-- [ ] 4/12 `SimStore`.
-- [ ] 5/12 external open over a store.
-- [ ] 6/12 apply and the applier.
-- [ ] 7/12 snapshots.
-- [ ] 8/12 crash tests.
-- [ ] 9/12 simulator.
-- [ ] 10/12 threading measurement.
-- [ ] 11/12 the `raft-perf` GCP suite.
-- [ ] 12/12 design documents; stack-wide verification.
+- [x] 2/12 `DiskLog` sync fix.
+- [x] 3/12 `server-keys`.
+- [x] 4/12 `SimStore`.
+- [x] 5/12 external open over a store.
+- [x] 6/12 apply and the applier.
+- [x] 7/12 snapshots.
+- [x] 8/12 crash tests.
+- [x] 9/12 simulator.
+- [x] 10/12 threading measurement.
+- [x] 11/12 the `raft-perf` GCP suite.
+- [x] 12/12 design documents; stack-wide verification.
+
+## Verification outcomes (2026-11-21)
+
+On macOS (Apple M4 Pro, 12 cores, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 41 Rust targets clean |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass |
+| `cargo test --workspace --locked`; `go vet ./... && go test ./...` | Pass |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (no new `unsafe`) |
+| `bf-tree` crash tests on `SimStore` | Pass, with the same random choices as before |
+| Engine over `SimStore` | 308 store calls of 1,500 entries, each crashed with 3 tears: every reopen is a committed prefix |
+| openraft's storage suite, `DiskLog` with `DbStateMachine` | Pass on `SimFs`/`SimStore` and on real files |
+| Crash tests of the log and the state machine | Compaction: 324 crashes; install: 72; all recover. The install negative control fails as it should |
+| Simulator default tier (debug) | 400 seeds and the regression seed in 19 s wall |
+| Long tier (release) | Base 87708801000: 100,000 seeds in 160 s; base 264633921000: 100,000 seeds in 165 s; none failing |
+| Benchmarks | Recorded in [server Raft](../design/server-raft.md#measurements) |
+| `raft-perf` GCP suite | Run `20261122-214533-a15bd56a` (2026-11-22, `c4d-standard-8-lssd`, release): all three steps pass. A profiled run (`20261122-220018-a15bd56a`) hung; see the discoveries. After the fix, profiled run `20261122-224909-40cedccd` passes every step. Numbers in [server Raft](../design/server-raft.md#measurements) and [server Raft log](../design/server-raft-log.md#measurements) |
 
 ## Discoveries and plan changes
 
-None yet.
+- **openraft's log starts at index 0.** `Db::apply` treats sequence 0 as
+  already applied, so the first entry (the initial membership) was
+  skipped, and openraft's storage suite failed with "state machine is
+  behind the purged logs". Raft index `i` is now engine sequence `i + 1`,
+  and the roadmap's decision 1 says so.
+- **Commands carry stored keys.** The plan's table had the state machine
+  add the `0x01` prefix; `ModelSm` and the simulator already propose
+  stored keys, so `server` maps keys before proposing (S7) and the state
+  machine applies operations as they are. An operation the engine refuses
+  stops the state machine, so `server` must also check limits first.
+- **Compaction does not need the sync hook here; install does.** Because
+  the applier is paused while a checkpoint commits, a checkpoint never
+  holds part of an entry, and a state machine ahead of its own log is
+  allowed: the compaction crash tests pass with a hook that does nothing.
+  The install script fails without it (inverted log order). The hook
+  stays for both, as the engine's owner contract asks; the plan's second
+  negative control was dropped.
+- **The engine is the bottleneck at high load on macOS.** With one
+  runtime per node, the engine run reached 5,127 writes/s at 256 writers
+  against 12,069 for `ModelSm`. `Db::apply` takes 2 µs when the tree
+  grows, but 69 µs beside a file that syncs on the same disk (0.2 µs
+  either way with a fixed set of keys): writes that grow the store file
+  wait behind other files' full flushes. The likely cause is
+  `FileStore::alloc` extending the file one page at a time. Follow-up:
+  extend in larger steps, and measure on Linux (S2).
+- **Heartbeats are not at risk.** Timer lateness on each node's runtime
+  stayed within 3.7 ms at the 99th percentile and 16 ms at worst; no run
+  had an election. One runtime per process is enough for now (decision
+  14). On GCP, `ModelSm` runs reached 25 to 43 ms because its snapshot
+  build copies the whole model on a runtime worker; engine runs stayed
+  at 2 ms, and no run had an election. Work on a node's runtime must
+  stay short.
+- **On GCP, the engine path reaches about 100k writes/s** at 256 writers
+  (73% of `ModelSm`), and writes queue behind a per-node stage while the
+  CPU stays mostly idle. The suspected stage is the engine checkpoint
+  that `snapshot_after` = 5,000 triggers about 20 times a second per
+  node. Follow-up: measure with a larger `snapshot_after`.
+- **The membership value's encoding stays in `server-raft`.** It encodes
+  openraft's membership type; `server-keys` holds the key names and the
+  applied log id's layout.
+- **`SimStore` reaches the engine through feature variants:**
+  `bf-tree-store-sim`, `bf-tree-sim` (re-export), and `engine-sim`, each
+  visible only to the next crate and the tests that need it.
+- **The simulator's engine uses a 256 KiB circular buffer,** so pages reach
+  the store and crashes tear them.
+- **A GCP suite was added as diff 11** (the stack grew from 11 to 12
+  diffs), so the benchmarks run on plan 0024's Linux reference VM. The
+  three-node benchmark's default runtime size changed from 4 threads per
+  node to a quarter of the cores (3 on the 12-core laptop, where the
+  recorded runs used 4).
+- **`DiskLog::sync` reported false failures under load (2026-11-22).**
+  A profiled `raft-perf` run on GCP hung in "per node, engine, 64
+  writers". Both followers stopped during a snapshot build with "the
+  checkpoint hook failed: the Raft log failed"; the leader then lost its
+  quorum, and the benchmark waited forever for a new leader. The log had
+  not failed: `sync` compared against writes that openraft appended
+  after its flush, and `RaftLog::flush` released the disk before it
+  recorded what it made durable. Both are bugs in plan 0029's landed
+  code that only this stack's engine hook exposes (`ModelSm`'s
+  benchmark hook ignores the error, and the simulator's flusher never
+  runs beside `sync`). The fix is a separate diff below this stack,
+  `[1/1][raft-log-sync][log] make DiskLog::sync wait only for writes
+  queued before it`, with tests that fail without it. Diff 10's
+  benchmark now fails fast on a stopped node or a missing leader, and
+  diff 11 gives every GCP step a time limit.
+- **On Linux, `Db::apply` does not slow down beside a syncing file.**
+  The GCP run measured 1.9 µs per apply with growing keys, alone and
+  beside 16,600 syncs, so the macOS slowdown above comes from APFS, and
+  extending `FileStore::alloc` in larger steps is not needed for Linux.
+- **The `DiskLog` fix** raised one writer from 58 to 90 writes/s (16.1 to
+  12.0 ms p50) on three nodes.
 
 ## Agent notes
 
