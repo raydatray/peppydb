@@ -287,6 +287,7 @@ var KvService_ServiceDesc = grpc.ServiceDesc{
 const (
 	AdminService_Status_FullMethodName     = "/peppydb.kv.v1.AdminService/Status"
 	AdminService_Checkpoint_FullMethodName = "/peppydb.kv.v1.AdminService/Checkpoint"
+	AdminService_Snapshot_FullMethodName   = "/peppydb.kv.v1.AdminService/Snapshot"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -299,6 +300,9 @@ type AdminServiceClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	// Commit a checkpoint of the storage engine now.
 	Checkpoint(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
+	// Stream the last committed checkpoint (or a fresh one if requested) as an
+	// openable engine store image, followed by a checksummed trailer.
+	Snapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotResponse], error)
 }
 
 type adminServiceClient struct {
@@ -329,6 +333,25 @@ func (c *adminServiceClient) Checkpoint(ctx context.Context, in *CheckpointReque
 	return out, nil
 }
 
+func (c *adminServiceClient) Snapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AdminService_ServiceDesc.Streams[0], AdminService_Snapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SnapshotRequest, SnapshotResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AdminService_SnapshotClient = grpc.ServerStreamingClient[SnapshotResponse]
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -339,6 +362,9 @@ type AdminServiceServer interface {
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	// Commit a checkpoint of the storage engine now.
 	Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
+	// Stream the last committed checkpoint (or a fresh one if requested) as an
+	// openable engine store image, followed by a checksummed trailer.
+	Snapshot(*SnapshotRequest, grpc.ServerStreamingServer[SnapshotResponse]) error
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -354,6 +380,9 @@ func (UnimplementedAdminServiceServer) Status(context.Context, *StatusRequest) (
 }
 func (UnimplementedAdminServiceServer) Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Checkpoint not implemented")
+}
+func (UnimplementedAdminServiceServer) Snapshot(*SnapshotRequest, grpc.ServerStreamingServer[SnapshotResponse]) error {
+	return status.Error(codes.Unimplemented, "method Snapshot not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -412,6 +441,17 @@ func _AdminService_Checkpoint_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_Snapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SnapshotRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AdminServiceServer).Snapshot(m, &grpc.GenericServerStream[SnapshotRequest, SnapshotResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AdminService_SnapshotServer = grpc.ServerStreamingServer[SnapshotResponse]
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -428,6 +468,12 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AdminService_Checkpoint_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Snapshot",
+			Handler:       _AdminService_Snapshot_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "kv/v1/kv.proto",
 }
