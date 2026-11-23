@@ -17,6 +17,8 @@
 #                     profile build mode.
 #   --zone Z          try only this zone (repeatable; us-east1 only)
 #   --machine-type M  default: c4d-standard-8-lssd
+#   --client-machine-type M
+#                     client VM type for client-server suites (default: n4-standard-8)
 #   --image NAME      an exact ubuntu-os-cloud image (default: newest ubuntu-2404-lts-amd64)
 #   --max-run D       VM time limit, such as 90m or 3h (default: 3h)
 #   --on-demand       an on-demand VM instead of Spot
@@ -78,6 +80,7 @@ STEPS=
 PROFILE=none
 ZONES=
 MACHINE_TYPE=c4d-standard-8-lssd
+CLIENT_MACHINE_TYPE=n4-standard-8
 IMAGE=
 MAX_RUN=3h
 PROVISIONING=SPOT
@@ -98,6 +101,7 @@ while [ $# -gt 0 ]; do
         --profile) need_value "$@"; PROFILE=$2; shift ;;
         --zone) need_value "$@"; ZONES="$ZONES $2"; shift ;;
         --machine-type) need_value "$@"; MACHINE_TYPE=$2; shift ;;
+        --client-machine-type) need_value "$@"; CLIENT_MACHINE_TYPE=$2; shift ;;
         --image) need_value "$@"; IMAGE=$2; shift ;;
         --max-run) need_value "$@"; MAX_RUN=$2; shift ;;
         --on-demand) PROVISIONING=STANDARD ;;
@@ -201,12 +205,21 @@ case $SUITE in
 esac
 [ -f "$SUITE_FILE" ] || die "no suite $SUITE ($SUITE_FILE)"
 
+SUITE_MODE=single
+if grep -Eq '^#[[:space:]]*mode:[[:space:]]*client-server[[:space:]]*$' "$SUITE_FILE"; then
+    SUITE_MODE=client-server
+fi
+
 # suite_lines: the suite without comments and blank lines, reduced to the
-# chosen steps and every preflight step.
+# chosen steps, every preflight step, and (in client-server mode) the server
+# definition line.
 suite_lines() {
     grep -v '^[[:space:]]*#' "$SUITE_FILE" | grep -v '^[[:space:]]*$' | while read -r name rest; do
         keep=false
         case $name in preflight-*) keep=true ;; esac
+        if [ "$SUITE_MODE" = client-server ] && [ "$name" = server ]; then
+            keep=true
+        fi
         [ -z "$STEPS" ] && keep=true
         for step in $STEPS; do
             [ "$step" = "$name" ] && keep=true
@@ -288,8 +301,10 @@ stage() {
         echo "build_mode=$BUILD_MODE"
         echo "build_host=$(uname -sm), $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
         echo "suite=$SUITE"
+        echo "suite_mode=$SUITE_MODE"
         echo "profile=$PROFILE"
         echo "machine_type=$MACHINE_TYPE"
+        [ "$SUITE_MODE" = client-server ] && echo "client_machine_type=$CLIENT_MACHINE_TYPE"
         echo "provisioning=$PROVISIONING"
         echo "image=${IMAGE:-family ubuntu-2404-lts-amd64}"
         (cd "$STAGE" && find . -type f ! -name MANIFEST | sed 's|^\./||' | sort) | while read -r path; do
@@ -361,12 +376,16 @@ check_bucket() {
 # --- Instances.
 
 NAME=
+SERVER_NAME=
+CLIENT_NAME=
 ZONE=
-CREATED=false
+CREATED_NAMES=
+FAILED_VM=
 
-# instance_state: RUNNING, TERMINATED, ..., NOTFOUND, or ERROR.
+# instance_state NAME: RUNNING, TERMINATED, ..., NOTFOUND, or ERROR.
 instance_state() {
-    if output=$(gc compute instances describe "$NAME" --zone="$ZONE" --format=json 2>"$LOCAL/describe.err"); then
+    target_name=${1:-$NAME}
+    if output=$(gc compute instances describe "$target_name" --zone="$ZONE" --format=json 2>"$LOCAL/describe.err"); then
         printf '%s\n' "$output" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("status", "ERROR"))' 2>/dev/null ||
             echo ERROR
     elif grep -qi 'not found\|notFound' "$LOCAL/describe.err"; then
@@ -382,12 +401,18 @@ delete_instance() { # name zone
         say "warning: could not delete $1 in $2; run tools/gcp-bench cleanup"
 }
 
+delete_created() {
+    for inst in $CREATED_NAMES; do
+        delete_instance "$inst" "$ZONE"
+    done
+    CREATED_NAMES=
+}
+
 on_exit() {
     status=$?
     trap - EXIT INT TERM
-    if $CREATED && ! $KEEP; then
-        delete_instance "$NAME" "$ZONE"
-        CREATED=false
+    if [ -n "$CREATED_NAMES" ] && ! $KEEP; then
+        delete_created
     fi
     list_leftovers
     exit "$status"
@@ -407,9 +432,45 @@ create_failure_is_capacity() {
     grep -Eqi 'ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|resource pool|not available in|not supported in|does not exist in zone|stockout|currently unavailable' "$1"
 }
 
+# create_one_vm NAME MACHINE_TYPE ROLE PROFILE_FILE
+create_one_vm() {
+    vm_name=$1
+    vm_machine=$2
+    vm_role=$3
+    vm_profile_file=$4
+    meta="peppydb-bucket=$BUCKET,peppydb-run-id=$RUN_ID"
+    [ -n "$vm_role" ] && meta="$meta,peppydb-role=$vm_role"
+    say "creating $vm_name in $ZONE ($vm_machine, $PROVISIONING)"
+    # shellcheck disable=SC2086 # image_args is two arguments
+    if gc compute instances create "$vm_name" \
+        --zone="$ZONE" \
+        --machine-type="$vm_machine" \
+        --provisioning-model="$PROVISIONING" \
+        --instance-termination-action=DELETE \
+        --max-run-duration="${MAX_RUN_SECONDS}s" \
+        $image_args \
+        --boot-disk-type=hyperdisk-balanced --boot-disk-size=20GB --boot-disk-auto-delete \
+        --service-account="$LABEL@$PROJECT.iam.gserviceaccount.com" \
+        --scopes=cloud-platform \
+        --labels="$LABEL=1,run=$RUN_ID" \
+        --metadata="$meta" \
+        --metadata-from-file="peppydb-profile=$vm_profile_file,startup-script=$GCP/remote-bench.sh" \
+        >"$LOCAL/create.out" 2>"$LOCAL/create.err"; then
+        CREATED_NAMES="$CREATED_NAMES $vm_name"
+        return 0
+    fi
+    sed 's/^/  /' "$LOCAL/create.err" >&2
+    # A failed call may still have created the instance.
+    if [ "$(instance_state "$vm_name")" != NOTFOUND ]; then
+        say "the failed create left an instance behind"
+        delete_instance "$vm_name" "$ZONE"
+    fi
+    return 1
+}
+
 create_instance() {
-    NAME=$LABEL-$RUN_ID
     echo "$PROFILE" >"$LOCAL/profile"
+    echo "none" >"$LOCAL/profile-none"
     if [ -n "$IMAGE" ]; then
         image_args="--image=$IMAGE --image-project=ubuntu-os-cloud"
     else
@@ -417,41 +478,38 @@ create_instance() {
     fi
     for zone in $ZONES; do
         ZONE=$zone
-        say "creating $NAME in $ZONE ($MACHINE_TYPE, $PROVISIONING)"
-        # shellcheck disable=SC2086 # image_args is two arguments
-        if gc compute instances create "$NAME" \
-            --zone="$ZONE" \
-            --machine-type="$MACHINE_TYPE" \
-            --provisioning-model="$PROVISIONING" \
-            --instance-termination-action=DELETE \
-            --max-run-duration="${MAX_RUN_SECONDS}s" \
-            $image_args \
-            --boot-disk-type=hyperdisk-balanced --boot-disk-size=20GB --boot-disk-auto-delete \
-            --service-account="$LABEL@$PROJECT.iam.gserviceaccount.com" \
-            --scopes=cloud-platform \
-            --labels="$LABEL=1,run=$RUN_ID" \
-            --metadata="peppydb-bucket=$BUCKET,peppydb-run-id=$RUN_ID" \
-            --metadata-from-file="peppydb-profile=$LOCAL/profile,startup-script=$GCP/remote-bench.sh" \
-            >"$LOCAL/create.out" 2>"$LOCAL/create.err"; then
-            CREATED=true
-            CREATED_AT=$(date +%s)
-            return 0
+        CREATED_NAMES=
+        if [ "$SUITE_MODE" = client-server ]; then
+            SERVER_NAME=$LABEL-$RUN_ID-server
+            CLIENT_NAME=$LABEL-$RUN_ID-client
+            NAME=$SERVER_NAME
+            if create_one_vm "$SERVER_NAME" "$MACHINE_TYPE" server "$LOCAL/profile" &&
+                create_one_vm "$CLIENT_NAME" "$CLIENT_MACHINE_TYPE" client "$LOCAL/profile-none"; then
+                CREATED_AT=$(date +%s)
+                return 0
+            fi
+            # Roll back any VM already created in this zone before retrying.
+            if [ -n "$CREATED_NAMES" ]; then
+                delete_created
+            fi
+            create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
+        else
+            NAME=$LABEL-$RUN_ID
+            if create_one_vm "$NAME" "$MACHINE_TYPE" "" "$LOCAL/profile"; then
+                CREATED_AT=$(date +%s)
+                return 0
+            fi
+            create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
         fi
-        sed 's/^/  /' "$LOCAL/create.err" >&2
-        # A failed call may still have created the instance.
-        if [ "$(instance_state)" != NOTFOUND ]; then
-            say "the failed create left an instance behind"
-            delete_instance "$NAME" "$ZONE"
-        fi
-        create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
     done
     die "no zone in $ZONES could create $MACHINE_TYPE; try again later or with --on-demand"
 }
 
-# check_limits: the created instance carries the time limit and DELETE.
+# check_limits NAME: the created instance carries the time limit and DELETE.
 check_limits() {
-    description=$(gc compute instances describe "$NAME" --zone="$ZONE" --format=json) || {
-        say "cannot read back $NAME"
+    target_name=${1:-$NAME}
+    description=$(gc compute instances describe "$target_name" --zone="$ZONE" --format=json) || {
+        say "cannot read back $target_name"
         return 1
     }
     printf '%s\n' "$description" | python3 -c '
@@ -470,40 +528,99 @@ object_exists() {
 }
 
 # wait_for_run: poll until the run ends. Sets OUTCOME to done, gone,
-# stopped, no-boot, or deadline.
+# stopped, no-boot, or deadline (and FAILED_VM when a specific VM failed).
 wait_for_run() {
     started_seen=false
+    server_started_seen=false
+    client_started_seen=false
     deadline=$((MAX_RUN_SECONDS + DEADLINE_MARGIN))
     while :; do
         $DRY || sleep "$POLL"
-        if object_exists "$REMOTE_RESULTS/DONE"; then
-            OUTCOME=done
-            return
-        fi
-        state=$(instance_state)
-        case $state in
-            NOTFOUND)
-                object_exists "$REMOTE_RESULTS/DONE" && OUTCOME=done || OUTCOME=gone
+        if [ "$SUITE_MODE" = client-server ]; then
+            server_done=false
+            client_done=false
+            object_exists "$REMOTE_RESULTS/server/DONE" && server_done=true
+            object_exists "$REMOTE_RESULTS/client/DONE" && client_done=true
+            if $server_done && $client_done; then
+                OUTCOME=done
                 return
-                ;;
-            STOPPING | STOPPED | SUSPENDING | SUSPENDED | TERMINATED)
-                OUTCOME=stopped
-                return
-                ;;
-        esac
-        elapsed=$(($(date +%s) - CREATED_AT))
-        if ! $started_seen; then
-            if object_exists "$REMOTE_RESULTS/started"; then
-                started_seen=true
-                say "the VM has started the run"
-            elif [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
+            fi
+            for role in server client; do
+                if [ "$role" = server ]; then
+                    $server_done && continue
+                    vm_name=$SERVER_NAME
+                else
+                    $client_done && continue
+                    vm_name=$CLIENT_NAME
+                fi
+                state=$(instance_state "$vm_name")
+                case $state in
+                    NOTFOUND)
+                        if object_exists "$REMOTE_RESULTS/$role/DONE"; then
+                            continue
+                        fi
+                        FAILED_VM=$vm_name
+                        OUTCOME=gone
+                        return
+                        ;;
+                    STOPPING | STOPPED | SUSPENDING | SUSPENDED | TERMINATED)
+                        FAILED_VM=$vm_name
+                        OUTCOME=stopped
+                        return
+                        ;;
+                esac
+            done
+            elapsed=$(($(date +%s) - CREATED_AT))
+            if ! $server_started_seen && object_exists "$REMOTE_RESULTS/server/started"; then
+                server_started_seen=true
+                say "the server VM has started the run"
+            fi
+            if ! $client_started_seen && object_exists "$REMOTE_RESULTS/client/started"; then
+                client_started_seen=true
+                say "the client VM has started the run"
+            fi
+            if ! ($server_started_seen && $client_started_seen) && [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
                 OUTCOME=no-boot
                 return
             fi
-        fi
-        if [ "$elapsed" -ge "$deadline" ]; then
-            OUTCOME=deadline
-            return
+            if [ "$elapsed" -ge "$deadline" ]; then
+                OUTCOME=deadline
+                return
+            fi
+        else
+            if object_exists "$REMOTE_RESULTS/DONE"; then
+                OUTCOME=done
+                return
+            fi
+            state=$(instance_state "$NAME")
+            case $state in
+                NOTFOUND)
+                    object_exists "$REMOTE_RESULTS/DONE" && OUTCOME=done || {
+                        FAILED_VM=$NAME
+                        OUTCOME=gone
+                    }
+                    return
+                    ;;
+                STOPPING | STOPPED | SUSPENDING | SUSPENDED | TERMINATED)
+                    FAILED_VM=$NAME
+                    OUTCOME=stopped
+                    return
+                    ;;
+            esac
+            elapsed=$(($(date +%s) - CREATED_AT))
+            if ! $started_seen; then
+                if object_exists "$REMOTE_RESULTS/started"; then
+                    started_seen=true
+                    say "the VM has started the run"
+                elif [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
+                    OUTCOME=no-boot
+                    return
+                fi
+            fi
+            if [ "$elapsed" -ge "$deadline" ]; then
+                OUTCOME=deadline
+                return
+            fi
         fi
     done
 }
@@ -523,13 +640,21 @@ download_results() {
 }
 
 was_preempted() {
+    target_name=${1:-$NAME}
     [ -n "$(gc compute operations list --zones="$ZONE" \
-        --filter="operationType=compute.instances.preempted AND targetLink~/$NAME\$" \
+        --filter="operationType=compute.instances.preempted AND targetLink~/$target_name\$" \
         --format='value(name)' 2>/dev/null)" ]
 }
 
 report() {
-    if [ -f "$LOCAL/results/status" ]; then
+    if [ "$SUITE_MODE" = client-server ]; then
+        for role in server client; do
+            if [ -f "$LOCAL/results/$role/status" ]; then
+                say "$role steps (name profiler exit seconds note):"
+                sed 's/^/  /' "$LOCAL/results/$role/status" >&2
+            fi
+        done
+    elif [ -f "$LOCAL/results/status" ]; then
         say "steps (name profiler exit seconds note):"
         sed 's/^/  /' "$LOCAL/results/status" >&2
     fi
@@ -557,9 +682,11 @@ run() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     create_instance
-    if ! check_limits; then
-        die "$NAME lacks its time limit or DELETE action; deleted it"
-    fi
+    for inst in $CREATED_NAMES; do
+        if ! check_limits "$inst"; then
+            die "$inst lacks its time limit or DELETE action; deleted it"
+        fi
+    done
     say "waiting for the run (every ${POLL}s; Ctrl-C deletes the VM)"
     wait_for_run
 
@@ -567,23 +694,36 @@ run() {
     case $OUTCOME in
         done) ;;
         gone)
-            if was_preempted; then
-                say "the Spot VM was preempted before the run finished"
+            if was_preempted "${FAILED_VM:-$NAME}"; then
+                say "the Spot VM (${FAILED_VM:-$NAME}) was preempted before the run finished"
             else
-                say "the VM is gone, and the run did not finish (time limit, or deleted elsewhere)"
+                say "the VM (${FAILED_VM:-$NAME}) is gone, and the run did not finish (time limit, or deleted elsewhere)"
             fi
-            CREATED=false
+            # Remove only the vanished VM from CREATED_NAMES so any remaining
+            # peer VM in client-server mode is still deleted.
+            remaining=
+            for inst in $CREATED_NAMES; do
+                [ "$inst" = "${FAILED_VM:-$NAME}" ] || remaining="$remaining $inst"
+            done
+            CREATED_NAMES=$remaining
             code=3
             ;;
         stopped)
-            say "the VM stopped before the run finished"
+            say "the VM (${FAILED_VM:-$NAME}) stopped before the run finished"
             code=3
             ;;
         no-boot)
             say "the VM did not start the run within ${BOOT_TIMEOUT}s; saving its serial port output"
             mkdir -p "$LOCAL"
-            gc compute instances get-serial-port-output "$NAME" --zone="$ZONE" >"$LOCAL/serial-port.txt" 2>&1
-            say "serial port output: $LOCAL/serial-port.txt"
+            if [ "$SUITE_MODE" = client-server ]; then
+                for inst in $CREATED_NAMES; do
+                    gc compute instances get-serial-port-output "$inst" --zone="$ZONE" >"$LOCAL/serial-port-$inst.txt" 2>&1
+                    say "serial port output: $LOCAL/serial-port-$inst.txt"
+                done
+            else
+                gc compute instances get-serial-port-output "$NAME" --zone="$ZONE" >"$LOCAL/serial-port.txt" 2>&1
+                say "serial port output: $LOCAL/serial-port.txt"
+            fi
             code=3
             ;;
         deadline)
@@ -593,19 +733,31 @@ run() {
     esac
 
     download_results
-    if $CREATED && ! $KEEP; then
-        delete_instance "$NAME" "$ZONE"
-        CREATED=false
+    if [ -n "$CREATED_NAMES" ] && ! $KEEP; then
+        delete_created
     fi
     if [ "$OUTCOME" = done ]; then
-        done_status=$(sed -n 's/^status=//p' "$LOCAL/results/DONE" 2>/dev/null)
-        reason=$(sed -n 's/^reason=//p' "$LOCAL/results/DONE" 2>/dev/null)
-        if $DRY; then
-            done_status=ok
-            reason="dry run"
+        if [ "$SUITE_MODE" = client-server ]; then
+            if $DRY; then
+                say "run finished: dry run"
+            else
+                for role in server client; do
+                    done_status=$(sed -n 's/^status=//p' "$LOCAL/results/$role/DONE" 2>/dev/null)
+                    reason=$(sed -n 's/^reason=//p' "$LOCAL/results/$role/DONE" 2>/dev/null)
+                    say "$role finished: $reason"
+                    [ "$done_status" = ok ] || code=1
+                done
+            fi
+        else
+            done_status=$(sed -n 's/^status=//p' "$LOCAL/results/DONE" 2>/dev/null)
+            reason=$(sed -n 's/^reason=//p' "$LOCAL/results/DONE" 2>/dev/null)
+            if $DRY; then
+                done_status=ok
+                reason="dry run"
+            fi
+            say "run finished: $reason"
+            [ "$done_status" = ok ] || code=1
         fi
-        say "run finished: $reason"
-        [ "$done_status" = ok ] || code=1
     fi
     report
     exit "$code"
