@@ -13,6 +13,7 @@ crc32c.workspace = true
 engine = { path = "../engine" }
 futures-util.workspace = true
 kv-proto = { path = "../../proto/kv/v1/rust" }
+prometheus-client.workspace = true
 server-keys = { path = "../server-keys" }
 thiserror.workspace = true
 tokio.workspace = true

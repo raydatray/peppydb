@@ -12,6 +12,7 @@ peppy_rust_library(
         "//third-party/rust:clap",
         "//third-party/rust:crc32c",
         "//third-party/rust:futures-util",
+        "//third-party/rust:prometheus-client",
         "//third-party/rust:thiserror",
         "//third-party/rust:tokio",
         "//third-party/rust:tonic",

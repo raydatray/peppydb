@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use futures_util::Stream;
 use kv_proto::kv::v1::admin_service_server::AdminService;
@@ -13,10 +14,11 @@ use kv_proto::kv::v1::{
     StatusRequest, StatusResponse,
 };
 use tokio::sync::mpsc;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 use crate::VERSION;
 use crate::bridge::Inner;
+use crate::metrics::{Method, result_code};
 
 /// Bounded chunks in flight between the blocking `write_snapshot` call and the
 /// gRPC stream. Provides backpressure against slow clients.
@@ -42,6 +44,7 @@ impl Stream for SnapshotStream {
 /// response channel, tracking total bytes and a running Castagnoli CRC32C.
 struct ChannelWriter {
     tx: mpsc::Sender<Result<SnapshotResponse, Status>>,
+    inner: Arc<Inner>,
     chunk_size: usize,
     buf: Vec<u8>,
     crc: u32,
@@ -50,9 +53,14 @@ struct ChannelWriter {
 }
 
 impl ChannelWriter {
-    fn new(tx: mpsc::Sender<Result<SnapshotResponse, Status>>, chunk_size: usize) -> Self {
+    fn new(
+        tx: mpsc::Sender<Result<SnapshotResponse, Status>>,
+        inner: Arc<Inner>,
+        chunk_size: usize,
+    ) -> Self {
         Self {
             tx,
+            inner,
             chunk_size,
             buf: Vec::with_capacity(chunk_size),
             crc: 0,
@@ -62,8 +70,9 @@ impl ChannelWriter {
     }
 
     fn send_chunk(&mut self, chunk: Vec<u8>) -> io::Result<()> {
+        let len = chunk.len() as u64;
         self.crc = crc32c::crc32c_append(self.crc, &chunk);
-        self.total_bytes = self.total_bytes.saturating_add(chunk.len() as u64);
+        self.total_bytes = self.total_bytes.saturating_add(len);
         self.tx
             .blocking_send(Ok(SnapshotResponse {
                 payload: Some(Payload::Chunk(chunk)),
@@ -71,14 +80,16 @@ impl ChannelWriter {
             .map_err(|_| {
                 self.cancelled = true;
                 io::Error::new(io::ErrorKind::BrokenPipe, "snapshot client disconnected")
-            })
+            })?;
+        self.inner.metrics.add_snapshot_bytes(len);
+        Ok(())
     }
 
-    fn finish(mut self, checkpoint: engine::Checkpoint) {
+    fn finish(mut self, checkpoint: engine::Checkpoint) -> bool {
         if !self.buf.is_empty() {
             let chunk = std::mem::take(&mut self.buf);
             if self.send_chunk(chunk).is_err() {
-                return;
+                return false;
             }
         }
         let trailer = SnapshotTrailer {
@@ -87,9 +98,11 @@ impl ChannelWriter {
             total_bytes: self.total_bytes,
             crc32c: self.crc,
         };
-        let _ = self.tx.blocking_send(Ok(SnapshotResponse {
-            payload: Some(Payload::Trailer(trailer)),
-        }));
+        self.tx
+            .blocking_send(Ok(SnapshotResponse {
+                payload: Some(Payload::Trailer(trailer)),
+            }))
+            .is_ok()
     }
 }
 
@@ -120,22 +133,38 @@ impl AdminService for Admin {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let applied_seq = self.inner.blocking(|db| Ok(db.applied_seq())).await?;
-        Ok(Response::new(StatusResponse {
-            applied_seq,
-            version: VERSION.to_owned(),
-        }))
+        let started = Instant::now();
+        let result = async {
+            let applied_seq = self.inner.blocking(|db| Ok(db.applied_seq())).await?;
+            Ok(Response::new(StatusResponse {
+                applied_seq,
+                version: VERSION.to_owned(),
+            }))
+        }
+        .await;
+        self.inner
+            .metrics
+            .record_rpc(Method::Status, result_code(&result), started.elapsed());
+        result
     }
 
     async fn checkpoint(
         &self,
         _request: Request<CheckpointRequest>,
     ) -> Result<Response<CheckpointResponse>, Status> {
-        let checkpoint = self.inner.blocking(|db| db.checkpoint()).await?;
-        Ok(Response::new(CheckpointResponse {
-            applied_seq: checkpoint.applied_seq,
-            checkpoint_id: checkpoint.checkpoint_id,
-        }))
+        let started = Instant::now();
+        let result = async {
+            let checkpoint = self.inner.blocking(|db| db.checkpoint()).await?;
+            Ok(Response::new(CheckpointResponse {
+                applied_seq: checkpoint.applied_seq,
+                checkpoint_id: checkpoint.checkpoint_id,
+            }))
+        }
+        .await;
+        self.inner
+            .metrics
+            .record_rpc(Method::Checkpoint, result_code(&result), started.elapsed());
+        result
     }
 
     type SnapshotStream = SnapshotStream;
@@ -144,28 +173,50 @@ impl AdminService for Admin {
         &self,
         request: Request<SnapshotRequest>,
     ) -> Result<Response<Self::SnapshotStream>, Status> {
+        let started = Instant::now();
         let checkpoint_first = request.into_inner().checkpoint;
         let chunk_size = self.inner.config.snapshot_chunk_bytes;
         let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_CAPACITY);
         let inner = Arc::clone(&self.inner);
-        self.inner
+        if let Err(status) = self
+            .inner
             .spawn_snapshot(move |db| {
                 if checkpoint_first && let Err(error) = db.checkpoint() {
-                    let _ = tx.blocking_send(Err(inner.engine_status(error)));
+                    let status = inner.engine_status(error);
+                    inner
+                        .metrics
+                        .record_rpc(Method::Snapshot, status.code(), started.elapsed());
+                    let _ = tx.blocking_send(Err(status));
                     return;
                 }
-                let mut writer = ChannelWriter::new(tx.clone(), chunk_size);
-                match db.write_snapshot(&mut writer) {
-                    Ok(checkpoint) => writer.finish(checkpoint),
-                    Err(_) if writer.cancelled => {
-                        // The client dropped the stream; stop cleanly.
+                let mut writer = ChannelWriter::new(tx.clone(), Arc::clone(&inner), chunk_size);
+                let code = match db.write_snapshot(&mut writer) {
+                    Ok(checkpoint) => {
+                        if writer.finish(checkpoint) {
+                            Code::Ok
+                        } else {
+                            Code::Cancelled
+                        }
                     }
+                    Err(_) if writer.cancelled => Code::Cancelled,
                     Err(error) => {
-                        let _ = tx.blocking_send(Err(inner.engine_status(error)));
+                        let status = inner.engine_status(error);
+                        let code = status.code();
+                        let _ = tx.blocking_send(Err(status));
+                        code
                     }
-                }
+                };
+                inner
+                    .metrics
+                    .record_rpc(Method::Snapshot, code, started.elapsed());
             })
-            .await?;
+            .await
+        {
+            self.inner
+                .metrics
+                .record_rpc(Method::Snapshot, status.code(), started.elapsed());
+            return Err(status);
+        }
         Ok(Response::new(SnapshotStream { rx }))
     }
 }
