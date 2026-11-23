@@ -1,6 +1,6 @@
 # 0031: Server operability: streaming snapshots, metrics, and remote benchmarks
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S2.
 
@@ -204,7 +204,7 @@ sequenceDiagram
     participant D as tools/gcp-bench (driver)
     participant G as GCS bucket
     participant S as server VM (c4d-standard-8-lssd)
-    participant C as client VM (c4d-standard-8)
+    participant C as client VM (n4-standard-8)
 
     D->>G: upload artifacts/RUN/ (peppydb, peppydb-load, suite)
     D->>S: create in zone Z (max-run, DELETE)
@@ -237,10 +237,13 @@ sequenceDiagram
   firewall rules are added.
 - **Machine types:** Server uses `--machine-type` (default
   `c4d-standard-8-lssd` with Local SSD). Client uses `--client-machine-type`
-  (default `c4d-standard-8`, no Local SSD needed, so client skips `mkfs`).
+  (default `n4-standard-8`, no Local SSD needed, so client skips `mkfs`).
 - **Profiling:** `--profile` applies to the `peppydb serve` process on the
-  server VM (`perf record`, `offcpu`, `stat`, `sched`). Sending `SIGTERM` to
-  `peppydb serve` after `client/DONE` flushes profiler outputs cleanly.
+  server VM (`perf record`, `offcpu`, `stat`, `sched`). A client-server run
+  takes one profiler, because the server runs once for the whole client
+  suite. The profiler runs a launcher that records its PID and `exec`s the
+  server; `SIGTERM` goes to that PID after `client/DONE`, so the profiler
+  writes its outputs when the server exits. The client VM is not profiled.
 - **Teardown guarantees:** Every created VM is tracked in a list; `on_exit`
   deletes all of them, every VM has `--max-run-duration` +
   `--instance-termination-action=DELETE` verified by read-back, and
@@ -333,9 +336,10 @@ sequenceDiagram
 - **Core changes:** `tools/gcp-bench` (multi-VM create/zone-fallback,
   `--client-machine-type`, multi-VM `on_exit` cleanup, polling both roles'
   `DONE` and VM states); `tools/gcp/remote-bench.sh` (`peppydb-role` metadata,
-  `server` mode launching `peppydb serve` under optional profiler and writing
-  `server/ready`, `client` mode polling `server/ready` and substituting
-  `$SERVER_ADDR`/`$METRICS_ADDR`).
+  `server` mode launching `peppydb serve` under one optional profiler through
+  a PID-recording launcher and writing `server/ready`, `client` mode polling
+  `server/ready` and substituting `$SERVER_ADDR`/`$METRICS_ADDR`); the
+  driver refuses more than one profiler for a client-server suite.
 - **Verification:** `tools/linux-run sh tools/gcp/testing/test-remote.sh`,
   `tools/linux-run sh tools/gcp/testing/test-driver.sh` (existing single-VM
   tests still pass).
@@ -348,8 +352,10 @@ sequenceDiagram
   `tools/gcp/testing/test-remote.sh`, and `tools/gcp/testing/test-driver.sh`
   to cover: two-VM happy path with ready/DONE handshake, server failure
   stopping client wait, client preemption deleting server VM, zone fallback
-  deleting the first VM when the second hits capacity, and `cleanup` removing
-  both VMs.
+  deleting the first VM when the second hits capacity, `cleanup` removing
+  both VMs, each profiler around the server (outputs, PID, `SIGTERM` to the
+  server), and refusal of two profilers by the driver and the server VM.
+  The stand-in `gcloud` stops a deleted VM's whole process tree.
 - **Verification:** `tools/linux-run sh tools/gcp/testing/test-remote.sh` and
   `tools/linux-run sh tools/gcp/testing/test-driver.sh`.
 
@@ -404,17 +410,110 @@ None. Resolved in discussion:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] 1/8 Plan commit.
-- [ ] 2/8 `AdminService.Snapshot` proto and generated bindings.
-- [ ] 3/8 `AdminService.Snapshot` server implementation and tests.
-- [ ] 4/8 Server metrics and `--metrics-listen` HTTP endpoint.
-- [ ] 5/8 Multi-VM role coordination in `tools/gcp-bench` and `remote-bench.sh`.
-- [ ] 6/8 Offline multi-VM tests for `tools/gcp-bench`.
-- [ ] 7/8 `server-perf` benchmark suite and targets.
-- [ ] 8/8 Design docs and stack-wide verification.
+- [x] 2/8 `AdminService.Snapshot` proto and generated bindings.
+- [x] 3/8 `AdminService.Snapshot` server implementation and tests.
+- [x] 4/8 Server metrics and `--metrics-listen` HTTP endpoint.
+- [x] 5/8 Multi-VM role coordination in `tools/gcp-bench` and `remote-bench.sh`.
+- [x] 6/8 Offline multi-VM tests for `tools/gcp-bench`.
+- [x] 7/8 `server-perf` benchmark suite and targets.
+- [x] 8/8 Design docs and stack-wide verification.
+
+## Verification outcomes (2026-11-22)
+
+On macOS (Apple Silicon, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 41 Rust targets clean |
+| `tools/buck2 test -j 4 //bin/... //lib/... //proto/...` | Pass; 40 targets, 0 failures (`server-unittest`: 23 passed) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test ./...` | Pass |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (30 passed, no new `unsafe`) |
+| `sh tools/gcp/testing/test-remote.sh`, `sh tools/gcp/testing/test-driver.sh` | Pass (single-VM and multi-VM suites) |
+| `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench build --suite server-perf` and `--dry-run` | Stages `peppydb` and `peppydb-load`; dry-run creates and deletes `-server` and `-client` VMs in one zone. Live GCP runs (`server-perf`, `raft-perf`) are run by the user from the Linux build host |
+
+### Verification outcomes after the first live run (2026-11-23)
+
+On Linux (WSL2, Ubuntu 24.04), after the server-profiling and stand-in
+`gcloud` fixes, with `[1/1][server-nodelay]` below the stack.
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` | Pass; 41 Rust targets clean |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass; 40 targets (`server-unittest`: 24 passed) |
+| `cargo test --workspace --locked`, `go vet ./...`, `go test ./...` | Pass |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| `sh tools/gcp/testing/test-remote.sh` | Pass, including the server under each profiler. The new cases fail against the previous `run_server_role` (34 failures) |
+| `sh tools/gcp/testing/test-driver.sh` | Pass, 3 runs in a row; no stand-in VM processes remain |
+| `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench build --suite server-perf --profile stat,record` | Refused: one profiler per client-server suite |
+| Each commit of the stack | `//lib/server/...` and `//bin/...` tests pass; `tools/autocargo --check` up to date |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`prometheus-client` and `parking_lot_core` build scripts:** Reindeer
+  warned about build scripts for both crates; added
+  `third-party/rust/fixups/{prometheus-client,parking_lot_core}/fixups.toml`
+  with `buildscript.run = true`.
+- **Fake `gcloud` VM cleanup on zone fallback:** During offline multi-VM
+  capacity-fallback tests, deleting the first VM in `us-east1-b` and
+  recreating it with the same name in `us-east1-c` initially reused the
+  old fake VM's `state/started` directory. Updated `tools/gcp/testing/bin/gcloud`
+  so `instances delete` terminates the fake VM process and removes its state
+  directory, matching real GCP.
+
+- **Nagle stall in the server (fixed outside this stack):** The first
+  live `server-perf` run (`20261123-030835-2cb6e301`, 2026-11-23) measured
+  24 puts/s at concurrency 1 with p50 41 ms, against a server-side handler
+  mean of 134 µs. Up to concurrency 64, p99 stayed at about 42 ms. The
+  server never set `TCP_NODELAY`: `TcpIncoming::from` leaves it unset, so
+  Nagle's algorithm held response writes for the client's delayed ACK.
+  The cause predates this stack, so the fix is a separate diff below it,
+  `[1/1][server-nodelay][server] set TCP_NODELAY on accepted connections`.
+  That run measures the server without the fix. Its numbers are not
+  reference numbers. The rerun on top of the fix is below.
+- **Live `server-perf` runs on top of the fix (2026-11-23):** three runs
+  at revision `b86cd8de`, all steps passed with no RPC errors.
+  - `20261123-035822-b86cd8de` (release, no profiler): the reference
+    numbers in
+    [server measurements](../design/server.md#linux-reference-separate-server-and-client-vms).
+    Put at concurrency 1: 4,297 ops/s, p50 229 µs (176 times the run
+    without `TCP_NODELAY`). Peak: 194,833 puts/s and 238,466 gets/s at
+    concurrency 256. No step has a 40 ms tail.
+  - `20261123-035934-b86cd8de` (`--profile stat`): 311.6 server
+    CPU-seconds for 9.59 million RPCs, about 32 µs per RPC.
+  - `20261123-040416-b86cd8de` (`--profile record`): about 61% of server
+    CPU in gRPC, 25% in the blocking bridge's thread handoffs, 7% in the
+    engine, and 4% in the WAL flusher.
+  - The reference run and the `stat` run overlapped in the same zone
+    (servers at 03:59:34 to 04:02:34 and 04:00:49 to 04:03:10 UTC). The
+    concurrency-256 rows of both runs may be slightly low. The `record`
+    run ran alone.
+- **Follow-ups (not in this stack):** the user chose to get the system
+  working end to end before optimization work. Candidates, from the
+  profile: run short engine calls on the Tokio worker and wait for
+  durability with a future instead of a parked thread (the bridge's 25%);
+  a different allocator; more client connections at high concurrency;
+  batched RPCs. Measurement gaps: an open-loop `--rate` mode for
+  `peppydb-load`, server CPU per step in `/metrics`
+  (`process_cpu_seconds_total`), and client CPU sampling.
+
+- **Server profiling was missing (fixed in 5/8 and 6/8):** The plan said
+  `--profile` wraps `peppydb serve` on the server VM, but `run_server_role`
+  started the server directly and recorded `server none` in `status`. A
+  client-server run with `--profile` built profile binaries and wrote no
+  profiler outputs. `run_server_role` now runs the server through
+  `run_profiled` in the background, and a client-server run takes one
+  profiler. Finding the server's PID with `pgrep -f "^$exe"` does not work
+  for the shell-script stand-ins in the tests, so a launcher records its
+  PID and `exec`s the server.
+- **Orphaned stand-in VMs on Linux (fixed in 6/8):** The driver test
+  `client-server-capacity` failed on every Linux run: "the VM rebooted
+  during the run". The stand-in `gcloud` killed only the startup script's
+  shell. The script runs `main` in a pipeline, so `main` kept running; the
+  deleted zone-b server then wrote `state/started` into the state
+  directory of the zone-c server with the same name. The stand-in now stops
+  the whole process tree. The case passed on macOS by timing.
 
 ## Agent notes
 

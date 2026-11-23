@@ -35,7 +35,8 @@ flowchart LR
 | `proto/kv/v1/go` | Package `kvv1`: generated Go client and server |
 | `lib/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
 | `lib/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
-| `lib/server/src/kv.rs`, `admin.rs` | The two services |
+| `lib/server/src/kv.rs`, `admin.rs` | The two services (`KvService`, `AdminService` including streaming `Snapshot`) |
+| `lib/server/src/metrics.rs` | Prometheus metrics (`prometheus-client`) and the optional HTTP/1.1 `GET /metrics` listener |
 | `lib/server/src/keys.rs` | The format check and the tonic mapping over the key layout in `lib/server-keys` (plan 0030), which `server-raft` shares |
 | `lib/server/src/status.rs` | `engine::Error` to gRPC status |
 | `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
@@ -60,6 +61,7 @@ service KvService {
 service AdminService {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+  rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
 }
 ```
 
@@ -87,6 +89,23 @@ are `KvService` and `AdminService`.
 - **Outcome unknown.** A write whose call ends with `CANCELLED`,
   `DEADLINE_EXCEEDED`, `UNAVAILABLE`, or `INTERNAL` may have taken effect.
   `Put` and `Delete` are idempotent, so a retry is safe.
+- **Streaming snapshots (`AdminService.Snapshot`).** Streams the last
+  committed checkpoint (or commits a fresh one first when
+  `SnapshotRequest.checkpoint` is `true`) over `Db::write_snapshot` in chunks
+  of `Config::snapshot_chunk_bytes` (default 256 KiB), followed by a
+  `SnapshotTrailer` carrying `applied_seq`, `checkpoint_id`, `total_bytes`,
+  and a Castagnoli `crc32c`. A bounded channel (4 chunks) applies
+  backpressure; client cancellation aborts `write_snapshot` and releases its
+  snapshot pin and permits. Concurrency is capped at
+  `Config::max_concurrent_snapshots` (default 4) so snapshots cannot starve
+  KV requests.
+- **Metrics.** When `--metrics-listen <ADDR>` is set (or a listener is passed
+  to `serve_with_metrics`), an HTTP/1.1 listener serves Prometheus/OpenMetrics
+  text exposition (`prometheus-client`) on `GET /metrics` (404 on other
+  paths). It reports `peppydb_rpc_requests_total{method,code}`,
+  `peppydb_rpc_duration_seconds{method}`, `peppydb_inflight_requests`,
+  `peppydb_snapshot_active`, `peppydb_snapshot_bytes_total`,
+  `peppydb_engine_applied_seq`, and `peppydb_process_uptime_seconds`.
 - **Versioned.** Incompatible changes go to `peppydb.kv.v2`; `buf breaking`
   enforces it.
 
@@ -223,8 +242,8 @@ sequenceDiagram
 
 ```text
 peppydb serve --data-dir <DIR> [--listen 127.0.0.1:7420]
-              [--flush-interval-us 0] [--io cached|direct]
-              [--max-inflight 1024]
+              [--metrics-listen <ADDR>] [--flush-interval-us 0]
+              [--io cached|direct] [--max-inflight 1024]
 ```
 
 - The default address is loopback: there is no TLS or authentication.
@@ -288,6 +307,8 @@ Test paths are relative to `lib/server/src/tests/` unless noted.
 | 15. The generated code matches `proto/`, which passes lint and the breaking-change check. | `tools/gen-proto --check` |
 | 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `lib/load/load_test.go` |
 | 17. Accepted connections set `TCP_NODELAY`. | `transport.rs`: `accepted_connections_set_nodelay` |
+| 18. `AdminService.Snapshot` streams a CRC32C-verified store image while writes run, restores via `Db::install_snapshot`, and releases permits on cancel. | `admin.rs`: `snapshot_streams_valid_image_and_restores_exact_state`, `snapshot_cancellation_releases_permits_and_allows_shutdown`, `snapshot_streams_cleanly_while_writes_run` |
+| 19. `GET /metrics` exports accurate RPC counts, latency histograms, snapshot bytes, and `applied_seq`; other paths return 404. | `metrics.rs`: `metrics_render_prometheus_exposition`; `admin.rs`: `metrics_endpoint_reports_rpcs_snapshots_and_applied_seq` |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
 `lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
@@ -306,7 +327,7 @@ double open still fails. Production servers do not fork.
   exposed), consistent scans across leaves or pages, and durability of a
   value a reader saw before its writer returned
   ([engine](engine.md#db-not-guaranteed-and-limits)).
-- **No TLS, no authentication, no metrics.**
+- **No TLS and no authentication.**
 - **The outcome of a failed write is unknown** to the client.
 - **One blocking thread per in-flight engine call.** A write holds a
   blocking-pool thread while it waits for its fsync, so the threads equal
@@ -339,7 +360,88 @@ double open still fails. Production servers do not fork.
 
 ## Measurements
 
-Informational, not gates. **Environment:** native macOS 27.0.1, Apple M4
+Informational, not gates.
+
+### Linux reference: separate server and client VMs
+
+The first reference run of the server on Linux (2026-11-23, run
+`20261123-035822-b86cd8de`, revision `b86cd8de`, `@build/mode/release`,
+`tools/gcp-bench run --suite server-perf`).
+
+- **Server:** one `peppydb serve` process with default settings
+  (`--io cached`, `--flush-interval-us 0`) on a `c4d-standard-8-lssd` VM
+  (AMD EPYC 9B45, 8 vCPUs on 4 cores), WAL and store on the Local SSD
+  (ext4). One node, no replication. Every put is acknowledged only after
+  its WAL group is synced with `fdatasync`.
+- **Client:** `peppydb-load` on an `n4-standard-8` VM in the same zone
+  (`us-east1-b`), over the internal network.
+- **Workload:** 8-byte keys, 16-byte values, 100,000 keys, 2 s warmup,
+  10 s per step, 4 connections (8 for `get` at concurrency 256). The
+  `get` steps read keys that `get-c64 --preload` wrote.
+
+| Workload | Concurrency | Ops/s | p50 (µs) | p99 (µs) | p99.9 (µs) | Max (µs) | Server handler mean (µs) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| put | 1 | 4,297 | 229 | 360 | 557 | 4,495 | 81 |
+| put | 4 | 15,719 | 254 | 426 | 623 | 1,242 | 97 |
+| put | 16 | 51,637 | 295 | 590 | 819 | 1,755 | 120 |
+| put | 64 | 116,371 | 475 | 1,376 | 1,638 | 3,943 | 171 |
+| put | 256 | 194,833 | 1,245 | 3,015 | 3,670 | 10,360 | 335 |
+| get (uniform) | 64 | 144,117 | 344 | 1,442 | 1,770 | 4,966 | 13 |
+| get (uniform) | 256 | 238,466 | 852 | 3,539 | 4,719 | 9,974 | 44 |
+| mixed 90% get, zipf 1.1: put | 64 | 13,840 | 492 | 1,573 | 1,901 | 2,824 | 158 |
+| mixed 90% get, zipf 1.1: get | 64 | 124,362 | 344 | 1,442 | 1,770 | 2,941 | 15 |
+
+Latencies are measured by the client, end to end. The client's histogram
+reports bucket bounds, so percentiles have coarse resolution. "Server
+handler mean" comes from the difference of the
+`peppydb_rpc_duration_seconds` sum and count between the `/metrics`
+scrapes after consecutive steps.
+
+- **One client gets about 4,300 durable puts/s.** A put takes 229 µs at
+  p50, of which 81 µs is in the server handler, including the WAL sync.
+  The rest is the network and the gRPC stacks of both processes.
+- **Puts scale through group commit.** From concurrency 1 to 64,
+  throughput grows 27 times while p50 only doubles. From 64 to 256,
+  throughput grows only 1.7 times: the server is near saturation.
+- **High-concurrency tails are queueing, not stalls.** `peppydb-load` is
+  closed-loop: each worker sends its next request when the previous one
+  returns. At concurrency 256 the server is saturated, so latency follows
+  Little's law (256 / 194,833 ops/s = 1.3 ms, the p50) and p99 is the far
+  end of the queue. Below a quarter of the peak rate, put p99 stays under
+  600 µs. Tail latency under a fixed offered load needs an open-loop mode
+  (a `--rate` flag), which `peppydb-load` does not have yet.
+- **Max values are single events.** A 4.5 ms max at concurrency 1, where
+  p99.9 is 557 µs, is one slow request in a 10 s step. Its cause
+  (an fsync, a WAL segment roll, a checkpoint, or the VM) is not known.
+- **The ceiling is per-RPC CPU, not the engine.** Gets cost 44 µs in the
+  handler and puts 335 µs at concurrency 256, yet both saturate near
+  200,000 to 240,000 ops/s.
+
+**Where server CPU goes.** Two more runs of the same suite measured the
+server under profilers (`@build/mode/profile`, so their throughput is not
+a reference number). `perf stat` (run `20261123-035934-b86cd8de`) counted
+311.6 CPU-seconds for 9.59 million RPCs: about 32 µs of CPU, 4.4 context
+switches, and 1.3 CPU migrations per RPC. `perf record` (run
+`20261123-040416-b86cd8de`, 307,000 `cpu-clock` samples over all steps)
+splits that time as follows:
+
+| Part | Share of server CPU | Contents |
+| --- | --- | --- |
+| gRPC on the Tokio workers | about 61% | h2, hyper, and tonic 26%; prost about 12%; `malloc` and `free` 8%; kernel TCP 5%; scheduler and wakeups 6%; h2 stream-lock contention 4% |
+| The blocking bridge | about 25% | Blocking-pool threads parking, waking, and contending for the pool's lock (13%); scheduler work on the engine-call threads (9%); Tokio and syscall overhead (3%) |
+| Engine (`bf_tree`, `Db::put`, `Db::get`) | about 7% | |
+| WAL flusher | about 4% | `fdatasync` and ext4 1.4%; waking the writers that wait on `durable` 2.7% |
+
+With 8-byte keys and 16-byte values, the engine does about 2 to 3 µs of
+work per RPC. The per-request costs around it dominate: gRPC framing and
+encoding, and the two thread handoffs of the
+[blocking bridge](#the-blocking-bridge). Their share is expected to shrink
+with replication and larger values. The profile is the starting point for
+later optimization work; no change is planned yet.
+
+### macOS, one machine
+
+**Environment:** native macOS 27.0.1, Apple M4
 Pro (12 cores), APFS on the internal SSD, where one fsync takes about
 4 ms; release builds (`@build/mode/release`); `peppydb-load` and
 `peppydb serve` on the same machine over loopback. Docker was not
@@ -373,9 +475,8 @@ point, 4 connections, default server settings.
   takes tens of microseconds, against about 4 ms for `F_FULLFSYNC` here, so
   the single-client put rate above reflects this machine's fsync, not the
   server. The read gap (77,000/s against millions in-process) is mostly RPC
-  cost on a shared machine and has not been broken down yet.
-- Reference runs of the server on Linux, on separate client and server
-  machines through `tools/gcp-bench`, belong to roadmap S2.
+  cost; the [Linux profile](#linux-reference-separate-server-and-client-vms)
+  breaks it down.
 
 ## Relationship to sources
 
