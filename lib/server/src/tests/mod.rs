@@ -2,6 +2,7 @@
 //! generated client.
 
 mod admin;
+mod cluster;
 mod kv;
 mod process;
 mod scan;
