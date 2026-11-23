@@ -1,0 +1,18 @@
+# mode: client-server
+# Single-node server benchmarks on separate client and server GCP VMs
+# (plan 0031, milestone S2). The server runs on a c4d-standard-8-lssd VM
+# with its database on the Local SSD; peppydb-load runs on a separate
+# n4-standard-8 client VM in the same zone over the internal VPC.
+#
+# Each workload matches the parameters of docs/design/server.md#measurements:
+# 8-byte keys, 16-byte values, 100,000 keys, 2s warmup, 10s duration, JSON
+# output. After each step, remote-bench.sh scrapes http://$METRICS_ADDR/metrics.
+server       peppydb      serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090
+put-c1       peppydb-load --addr $SERVER_ADDR --workload put --concurrency 1 --conns 1 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c4       peppydb-load --addr $SERVER_ADDR --workload put --concurrency 4 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c16      peppydb-load --addr $SERVER_ADDR --workload put --concurrency 16 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c64      peppydb-load --addr $SERVER_ADDR --workload put --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c256     peppydb-load --addr $SERVER_ADDR --workload put --concurrency 256 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+get-c64      peppydb-load --addr $SERVER_ADDR --workload get --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --preload --json
+get-c256     peppydb-load --addr $SERVER_ADDR --workload get --concurrency 256 --conns 8 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+mixed90-zipf peppydb-load --addr $SERVER_ADDR --workload mixed:90 --distribution zipf:1.1 --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
