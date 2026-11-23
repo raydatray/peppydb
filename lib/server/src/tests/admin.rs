@@ -1,8 +1,12 @@
-//! `Status`, `Checkpoint`, health, graceful shutdown, and fail-stop.
+//! `Status`, `Checkpoint`, `Snapshot`, health, graceful shutdown, and fail-stop.
 
+use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-use kv_proto::kv::v1::{CheckpointRequest, GetRequest, PutRequest, StatusRequest};
+use kv_proto::kv::v1::snapshot_response::Payload;
+use kv_proto::kv::v1::{
+    CheckpointRequest, GetRequest, PutRequest, SnapshotRequest, SnapshotTrailer, StatusRequest,
+};
 use tonic::Code;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
@@ -150,4 +154,209 @@ async fn a_wal_failure_stops_the_server_and_a_reopen_recovers() {
     assert_eq!(value.as_deref(), Some(&b"v"[..]));
     kv.put(put(b"after")).await.unwrap();
     server.stop().await.unwrap();
+}
+
+async fn receive_snapshot(
+    admin: &mut kv_proto::kv::v1::admin_service_client::AdminServiceClient<
+        tonic::transport::Channel,
+    >,
+    checkpoint: bool,
+    max_chunk_bytes: usize,
+) -> (Vec<u8>, SnapshotTrailer, usize) {
+    let mut stream = admin
+        .snapshot(SnapshotRequest { checkpoint })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut bytes = Vec::new();
+    let mut chunks = 0usize;
+    let mut trailer = None;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.payload.expect("snapshot payload") {
+            Payload::Chunk(chunk) => {
+                assert!(trailer.is_none(), "chunk after trailer");
+                assert!(!chunk.is_empty(), "empty chunk");
+                assert!(
+                    chunk.len() <= max_chunk_bytes,
+                    "chunk {} exceeds limit {}",
+                    chunk.len(),
+                    max_chunk_bytes
+                );
+                chunks += 1;
+                bytes.extend_from_slice(&chunk);
+            }
+            Payload::Trailer(t) => {
+                assert!(trailer.is_none(), "duplicate trailer");
+                trailer = Some(t);
+            }
+        }
+    }
+    let trailer = trailer.expect("snapshot trailer");
+    assert_eq!(trailer.total_bytes, bytes.len() as u64);
+    assert_eq!(trailer.crc32c, crc32c::crc32c(&bytes));
+    (bytes, trailer, chunks)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_streams_valid_image_and_restores_exact_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let chunk_size = 4096;
+    let config = Config {
+        snapshot_chunk_bytes: chunk_size,
+        ..Config::default()
+    };
+    let server = Server::start(dir.path(), config).await;
+    let (mut kv, mut admin) = (server.kv().await, server.admin().await);
+
+    for i in 0..100u32 {
+        kv.put(PutRequest {
+            key: format!("key-{i:04}").into_bytes(),
+            value: vec![b'x'; 256],
+        })
+        .await
+        .unwrap();
+    }
+    let status = admin.status(StatusRequest {}).await.unwrap().into_inner();
+
+    // Without `checkpoint: true`, the snapshot reflects the last committed
+    // checkpoint (before the 100 writes were checkpointed).
+    let (_, before_trailer, _) = receive_snapshot(&mut admin, false, chunk_size).await;
+    assert!(before_trailer.applied_seq < status.applied_seq);
+
+    // With `checkpoint: true`, a fresh checkpoint commits first and the
+    // streamed image contains all 100 writes across multiple chunks.
+    let (bytes, trailer, chunks) = receive_snapshot(&mut admin, true, chunk_size).await;
+    assert_eq!(trailer.applied_seq, status.applied_seq);
+    assert!(trailer.checkpoint_id > before_trailer.checkpoint_id);
+    assert!(chunks > 1, "expected multiple chunks, got {chunks}");
+    server.stop().await.unwrap();
+
+    // Restore the streamed image into a fresh database and serve it.
+    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_path = restored_dir.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let db = engine::Db::open(
+            &restored_path,
+            engine::Options {
+                mode: engine::Mode::External,
+                ..engine::Options::default()
+            },
+        )
+        .unwrap();
+        let mut cursor = Cursor::new(bytes);
+        let db = db.install_snapshot(&mut cursor).unwrap();
+        assert_eq!(db.applied_seq(), trailer.applied_seq);
+        db.close().unwrap();
+    })
+    .await
+    .unwrap();
+
+    let restored = Server::start(restored_dir.path(), Config::default()).await;
+    let mut restored_kv = restored.kv().await;
+    for i in 0..100u32 {
+        let value = restored_kv
+            .get(GetRequest {
+                key: format!("key-{i:04}").into_bytes(),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .value;
+        assert_eq!(value.as_deref(), Some(&vec![b'x'; 256][..]));
+    }
+    restored.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_cancellation_releases_permits_and_allows_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        snapshot_chunk_bytes: 512,
+        max_concurrent_snapshots: 1,
+        ..Config::default()
+    };
+    let server = Server::start(dir.path(), config).await;
+    let (mut kv, mut admin) = (server.kv().await, server.admin().await);
+
+    for i in 0..50u32 {
+        kv.put(PutRequest {
+            key: format!("k-{i:03}").into_bytes(),
+            value: vec![b'z'; 256],
+        })
+        .await
+        .unwrap();
+    }
+    admin.checkpoint(CheckpointRequest {}).await.unwrap();
+
+    // Start a snapshot, read one chunk, and drop the stream early.
+    let mut stream = admin
+        .snapshot(SnapshotRequest { checkpoint: false })
+        .await
+        .unwrap()
+        .into_inner();
+    let first = stream.message().await.unwrap().unwrap();
+    assert!(matches!(first.payload, Some(Payload::Chunk(_))));
+    drop(stream);
+
+    // With `max_concurrent_snapshots = 1`, a second snapshot only succeeds
+    // once the cancelled one releases its permit.
+    let (_, trailer, chunks) = tokio::time::timeout(
+        Duration::from_secs(10),
+        receive_snapshot(&mut admin, false, 512),
+    )
+    .await
+    .expect("second snapshot after cancel");
+    assert!(chunks > 1);
+    assert!(trailer.total_bytes > 0);
+
+    assert!(matches!(server.stop().await, Ok(Exit::Clean)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_streams_cleanly_while_writes_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(dir.path(), Config::default()).await;
+    let mut writer_kv = server.kv().await;
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let writer = tokio::spawn(async move {
+        let mut i = 0u32;
+        while stop_rx.try_recv().is_err() {
+            let _ = writer_kv
+                .put(PutRequest {
+                    key: format!("live-{i:06}").into_bytes(),
+                    value: vec![b'w'; 64],
+                })
+                .await;
+            i += 1;
+        }
+    });
+
+    let mut admin = server.admin().await;
+    for _ in 0..3 {
+        let (bytes, trailer, _) =
+            receive_snapshot(&mut admin, true, Config::default().snapshot_chunk_bytes).await;
+        assert!(trailer.total_bytes > 0);
+        let check_dir = tempfile::tempdir().unwrap();
+        let check_path = check_dir.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let db = engine::Db::open(
+                &check_path,
+                engine::Options {
+                    mode: engine::Mode::External,
+                    ..engine::Options::default()
+                },
+            )
+            .unwrap();
+            let mut cursor = Cursor::new(bytes);
+            let db = db.install_snapshot(&mut cursor).unwrap();
+            assert_eq!(db.applied_seq(), trailer.applied_seq);
+            db.close().unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    let _ = stop_tx.send(());
+    writer.await.unwrap();
+    assert!(matches!(server.stop().await, Ok(Exit::Clean)));
 }

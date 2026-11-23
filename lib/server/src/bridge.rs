@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwapOption;
 use engine::Db;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tonic::Status;
 
 use crate::Config;
@@ -20,6 +20,7 @@ pub(crate) struct Inner {
     /// `None` once shutdown has taken the database to close it.
     db: ArcSwapOption<Db>,
     inflight: Arc<Semaphore>,
+    snapshots: Arc<Semaphore>,
     pub(crate) config: Config,
     /// The first WAL failure: the server must stop (fail-stop).
     fatal: Mutex<Option<engine::Error>>,
@@ -32,6 +33,7 @@ impl Inner {
         Self {
             db: ArcSwapOption::from_pointee(db),
             inflight: Arc::new(Semaphore::new(config.max_inflight)),
+            snapshots: Arc::new(Semaphore::new(config.max_concurrent_snapshots)),
             config,
             fatal: Mutex::new(None),
             fatal_notify: Notify::new(),
@@ -50,9 +52,38 @@ impl Inner {
         }
     }
 
+    /// Acquire a snapshot permit, an in-flight permit, and a handle to the
+    /// database, then run `f` on the blocking pool without awaiting it.
+    ///
+    /// The blocking task owns both permits and drops the `Db` handle before
+    /// the permits, so `take_db` waits for running snapshots to finish.
+    pub(crate) async fn spawn_snapshot(
+        &self,
+        f: impl FnOnce(&Db) + Send + 'static,
+    ) -> Result<(), Status> {
+        let snapshot_permit = Arc::clone(&self.snapshots)
+            .acquire_owned()
+            .await
+            .map_err(|_| shutting_down())?;
+        let inflight_permit = Arc::clone(&self.inflight)
+            .acquire_owned()
+            .await
+            .map_err(|_| shutting_down())?;
+        let db = self.db.load_full().ok_or_else(shutting_down)?;
+        tokio::task::spawn_blocking(move || {
+            // Declared first, so dropped last: `db` is released before both
+            // permits, preserving `take_db`'s exclusive-ownership invariant.
+            let _inflight: OwnedSemaphorePermit = inflight_permit;
+            let _snapshot: OwnedSemaphorePermit = snapshot_permit;
+            let db = db;
+            f(&db);
+        });
+        Ok(())
+    }
+
     /// The status for an engine error. A WAL error also starts the
     /// fail-stop shutdown: the WAL fails every later write until a reopen.
-    fn engine_status(&self, error: engine::Error) -> Status {
+    pub(crate) fn engine_status(&self, error: engine::Error) -> Status {
         let status = crate::status::status(&error);
         if matches!(error, engine::Error::Wal(_)) {
             let mut fatal = self.fatal.lock().unwrap_or_else(PoisonError::into_inner);
