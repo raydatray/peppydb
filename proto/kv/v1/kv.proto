@@ -50,6 +50,9 @@ service AdminService {
   rpc Status(StatusRequest) returns (StatusResponse);
   // Commit a checkpoint of the storage engine now.
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+  // Stream the last committed checkpoint (or a fresh one if requested) as an
+  // openable engine store image, followed by a checksummed trailer.
+  rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
 }
 
 message GetRequest {
@@ -118,4 +121,32 @@ message CheckpointResponse {
   uint64 applied_seq = 1;
   // Increases by one per committed checkpoint.
   uint64 checkpoint_id = 2;
+}
+
+message SnapshotRequest {
+  // If true, commit a fresh checkpoint before streaming so the snapshot
+  // includes every write applied so far. If false, stream the last committed
+  // checkpoint without triggering a new one.
+  bool checkpoint = 1;
+}
+
+message SnapshotResponse {
+  oneof payload {
+    // Raw bytes of the engine store file, in order.
+    bytes chunk = 1;
+    // Sent once after the final chunk with the snapshot's metadata and
+    // checksum.
+    SnapshotTrailer trailer = 2;
+  }
+}
+
+message SnapshotTrailer {
+  // Every write at or below this sequence is in the streamed image.
+  uint64 applied_seq = 1;
+  // The checkpoint id of the streamed image.
+  uint64 checkpoint_id = 2;
+  // Total byte length of all chunks sent before this trailer.
+  uint64 total_bytes = 3;
+  // Castagnoli CRC32C over the concatenation of all chunks.
+  uint32 crc32c = 4;
 }
