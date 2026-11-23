@@ -654,6 +654,210 @@ func (x *CheckpointResponse) GetCheckpointId() uint64 {
 	return 0
 }
 
+type SnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// If true, commit a fresh checkpoint before streaming so the snapshot
+	// includes every write applied so far. If false, stream the last committed
+	// checkpoint without triggering a new one.
+	Checkpoint    bool `protobuf:"varint,1,opt,name=checkpoint,proto3" json:"checkpoint,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotRequest) Reset() {
+	*x = SnapshotRequest{}
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotRequest) ProtoMessage() {}
+
+func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *SnapshotRequest) GetCheckpoint() bool {
+	if x != nil {
+		return x.Checkpoint
+	}
+	return false
+}
+
+type SnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*SnapshotResponse_Chunk
+	//	*SnapshotResponse_Trailer
+	Payload       isSnapshotResponse_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotResponse) Reset() {
+	*x = SnapshotResponse{}
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotResponse) ProtoMessage() {}
+
+func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotResponse.ProtoReflect.Descriptor instead.
+func (*SnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *SnapshotResponse) GetPayload() isSnapshotResponse_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *SnapshotResponse) GetChunk() []byte {
+	if x != nil {
+		if x, ok := x.Payload.(*SnapshotResponse_Chunk); ok {
+			return x.Chunk
+		}
+	}
+	return nil
+}
+
+func (x *SnapshotResponse) GetTrailer() *SnapshotTrailer {
+	if x != nil {
+		if x, ok := x.Payload.(*SnapshotResponse_Trailer); ok {
+			return x.Trailer
+		}
+	}
+	return nil
+}
+
+type isSnapshotResponse_Payload interface {
+	isSnapshotResponse_Payload()
+}
+
+type SnapshotResponse_Chunk struct {
+	// Raw bytes of the engine store file, in order.
+	Chunk []byte `protobuf:"bytes,1,opt,name=chunk,proto3,oneof"`
+}
+
+type SnapshotResponse_Trailer struct {
+	// Sent once after the final chunk with the snapshot's metadata and
+	// checksum.
+	Trailer *SnapshotTrailer `protobuf:"bytes,2,opt,name=trailer,proto3,oneof"`
+}
+
+func (*SnapshotResponse_Chunk) isSnapshotResponse_Payload() {}
+
+func (*SnapshotResponse_Trailer) isSnapshotResponse_Payload() {}
+
+type SnapshotTrailer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Every write at or below this sequence is in the streamed image.
+	AppliedSeq uint64 `protobuf:"varint,1,opt,name=applied_seq,json=appliedSeq,proto3" json:"applied_seq,omitempty"`
+	// The checkpoint id of the streamed image.
+	CheckpointId uint64 `protobuf:"varint,2,opt,name=checkpoint_id,json=checkpointId,proto3" json:"checkpoint_id,omitempty"`
+	// Total byte length of all chunks sent before this trailer.
+	TotalBytes uint64 `protobuf:"varint,3,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	// Castagnoli CRC32C over the concatenation of all chunks.
+	Crc32C        uint32 `protobuf:"varint,4,opt,name=crc32c,proto3" json:"crc32c,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotTrailer) Reset() {
+	*x = SnapshotTrailer{}
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotTrailer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotTrailer) ProtoMessage() {}
+
+func (x *SnapshotTrailer) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotTrailer.ProtoReflect.Descriptor instead.
+func (*SnapshotTrailer) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SnapshotTrailer) GetAppliedSeq() uint64 {
+	if x != nil {
+		return x.AppliedSeq
+	}
+	return 0
+}
+
+func (x *SnapshotTrailer) GetCheckpointId() uint64 {
+	if x != nil {
+		return x.CheckpointId
+	}
+	return 0
+}
+
+func (x *SnapshotTrailer) GetTotalBytes() uint64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *SnapshotTrailer) GetCrc32C() uint32 {
+	if x != nil {
+		return x.Crc32C
+	}
+	return 0
+}
+
 var File_kv_v1_kv_proto protoreflect.FileDescriptor
 
 const file_kv_v1_kv_proto_rawDesc = "" +
@@ -696,16 +900,32 @@ const file_kv_v1_kv_proto_rawDesc = "" +
 	"\x12CheckpointResponse\x12\x1f\n" +
 	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
 	"appliedSeq\x12#\n" +
-	"\rcheckpoint_id\x18\x02 \x01(\x04R\fcheckpointId2\x8f\x02\n" +
+	"\rcheckpoint_id\x18\x02 \x01(\x04R\fcheckpointId\"1\n" +
+	"\x0fSnapshotRequest\x12\x1e\n" +
+	"\n" +
+	"checkpoint\x18\x01 \x01(\bR\n" +
+	"checkpoint\"q\n" +
+	"\x10SnapshotResponse\x12\x16\n" +
+	"\x05chunk\x18\x01 \x01(\fH\x00R\x05chunk\x12:\n" +
+	"\atrailer\x18\x02 \x01(\v2\x1e.peppydb.kv.v1.SnapshotTrailerH\x00R\atrailerB\t\n" +
+	"\apayload\"\x90\x01\n" +
+	"\x0fSnapshotTrailer\x12\x1f\n" +
+	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
+	"appliedSeq\x12#\n" +
+	"\rcheckpoint_id\x18\x02 \x01(\x04R\fcheckpointId\x12\x1f\n" +
+	"\vtotal_bytes\x18\x03 \x01(\x04R\n" +
+	"totalBytes\x12\x16\n" +
+	"\x06crc32c\x18\x04 \x01(\rR\x06crc32c2\x8f\x02\n" +
 	"\tKvService\x12<\n" +
 	"\x03Get\x12\x19.peppydb.kv.v1.GetRequest\x1a\x1a.peppydb.kv.v1.GetResponse\x12<\n" +
 	"\x03Put\x12\x19.peppydb.kv.v1.PutRequest\x1a\x1a.peppydb.kv.v1.PutResponse\x12E\n" +
 	"\x06Delete\x12\x1c.peppydb.kv.v1.DeleteRequest\x1a\x1d.peppydb.kv.v1.DeleteResponse\x12?\n" +
-	"\x04Scan\x12\x1a.peppydb.kv.v1.ScanRequest\x1a\x1b.peppydb.kv.v1.ScanResponse2\xa8\x01\n" +
+	"\x04Scan\x12\x1a.peppydb.kv.v1.ScanRequest\x1a\x1b.peppydb.kv.v1.ScanResponse2\xf7\x01\n" +
 	"\fAdminService\x12E\n" +
 	"\x06Status\x12\x1c.peppydb.kv.v1.StatusRequest\x1a\x1d.peppydb.kv.v1.StatusResponse\x12Q\n" +
 	"\n" +
-	"Checkpoint\x12 .peppydb.kv.v1.CheckpointRequest\x1a!.peppydb.kv.v1.CheckpointResponseB\x1dZ\x1bpeppydb/proto/kv/v1/go;kvv1b\x06proto3"
+	"Checkpoint\x12 .peppydb.kv.v1.CheckpointRequest\x1a!.peppydb.kv.v1.CheckpointResponse\x12M\n" +
+	"\bSnapshot\x12\x1e.peppydb.kv.v1.SnapshotRequest\x1a\x1f.peppydb.kv.v1.SnapshotResponse0\x01B\x1dZ\x1bpeppydb/proto/kv/v1/go;kvv1b\x06proto3"
 
 var (
 	file_kv_v1_kv_proto_rawDescOnce sync.Once
@@ -719,7 +939,7 @@ func file_kv_v1_kv_proto_rawDescGZIP() []byte {
 	return file_kv_v1_kv_proto_rawDescData
 }
 
-var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_kv_v1_kv_proto_goTypes = []any{
 	(*GetRequest)(nil),         // 0: peppydb.kv.v1.GetRequest
 	(*GetResponse)(nil),        // 1: peppydb.kv.v1.GetResponse
@@ -734,26 +954,32 @@ var file_kv_v1_kv_proto_goTypes = []any{
 	(*StatusResponse)(nil),     // 10: peppydb.kv.v1.StatusResponse
 	(*CheckpointRequest)(nil),  // 11: peppydb.kv.v1.CheckpointRequest
 	(*CheckpointResponse)(nil), // 12: peppydb.kv.v1.CheckpointResponse
+	(*SnapshotRequest)(nil),    // 13: peppydb.kv.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),   // 14: peppydb.kv.v1.SnapshotResponse
+	(*SnapshotTrailer)(nil),    // 15: peppydb.kv.v1.SnapshotTrailer
 }
 var file_kv_v1_kv_proto_depIdxs = []int32{
 	7,  // 0: peppydb.kv.v1.ScanResponse.records:type_name -> peppydb.kv.v1.KeyValue
-	0,  // 1: peppydb.kv.v1.KvService.Get:input_type -> peppydb.kv.v1.GetRequest
-	2,  // 2: peppydb.kv.v1.KvService.Put:input_type -> peppydb.kv.v1.PutRequest
-	4,  // 3: peppydb.kv.v1.KvService.Delete:input_type -> peppydb.kv.v1.DeleteRequest
-	6,  // 4: peppydb.kv.v1.KvService.Scan:input_type -> peppydb.kv.v1.ScanRequest
-	9,  // 5: peppydb.kv.v1.AdminService.Status:input_type -> peppydb.kv.v1.StatusRequest
-	11, // 6: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
-	1,  // 7: peppydb.kv.v1.KvService.Get:output_type -> peppydb.kv.v1.GetResponse
-	3,  // 8: peppydb.kv.v1.KvService.Put:output_type -> peppydb.kv.v1.PutResponse
-	5,  // 9: peppydb.kv.v1.KvService.Delete:output_type -> peppydb.kv.v1.DeleteResponse
-	8,  // 10: peppydb.kv.v1.KvService.Scan:output_type -> peppydb.kv.v1.ScanResponse
-	10, // 11: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
-	12, // 12: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	15, // 1: peppydb.kv.v1.SnapshotResponse.trailer:type_name -> peppydb.kv.v1.SnapshotTrailer
+	0,  // 2: peppydb.kv.v1.KvService.Get:input_type -> peppydb.kv.v1.GetRequest
+	2,  // 3: peppydb.kv.v1.KvService.Put:input_type -> peppydb.kv.v1.PutRequest
+	4,  // 4: peppydb.kv.v1.KvService.Delete:input_type -> peppydb.kv.v1.DeleteRequest
+	6,  // 5: peppydb.kv.v1.KvService.Scan:input_type -> peppydb.kv.v1.ScanRequest
+	9,  // 6: peppydb.kv.v1.AdminService.Status:input_type -> peppydb.kv.v1.StatusRequest
+	11, // 7: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
+	13, // 8: peppydb.kv.v1.AdminService.Snapshot:input_type -> peppydb.kv.v1.SnapshotRequest
+	1,  // 9: peppydb.kv.v1.KvService.Get:output_type -> peppydb.kv.v1.GetResponse
+	3,  // 10: peppydb.kv.v1.KvService.Put:output_type -> peppydb.kv.v1.PutResponse
+	5,  // 11: peppydb.kv.v1.KvService.Delete:output_type -> peppydb.kv.v1.DeleteResponse
+	8,  // 12: peppydb.kv.v1.KvService.Scan:output_type -> peppydb.kv.v1.ScanResponse
+	10, // 13: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
+	12, // 14: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
+	14, // 15: peppydb.kv.v1.AdminService.Snapshot:output_type -> peppydb.kv.v1.SnapshotResponse
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_kv_v1_kv_proto_init() }
@@ -764,13 +990,17 @@ func file_kv_v1_kv_proto_init() {
 	file_kv_v1_kv_proto_msgTypes[1].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[6].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[8].OneofWrappers = []any{}
+	file_kv_v1_kv_proto_msgTypes[14].OneofWrappers = []any{
+		(*SnapshotResponse_Chunk)(nil),
+		(*SnapshotResponse_Trailer)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kv_v1_kv_proto_rawDesc), len(file_kv_v1_kv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

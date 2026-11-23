@@ -10,6 +10,7 @@ peppy_rust_library(
         "//proto/kv/v1/rust:kv-proto",
         "//third-party/rust:arc-swap",
         "//third-party/rust:clap",
+        "//third-party/rust:futures-util",
         "//third-party/rust:thiserror",
         "//third-party/rust:tokio",
         "//third-party/rust:tonic",
@@ -20,8 +21,6 @@ peppy_rust_library(
     test_deps = [
         # Db::fail_next_wal_sync, for the fail-stop tests.
         "//lib/engine:engine-fault-injection",
-        # StreamExt::next on TcpIncoming, for the transport tests.
-        "//third-party/rust:futures-util",
         "//third-party/rust:tempfile",
     ],
     visibility = ["//bin/peppydb:"],

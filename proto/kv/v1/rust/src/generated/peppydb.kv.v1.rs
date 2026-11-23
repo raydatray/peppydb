@@ -83,6 +83,47 @@ pub struct CheckpointResponse {
     #[prost(uint64, tag = "2")]
     pub checkpoint_id: u64,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SnapshotRequest {
+    /// If true, commit a fresh checkpoint before streaming so the snapshot
+    /// includes every write applied so far. If false, stream the last committed
+    /// checkpoint without triggering a new one.
+    #[prost(bool, tag = "1")]
+    pub checkpoint: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SnapshotResponse {
+    #[prost(oneof = "snapshot_response::Payload", tags = "1, 2")]
+    pub payload: ::core::option::Option<snapshot_response::Payload>,
+}
+/// Nested message and enum types in `SnapshotResponse`.
+pub mod snapshot_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        /// Raw bytes of the engine store file, in order.
+        #[prost(bytes, tag = "1")]
+        Chunk(::prost::alloc::vec::Vec<u8>),
+        /// Sent once after the final chunk with the snapshot's metadata and
+        /// checksum.
+        #[prost(message, tag = "2")]
+        Trailer(super::SnapshotTrailer),
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SnapshotTrailer {
+    /// Every write at or below this sequence is in the streamed image.
+    #[prost(uint64, tag = "1")]
+    pub applied_seq: u64,
+    /// The checkpoint id of the streamed image.
+    #[prost(uint64, tag = "2")]
+    pub checkpoint_id: u64,
+    /// Total byte length of all chunks sent before this trailer.
+    #[prost(uint64, tag = "3")]
+    pub total_bytes: u64,
+    /// Castagnoli CRC32C over the concatenation of all chunks.
+    #[prost(uint32, tag = "4")]
+    pub crc32c: u32,
+}
 /// Generated client implementations.
 pub mod kv_service_client {
     #![allow(
@@ -745,6 +786,32 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("peppydb.kv.v1.AdminService", "Checkpoint"));
             self.inner.unary(req, path, codec).await
         }
+        /// Stream the last committed checkpoint (or a fresh one if requested) as an
+        /// openable engine store image, followed by a checksummed trailer.
+        pub async fn snapshot(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SnapshotRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::SnapshotResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/peppydb.kv.v1.AdminService/Snapshot",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("peppydb.kv.v1.AdminService", "Snapshot"));
+            self.inner.server_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -773,6 +840,18 @@ pub mod admin_service_server {
             tonic::Response<super::CheckpointResponse>,
             tonic::Status,
         >;
+        /// Server streaming response type for the Snapshot method.
+        type SnapshotStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::SnapshotResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Stream the last committed checkpoint (or a fresh one if requested) as an
+        /// openable engine store image, followed by a checksummed trailer.
+        async fn snapshot(
+            &self,
+            request: tonic::Request<super::SnapshotRequest>,
+        ) -> std::result::Result<tonic::Response<Self::SnapshotStream>, tonic::Status>;
     }
     /// Operations on the server itself.
     #[derive(Debug)]
@@ -937,6 +1016,52 @@ pub mod admin_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/peppydb.kv.v1.AdminService/Snapshot" => {
+                    #[allow(non_camel_case_types)]
+                    struct SnapshotSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::ServerStreamingService<super::SnapshotRequest>
+                    for SnapshotSvc<T> {
+                        type Response = super::SnapshotResponse;
+                        type ResponseStream = T::SnapshotStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SnapshotRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::snapshot(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SnapshotSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
