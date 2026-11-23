@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -45,7 +46,7 @@ type options struct {
 
 func main() {
 	var o options
-	flag.StringVar(&o.addr, "addr", "127.0.0.1:7420", "server address")
+	flag.StringVar(&o.addr, "addr", "127.0.0.1:7420", "comma-separated server addresses (follows LeaderHint)")
 	flag.StringVar(&o.workload, "workload", "put", "put, get, or mixed[:read-percent] (default 50)")
 	flag.IntVar(&o.concurrency, "concurrency", 64, "concurrent workers")
 	flag.IntVar(&o.conns, "conns", 4, "gRPC connections shared by the workers")
@@ -85,6 +86,136 @@ func readPercent(workload string) (int, error) {
 	return 0, fmt.Errorf("unknown workload %q", workload)
 }
 
+func parseAddrs(spec string) ([]string, error) {
+	var addrs []string
+	for part := range strings.SplitSeq(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			addrs = append(addrs, part)
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("at least one server address is required")
+	}
+	return addrs, nil
+}
+
+// extractLeaderHint decodes a kvv1.LeaderHint from a gRPC status's standard
+// google.rpc.Status details.
+func extractLeaderHint(err error) string {
+	st, ok := status.FromError(err)
+	if !ok {
+		return ""
+	}
+	for _, detail := range st.Details() {
+		if hint, ok := detail.(*kvv1.LeaderHint); ok && hint.LeaderAddr != "" {
+			return hint.LeaderAddr
+		}
+	}
+	return ""
+}
+
+// leaderPool maintains `conns` gRPC connections to the current leader and
+// switches targets when a server returns UNAVAILABLE with a LeaderHint.
+type leaderPool struct {
+	seeds []string
+	conns int
+
+	mu      sync.RWMutex
+	addr    string
+	raw     []*grpc.ClientConn
+	clients []kvv1.KvServiceClient
+}
+
+func newLeaderPool(seeds []string, conns int) (*leaderPool, error) {
+	p := &leaderPool{seeds: seeds, conns: conns}
+	initial := seeds[0]
+	if discovered := p.probeLeader(); discovered != "" {
+		initial = discovered
+	}
+	if err := p.switchTo(initial); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *leaderPool) probeLeader() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, addr := range p.seeds {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			continue
+		}
+		resp, err := kvv1.NewAdminServiceClient(conn).Status(ctx, &kvv1.StatusRequest{})
+		_ = conn.Close()
+		if err == nil && resp.GetLeaderAddr() != "" {
+			return resp.GetLeaderAddr()
+		}
+	}
+	return ""
+}
+
+func (p *leaderPool) switchTo(addr string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.addr == addr && len(p.clients) > 0 {
+		return nil
+	}
+	raw := make([]*grpc.ClientConn, p.conns)
+	clients := make([]kvv1.KvServiceClient, p.conns)
+	for i := range p.conns {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			for j := range i {
+				_ = raw[j].Close()
+			}
+			return err
+		}
+		raw[i] = conn
+		clients[i] = kvv1.NewKvServiceClient(conn)
+	}
+	old := p.raw
+	p.addr = addr
+	p.raw = raw
+	p.clients = clients
+	for _, conn := range old {
+		_ = conn.Close()
+	}
+	return nil
+}
+
+func (p *leaderPool) client(worker int) kvv1.KvServiceClient {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.clients[worker%len(p.clients)]
+}
+
+func (p *leaderPool) maybeRedirect(err error) {
+	if status.Code(err) != codes.Unavailable {
+		return
+	}
+	if hinted := extractLeaderHint(err); hinted != "" {
+		_ = p.switchTo(hinted)
+		return
+	}
+	if len(p.seeds) > 1 {
+		if discovered := p.probeLeader(); discovered != "" {
+			_ = p.switchTo(discovered)
+		}
+	}
+}
+
+func (p *leaderPool) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, conn := range p.raw {
+		_ = conn.Close()
+	}
+	p.raw = nil
+	p.clients = nil
+}
+
 func run(o options) error {
 	reads, err := readPercent(o.workload)
 	if err != nil {
@@ -96,17 +227,17 @@ func run(o options) error {
 	if _, err := load.NewDistribution(o.distribution, o.keys, o.seed); err != nil {
 		return err
 	}
-	clients := make([]kvv1.KvServiceClient, o.conns)
-	for i := range clients {
-		conn, err := grpc.NewClient(o.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-		clients[i] = kvv1.NewKvServiceClient(conn)
+	seeds, err := parseAddrs(o.addr)
+	if err != nil {
+		return err
 	}
+	pool, err := newLeaderPool(seeds, o.conns)
+	if err != nil {
+		return err
+	}
+	defer pool.close()
 	if o.preload {
-		if err := preload(o, clients); err != nil {
+		if err := preload(o, pool); err != nil {
 			return err
 		}
 	}
@@ -121,7 +252,6 @@ func run(o options) error {
 		wg.Go(func() {
 			r := &results[w]
 			r.put.Errors, r.get.Errors = map[string]uint64{}, map[string]uint64{}
-			client := clients[w%len(clients)]
 			keys, _ := load.NewDistribution(o.distribution, o.keys, o.seed+uint64(w)+1)
 			mix := rand.New(rand.NewPCG(o.seed, uint64(w)))
 			for {
@@ -133,11 +263,15 @@ func run(o options) error {
 				key := load.Key(i, o.keySize)
 				op := &r.put
 				var err error
+				client := pool.client(w)
 				if mix.IntN(100) < reads {
 					op = &r.get
 					_, err = client.Get(context.Background(), &kvv1.GetRequest{Key: key})
 				} else {
 					_, err = client.Put(context.Background(), &kvv1.PutRequest{Key: key, Value: load.Value(i, o.valueSize)})
+				}
+				if err != nil {
+					pool.maybeRedirect(err)
 				}
 				if began.Before(measureFrom) {
 					continue
@@ -180,15 +314,22 @@ func run(o options) error {
 }
 
 // preload writes every key once, with the workers in parallel.
-func preload(o options, clients []kvv1.KvServiceClient) error {
+func preload(o options, pool *leaderPool) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, o.concurrency)
 	for w := range o.concurrency {
 		wg.Go(func() {
-			client := clients[w%len(clients)]
 			for i := uint64(w); i < o.keys; i += uint64(o.concurrency) {
 				req := &kvv1.PutRequest{Key: load.Key(i, o.keySize), Value: load.Value(i, o.valueSize)}
-				if _, err := client.Put(context.Background(), req); err != nil {
+				var err error
+				for range 3 {
+					_, err = pool.client(w).Put(context.Background(), req)
+					if err == nil {
+						break
+					}
+					pool.maybeRedirect(err)
+				}
+				if err != nil {
 					errs <- fmt.Errorf("preload key %d: %w", i, err)
 					return
 				}
