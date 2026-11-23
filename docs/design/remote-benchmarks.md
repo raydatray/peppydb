@@ -226,6 +226,7 @@ tools/gcp-bench run                                 # the 0023 suite, reference 
 tools/gcp-bench run --step engine-bench --profile record,offcpu
 PEPPYDB_BENCH_MILLIS=5000 tools/gcp-bench run --step bf-tree-bench
 tools/gcp-bench run --suite raft-perf               # the Raft benchmarks (plans 0029, 0030)
+tools/gcp-bench run --suite server-perf             # separate server and client VMs (plan 0031)
 tools/gcp-bench cleanup                             # delete leftovers
 ```
 
@@ -235,6 +236,40 @@ tools/gcp-bench cleanup                             # delete leftovers
 | --- | --- |
 | `bf-io-perf` (default) | Direct-I/O preflight checks, then plan 0023's BF-Tree, circular-buffer, engine, and WAL benchmarks |
 | `raft-perf` | The Raft log alone, three nodes over the real log and the real engine (shared runtime and one runtime per node), and `Db::apply` beside a syncing file |
+| `server-perf` | Multi-VM (`# mode: client-server`): `peppydb serve` on a `c4d-standard-8-lssd` server VM and `peppydb-load` (`put` sweep, uniform `get`, `mixed:90` zipf, and `/metrics` scrapes) on a separate `n4-standard-8` client VM in the same zone. Results: [server measurements](server.md#linux-reference-separate-server-and-client-vms) |
+
+**Multi-VM runs (`# mode: client-server`).** A suite with `# mode: client-server`
+creates a `-server` VM (`--machine-type`, default `c4d-standard-8-lssd`) and a
+`-client` VM (`--client-machine-type`, default `n4-standard-8`) in the same
+`us-east1` zone. If the second VM hits a capacity error, the driver deletes
+the first VM and retries both in the next zone. Both VMs carry the same time
+limit, `DELETE` action, and `peppydb-bench=1` label; `on_exit`, preemption
+handling, and `cleanup` delete all created VMs. The server VM formats its
+Local SSD, starts the `server` line, and uploads its internal IP to
+`results/RUN_ID/server/ready`; the client VM polls `server/ready`, expands
+`$SERVER_ADDR` and `$METRICS_ADDR`, runs the workload steps, and uploads
+`results/RUN_ID/client/DONE`; the server VM then stops cleanly on `SIGTERM`
+and uploads `results/RUN_ID/server/DONE`.
+
+**Profiling a multi-VM run.** The server runs once for the whole client
+suite, so a client-server run takes exactly one profiler (`--profile
+none`, the default, or one of the others). The driver refuses a longer
+list before it creates any VM, and the server VM refuses one too. The
+profiler wraps `peppydb serve` from start to `SIGTERM`, across every client
+step. Its outputs are named after the `server` step
+(`results/RUN_ID/server/server.<profiler>.*`, with the server's own output
+in `server.<profiler>.log`). The client VM never runs a profiler.
+
+- The profiler starts a launcher (`$STATE/server-launch`) that writes its
+  PID and then `exec`s the server, so the server keeps the PID that the
+  profiler started. `offcpu.bt` traces exactly that PID (`cpid`).
+- At `client/DONE`, the runner sends `SIGTERM` to the server's PID, not to
+  the profiler, and `SIGKILL` after 30 s. The profiler sees the server exit
+  and writes its outputs; the runner then post-processes them as for a
+  single-VM step.
+- One profile covers all client steps. To attribute it to one workload,
+  use the timestamps in `perf script` output or run a suite with one step
+  (`--step NAME`).
 
 The three-node benchmark sizes each node's Tokio runtime to a quarter of
 the cores, 2 threads on `c4d-standard-8-lssd`, so three nodes and the
@@ -263,19 +298,25 @@ tools/linux-run sh tools/gcp/testing/test-driver.sh
 Stand-ins in `tools/gcp/testing/bin/` replace `gcloud`, `apt-get`,
 `systemctl`, `snap`, `perf`, and `bpftrace`. The stand-in `gcloud`
 simulates GCS and Compute Engine; its "VM" runs the real startup script in
-the background, so the driver tests are end to end. They cover the wait
-loop's exit conditions, zone fallback, leaked creates, the time-limit
-read-back, signals, `cleanup`, the bucket checks, and the profilers' command
-lines. Real `perf` and `bpftrace` cannot run in the container; the first
+the background, so the driver tests are end to end. Deleting a stand-in
+VM stops its whole process tree, because the startup script runs `main` in
+a pipeline and a surviving `main` would write into a recreated VM's state.
+They cover the wait loop's exit conditions, zone fallback, leaked creates,
+the time-limit read-back, signals, `cleanup`, the bucket checks, and the
+profilers' command lines, including each profiler around a client-server
+run's server. Real `perf` and `bpftrace` cannot run in the container; the first
 live run checks them.
 
 ## Extension points
 
 - **New workloads** (gateways, servers, load generators) are new suites and
   new lines in `targets.txt`. A step's binary can be any staged executable.
-- **Multi-VM runs.** Roles in the suite format (for example, `server` and
-  `client`), one VM per role in one zone, connected by internal IPs, with
-  results under `results/RUN_ID/<role>/` and the same teardown guarantees.
+- **More roles.** Multi-VM runs support one `server` and one `client`
+  role. More roles (for example, three server nodes for Raft) would follow
+  the same pattern: one VM per role in one zone, connected by internal IPs,
+  with results under `results/RUN_ID/<role>/`.
+- **Several profilers in one multi-VM run** would need one server lifetime
+  per profiler, with the client suite repeated for each.
 - **Hardware counters** need other hardware: a GCP machine series that
   supports `--performance-monitoring-unit` (a different CPU from the
   reference), or bare-metal Linux on the development machine.
