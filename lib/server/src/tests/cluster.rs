@@ -238,3 +238,160 @@ async fn three_process_cluster_elects_serves_hints_and_survives_leader_sigkill()
         assert_eq!(status.code(), Some(0), "stderr:\n{}", proc.stderr());
     }
 }
+
+/// Drops traffic between two loopback IPs on Linux via `iptables`, and removes
+/// the rules automatically when dropped.
+#[cfg(target_os = "linux")]
+struct PartitionGuard {
+    rules: Vec<Vec<String>>,
+}
+
+#[cfg(target_os = "linux")]
+impl PartitionGuard {
+    fn isolate(node_ip: std::net::IpAddr, peers: &[std::net::IpAddr]) -> Self {
+        let mut guard = Self { rules: Vec::new() };
+        for &peer_ip in peers {
+            for (src, dst) in [(node_ip, peer_ip), (peer_ip, node_ip)] {
+                let rule = vec![
+                    "-o".to_owned(),
+                    "lo".to_owned(),
+                    "-s".to_owned(),
+                    src.to_string(),
+                    "-d".to_owned(),
+                    dst.to_string(),
+                    "-j".to_owned(),
+                    "DROP".to_owned(),
+                ];
+                let status = std::process::Command::new("iptables")
+                    .arg("-A")
+                    .arg("OUTPUT")
+                    .args(&rule)
+                    .status()
+                    .expect("run iptables -A OUTPUT");
+                assert!(status.success(), "iptables -A OUTPUT failed: {rule:?}");
+                guard.rules.push(rule);
+            }
+        }
+        guard
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PartitionGuard {
+    fn drop(&mut self) {
+        for rule in &self.rules {
+            let _ = std::process::Command::new("iptables")
+                .arg("-D")
+                .arg("OUTPUT")
+                .args(rule)
+                .status();
+        }
+    }
+}
+
+/// Isolates the leader of a 3-node multi-process cluster using `iptables` on
+/// distinct loopback IPs (`127.0.0.11..=13`), verifies majority failover and
+/// old-leader rejection, then heals and confirms rejoin.
+///
+/// Run under `tools/linux-run` (with `CAP_NET_ADMIN`):
+/// `tools/linux-run tools/buck2 run //lib/server:server-unittest -- --ignored tests::cluster::iptables_partition_isolates_leader_and_heals_cleanly`
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Linux with iptables (run under tools/linux-run)"]
+async fn iptables_partition_isolates_leader_and_heals_cleanly() {
+    let base_port = free_addrs(1)[0].port();
+    let addrs: BTreeMap<u64, SocketAddr> = [
+        (1, SocketAddr::from(([127, 0, 0, 11], base_port))),
+        (2, SocketAddr::from(([127, 0, 0, 12], base_port))),
+        (3, SocketAddr::from(([127, 0, 0, 13], base_port))),
+    ]
+    .into_iter()
+    .collect();
+    let peers_spec = addrs
+        .iter()
+        .map(|(id, addr)| format!("{id}={addr}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let dirs: BTreeMap<u64, tempfile::TempDir> = (1..=3u64)
+        .map(|id| (id, tempfile::tempdir().unwrap()))
+        .collect();
+
+    let mut procs: BTreeMap<u64, ServerProcess> = BTreeMap::new();
+    for (&id, &addr) in &addrs {
+        let args = node_args(id, dirs[&id].path(), addr, &peers_spec, id == 1);
+        let (proc, _) = ServerProcess::start_args(&args);
+        procs.insert(id, proc);
+    }
+
+    let (old_leader, old_status) = wait_for_leader(&addrs, None).await;
+    let mut old_kv = KvServiceClient::connect(format!("http://{}", addrs[&old_leader]))
+        .await
+        .unwrap();
+    old_kv
+        .put(PutRequest {
+            key: b"before-partition".to_vec(),
+            value: b"ok".to_vec(),
+        })
+        .await
+        .unwrap();
+
+    // Isolate the leader from its two peers.
+    let peer_ips: Vec<_> = addrs
+        .iter()
+        .filter(|&(&id, _)| id != old_leader)
+        .map(|(_, addr)| addr.ip())
+        .collect();
+    let guard = PartitionGuard::isolate(addrs[&old_leader].ip(), &peer_ips);
+
+    // The majority elects a new leader in a higher term and accepts writes.
+    let (new_leader, new_status) = wait_for_leader(&addrs, Some(old_leader)).await;
+    assert!(new_status.term > old_status.term);
+    let mut new_kv = KvServiceClient::connect(format!("http://{}", addrs[&new_leader]))
+        .await
+        .unwrap();
+    new_kv
+        .put(PutRequest {
+            key: b"during-partition".to_vec(),
+            value: b"committed".to_vec(),
+        })
+        .await
+        .unwrap();
+
+    // The isolated old leader cannot serve linearizable reads.
+    let read_res = tokio::time::timeout(
+        Duration::from_secs(2),
+        old_kv.get(GetRequest {
+            key: b"before-partition".to_vec(),
+        }),
+    )
+    .await;
+    assert!(
+        !matches!(read_res, Ok(Ok(_))),
+        "isolated leader must not serve linearizable reads"
+    );
+
+    // Heal the partition: old leader rejoins and catches up.
+    drop(guard);
+    let target_seq = status_of(addrs[&new_leader]).await.unwrap().applied_seq;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(st) = status_of(addrs[&old_leader]).await
+                && st.role == "follower"
+                && st.applied_seq >= target_seq
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("healed node rejoined and caught up");
+
+    for proc in procs.values() {
+        proc.sigterm();
+    }
+    for mut proc in procs.into_values() {
+        let status = proc.wait();
+        assert_eq!(status.code(), Some(0), "stderr:\n{}", proc.stderr());
+    }
+}
