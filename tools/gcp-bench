@@ -207,18 +207,23 @@ esac
 [ -f "$SUITE_FILE" ] || die "no suite $SUITE ($SUITE_FILE)"
 
 SUITE_MODE=single
+CLUSTER_NODES=1
 if grep -Eq '^#[[:space:]]*mode:[[:space:]]*client-server[[:space:]]*$' "$SUITE_FILE"; then
     SUITE_MODE=client-server
+elif grep -Eq '^#[[:space:]]*mode:[[:space:]]*cluster[[:space:]]*$' "$SUITE_FILE"; then
+    SUITE_MODE=cluster
+    CLUSTER_NODES=$(sed -n 's/^#[[:space:]]*nodes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$SUITE_FILE" | head -n 1)
+    CLUSTER_NODES=${CLUSTER_NODES:-3}
 fi
 
 # suite_lines: the suite without comments and blank lines, reduced to the
-# chosen steps, every preflight step, and (in client-server mode) the server
-# definition line.
+# chosen steps, every preflight step, and (in client-server/cluster mode) the
+# server definition line.
 suite_lines() {
     grep -v '^[[:space:]]*#' "$SUITE_FILE" | grep -v '^[[:space:]]*$' | while read -r name rest; do
         keep=false
         case $name in preflight-*) keep=true ;; esac
-        if [ "$SUITE_MODE" = client-server ] && [ "$name" = server ]; then
+        if [ "$SUITE_MODE" != single ] && [ "$name" = server ]; then
             keep=true
         fi
         [ -z "$STEPS" ] && keep=true
@@ -303,9 +308,10 @@ stage() {
         echo "build_host=$(uname -sm), $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
         echo "suite=$SUITE"
         echo "suite_mode=$SUITE_MODE"
+        [ "$SUITE_MODE" = cluster ] && echo "cluster_nodes=$CLUSTER_NODES"
         echo "profile=$PROFILE"
         echo "machine_type=$MACHINE_TYPE"
-        [ "$SUITE_MODE" = client-server ] && echo "client_machine_type=$CLIENT_MACHINE_TYPE"
+        [ "$SUITE_MODE" != single ] && echo "client_machine_type=$CLIENT_MACHINE_TYPE"
         echo "provisioning=$PROVISIONING"
         echo "image=${IMAGE:-family ubuntu-2404-lts-amd64}"
         (cd "$STAGE" && find . -type f ! -name MANIFEST | sed 's|^\./||' | sort) | while read -r path; do
@@ -439,6 +445,22 @@ create_failure_is_capacity() {
     grep -Eqi 'ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|resource pool|not available in|not supported in|does not exist in zone|stockout|currently unavailable' "$1"
 }
 
+# suite_roles: space-separated role names for multi-VM modes.
+suite_roles() {
+    case $SUITE_MODE in
+        client-server) echo "server client" ;;
+        cluster)
+            i=1
+            roles=
+            while [ "$i" -le "$CLUSTER_NODES" ]; do
+                roles="$roles server-$i"
+                i=$((i + 1))
+            done
+            echo "$roles client"
+            ;;
+    esac
+}
+
 # create_one_vm NAME MACHINE_TYPE ROLE PROFILE_FILE
 create_one_vm() {
     vm_name=$1
@@ -447,6 +469,7 @@ create_one_vm() {
     vm_profile_file=$4
     meta="peppydb-bucket=$BUCKET,peppydb-run-id=$RUN_ID"
     [ -n "$vm_role" ] && meta="$meta,peppydb-role=$vm_role"
+    [ "$SUITE_MODE" = cluster ] && meta="$meta,peppydb-cluster-size=$CLUSTER_NODES"
     say "creating $vm_name in $ZONE ($vm_machine, $PROVISIONING)"
     # shellcheck disable=SC2086 # image_args is two arguments
     if gc compute instances create "$vm_name" \
@@ -486,25 +509,37 @@ create_instance() {
     for zone in $ZONES; do
         ZONE=$zone
         CREATED_NAMES=
-        if [ "$SUITE_MODE" = client-server ]; then
-            SERVER_NAME=$LABEL-$RUN_ID-server
-            CLIENT_NAME=$LABEL-$RUN_ID-client
-            NAME=$SERVER_NAME
-            if create_one_vm "$SERVER_NAME" "$MACHINE_TYPE" server "$LOCAL/profile" &&
-                create_one_vm "$CLIENT_NAME" "$CLIENT_MACHINE_TYPE" client "$LOCAL/profile-none"; then
-                CREATED_AT=$(date +%s)
-                return 0
-            fi
-            # Roll back any VM already created in this zone before retrying.
-            if [ -n "$CREATED_NAMES" ]; then
-                delete_created
-            fi
-            create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
-        else
+        if [ "$SUITE_MODE" = single ]; then
             NAME=$LABEL-$RUN_ID
             if create_one_vm "$NAME" "$MACHINE_TYPE" "" "$LOCAL/profile"; then
                 CREATED_AT=$(date +%s)
                 return 0
+            fi
+            create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
+        else
+            ok=true
+            for role in $(suite_roles); do
+                vm_name=$LABEL-$RUN_ID-$role
+                if [ "$role" = client ]; then
+                    vm_machine=$CLIENT_MACHINE_TYPE
+                    vm_prof=$LOCAL/profile-none
+                else
+                    vm_machine=$MACHINE_TYPE
+                    vm_prof=$LOCAL/profile
+                fi
+                if ! create_one_vm "$vm_name" "$vm_machine" "$role" "$vm_prof"; then
+                    ok=false
+                    break
+                fi
+            done
+            if $ok; then
+                NAME=$LABEL-$RUN_ID-$(suite_roles | awk '{ print $1 }')
+                CREATED_AT=$(date +%s)
+                return 0
+            fi
+            # Roll back any VMs already created in this zone before retrying.
+            if [ -n "$CREATED_NAMES" ]; then
+                delete_created
             fi
             create_failure_is_capacity "$LOCAL/create.err" || die "create failed in $ZONE (not a capacity error)"
         fi
@@ -538,28 +573,19 @@ object_exists() {
 # stopped, no-boot, or deadline (and FAILED_VM when a specific VM failed).
 wait_for_run() {
     started_seen=false
-    server_started_seen=false
-    client_started_seen=false
+    started_roles=
     deadline=$((MAX_RUN_SECONDS + DEADLINE_MARGIN))
     while :; do
         $DRY || sleep "$POLL"
-        if [ "$SUITE_MODE" = client-server ]; then
-            server_done=false
-            client_done=false
-            object_exists "$REMOTE_RESULTS/server/DONE" && server_done=true
-            object_exists "$REMOTE_RESULTS/client/DONE" && client_done=true
-            if $server_done && $client_done; then
-                OUTCOME=done
-                return
-            fi
-            for role in server client; do
-                if [ "$role" = server ]; then
-                    $server_done && continue
-                    vm_name=$SERVER_NAME
-                else
-                    $client_done && continue
-                    vm_name=$CLIENT_NAME
+        if [ "$SUITE_MODE" != single ]; then
+            all_done=true
+            all_started=true
+            for role in $(suite_roles); do
+                if object_exists "$REMOTE_RESULTS/$role/DONE"; then
+                    continue
                 fi
+                all_done=false
+                vm_name=$LABEL-$RUN_ID-$role
                 state=$(instance_state "$vm_name")
                 case $state in
                     NOTFOUND)
@@ -576,17 +602,24 @@ wait_for_run() {
                         return
                         ;;
                 esac
+                case " $started_roles " in
+                    *" $role "*) ;;
+                    *)
+                        if object_exists "$REMOTE_RESULTS/$role/started"; then
+                            started_roles="$started_roles $role"
+                            say "the $role VM has started the run"
+                        else
+                            all_started=false
+                        fi
+                        ;;
+                esac
             done
+            if $all_done; then
+                OUTCOME=done
+                return
+            fi
             elapsed=$(($(date +%s) - CREATED_AT))
-            if ! $server_started_seen && object_exists "$REMOTE_RESULTS/server/started"; then
-                server_started_seen=true
-                say "the server VM has started the run"
-            fi
-            if ! $client_started_seen && object_exists "$REMOTE_RESULTS/client/started"; then
-                client_started_seen=true
-                say "the client VM has started the run"
-            fi
-            if ! ($server_started_seen && $client_started_seen) && [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
+            if ! $all_started && [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
                 OUTCOME=no-boot
                 return
             fi
@@ -654,8 +687,8 @@ was_preempted() {
 }
 
 report() {
-    if [ "$SUITE_MODE" = client-server ]; then
-        for role in server client; do
+    if [ "$SUITE_MODE" != single ]; then
+        for role in $(suite_roles); do
             if [ -f "$LOCAL/results/$role/status" ]; then
                 say "$role steps (name profiler exit seconds note):"
                 sed 's/^/  /' "$LOCAL/results/$role/status" >&2
@@ -722,7 +755,7 @@ run() {
         no-boot)
             say "the VM did not start the run within ${BOOT_TIMEOUT}s; saving its serial port output"
             mkdir -p "$LOCAL"
-            if [ "$SUITE_MODE" = client-server ]; then
+            if [ "$SUITE_MODE" != single ]; then
                 for inst in $CREATED_NAMES; do
                     gc compute instances get-serial-port-output "$inst" --zone="$ZONE" >"$LOCAL/serial-port-$inst.txt" 2>&1
                     say "serial port output: $LOCAL/serial-port-$inst.txt"
@@ -744,11 +777,11 @@ run() {
         delete_created
     fi
     if [ "$OUTCOME" = done ]; then
-        if [ "$SUITE_MODE" = client-server ]; then
+        if [ "$SUITE_MODE" != single ]; then
             if $DRY; then
                 say "run finished: dry run"
             else
-                for role in server client; do
+                for role in $(suite_roles); do
                     done_status=$(sed -n 's/^status=//p' "$LOCAL/results/$role/DONE" 2>/dev/null)
                     reason=$(sed -n 's/^reason=//p' "$LOCAL/results/$role/DONE" 2>/dev/null)
                     say "$role finished: $reason"
