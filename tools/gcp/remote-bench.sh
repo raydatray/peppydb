@@ -555,22 +555,28 @@ wait_tcp() {
     return 1
 }
 
-# expand_args TEXT: substitute $BENCH_DIR, $SERVER_ADDR, and $METRICS_ADDR.
+# expand_args TEXT: substitute $BENCH_DIR, $SERVER_ADDR, $METRICS_ADDR,
+# $CLUSTER_ADDRS, $NODE_ID, $PEERS, and $BOOTSTRAP.
 expand_args() {
     printf '%s' "$1" | sed \
         -e "s|\\\$BENCH_DIR|${PEPPYDB_BENCH_DIR:-}|g" \
         -e "s|\\\$SERVER_ADDR|${SERVER_ADDR:-}|g" \
-        -e "s|\\\$METRICS_ADDR|${METRICS_ADDR:-}|g"
+        -e "s|\\\$METRICS_ADDR|${METRICS_ADDR:-}|g" \
+        -e "s|\\\$CLUSTER_ADDRS|${CLUSTER_ADDRS:-}|g" \
+        -e "s|\\\$NODE_ID|${NODE_ID:-}|g" \
+        -e "s|\\\$PEERS|${PEERS:-}|g" \
+        -e "s|\\\$BOOTSTRAP|${BOOTSTRAP:-}|g"
 }
 
 # run_server_role: start the server line from suite.txt under the run's
 # profiler, publish ready with our internal IP, wait for client/DONE, then
-# stop the server cleanly. The server runs once for the whole client suite,
-# so a client-server run takes one profiler. The profiler runs a launcher
-# that records its PID and then execs the server, so the server keeps the
-# PID that the profiler started (offcpu.bt traces that PID). SIGTERM goes
-# to the server, not to the profiler, so the profiler writes its output
-# after the server exits.
+# stop the server cleanly. In cluster mode (ROLE=server-N, CLUSTER_SIZE>1),
+# announces its IP first and gathers all peers' IPs before starting the
+# server. The server runs once for the whole client suite, so a multi-VM run
+# takes one profiler. The profiler runs a launcher that records its PID and
+# then execs the server, so the server keeps the PID that the profiler
+# started (offcpu.bt traces that PID). SIGTERM goes to the server, not to the
+# profiler, so the profiler writes its output after the server exits.
 run_server_role() {
     : >"$RESULTS/status"
     case $PROFILE in
@@ -599,11 +605,10 @@ run_server_role() {
         log "server binary not executable: $bin"
         return 2
     fi
-    args=$(expand_args "$raw_args")
     listen_port=7420
     metrics_port=9090
     prev=
-    for tok in $args; do
+    for tok in $raw_args; do
         case $prev in
             --listen) listen_port=${tok##*:} ;;
             --metrics-listen) metrics_port=${tok##*:} ;;
@@ -611,6 +616,43 @@ run_server_role() {
         prev=$tok
     done
 
+    ip=$(metadata instance/network-interfaces/0/ip 2>/dev/null || true)
+    ip=${ip:-127.0.0.1}
+    poll=${PEPPYDB_REMOTE_POLL:-5}
+
+    if [ "$CLUSTER_SIZE" -gt 1 ]; then
+        NODE_ID=${ROLE#server-}
+        BOOTSTRAP=
+        [ "$NODE_ID" = 1 ] && BOOTSTRAP=--bootstrap
+        echo "ip=$ip" >"$RESULTS/ip"
+        upload "$RESULTS/ip"
+        log "cluster node $NODE_ID/$CLUSTER_SIZE announced ip=$ip; waiting for peers"
+        PEERS=
+        i=1
+        while [ "$i" -le "$CLUSTER_SIZE" ]; do
+            peer_results="$REMOTE_RESULTS_ROOT/server-$i"
+            while :; do
+                if gcs_exists "$peer_results/ip"; then
+                    break
+                fi
+                if gcs_exists "$peer_results/DONE"; then
+                    log "peer server-$i finished before announcing IP"
+                    return 1
+                fi
+                sleep "$poll"
+            done
+            gcs_cp "$peer_results/ip" "$STATE/server-$i.ip" || return 1
+            peer_ip=$(sed -n 's/^ip=//p' "$STATE/server-$i.ip")
+            sep=
+            [ -n "$PEERS" ] && sep=,
+            PEERS="${PEERS}${sep}${i}=${peer_ip}:${listen_port}"
+            i=$((i + 1))
+        done
+        export NODE_ID PEERS BOOTSTRAP
+        log "cluster peers: $PEERS (bootstrap='${BOOTSTRAP}')"
+    fi
+
+    args=$(expand_args "$raw_args")
     pid_file=$STATE/server.pid
     launcher=$STATE/server-launch
     server_files=$STATE/server.files
@@ -620,7 +662,6 @@ run_server_role() {
         echo "echo \$\$ >\"$pid_file\""
         echo "exec \"$exe\" \"\$@\""
     } >"$launcher" && chmod +x "$launcher" || return 2
-
     started=$(date +%s)
     log "starting server ($PROFILE): $bin $args"
     # shellcheck disable=SC2086 # args split on whitespace by design
@@ -631,23 +672,20 @@ run_server_role() {
     if ! wait_tcp 127.0.0.1 "$listen_port" "$runner"; then
         stop_server "$pid_file" "$runner"
         elapsed=$(($(date +%s) - started))
-        echo "server $PROFILE 1 $elapsed failed-to-listen" >>"$RESULTS/status"
+        echo "$ROLE $PROFILE 1 $elapsed failed-to-listen" >>"$RESULTS/status"
         # shellcheck disable=SC2046 # one file per line
         upload $(cat "$server_files") "$RESULTS/status"
         return 1
     fi
 
-    ip=$(metadata instance/network-interfaces/0/ip 2>/dev/null || true)
-    ip=${ip:-127.0.0.1}
     {
         echo "ip=$ip"
         echo "port=$listen_port"
         echo "metrics_port=$metrics_port"
     } >"$RESULTS/ready"
     upload "$RESULTS/ready"
-    log "server ready at $ip:$listen_port (metrics :$metrics_port)"
+    log "$ROLE ready at $ip:$listen_port (metrics :$metrics_port)"
 
-    poll=${PEPPYDB_REMOTE_POLL:-5}
     while :; do
         if gcs_exists "$REMOTE_CLIENT_RESULTS/DONE"; then
             log "client finished; stopping server"
@@ -658,7 +696,7 @@ run_server_role() {
             rc=$?
             elapsed=$(($(date +%s) - started))
             log "server exited early with status $rc"
-            echo "server $PROFILE $rc $elapsed exited-early" >>"$RESULTS/status"
+            echo "$ROLE $PROFILE $rc $elapsed exited-early" >>"$RESULTS/status"
             # shellcheck disable=SC2046 # one file per line
             upload $(cat "$server_files") "$RESULTS/status"
             return 1
@@ -671,8 +709,8 @@ run_server_role() {
     elapsed=$(($(date +%s) - started))
     note=ok
     [ "$rc" = 0 ] || note=exit-$rc
-    echo "server $PROFILE $rc $elapsed $note" >>"$RESULTS/status"
-    log "server ($PROFILE): $note after ${elapsed}s"
+    echo "$ROLE $PROFILE $rc $elapsed $note" >>"$RESULTS/status"
+    log "$ROLE ($PROFILE): $note after ${elapsed}s"
     # shellcheck disable=SC2046 # one file per line
     upload $(cat "$server_files") "$RESULTS/status"
     return 0
@@ -699,30 +737,69 @@ stop_server() {
     wait "$2"
 }
 
-# run_client_role: wait for server/ready, then run every non-server step in
-# suite.txt with $SERVER_ADDR and $METRICS_ADDR expanded.
+# run_client_role: wait for server(s) to publish ready, then run every
+# non-server step in suite.txt.
 run_client_role() {
     : >"$RESULTS/status"
     poll=${PEPPYDB_REMOTE_POLL:-5}
-    log "waiting for server ready at $REMOTE_SERVER_RESULTS/ready"
-    while :; do
-        if gcs_exists "$REMOTE_SERVER_RESULTS/ready"; then
-            break
-        fi
-        if gcs_exists "$REMOTE_SERVER_RESULTS/DONE"; then
-            log "server finished without becoming ready"
-            return 1
-        fi
-        sleep "$poll"
-    done
-    gcs_cp "$REMOTE_SERVER_RESULTS/ready" "$STATE/server.ready" || return 1
-    server_ip=$(sed -n 's/^ip=//p' "$STATE/server.ready")
-    server_port=$(sed -n 's/^port=//p' "$STATE/server.ready")
-    metrics_port=$(sed -n 's/^metrics_port=//p' "$STATE/server.ready")
-    SERVER_ADDR="$server_ip:${server_port:-7420}"
-    METRICS_ADDR="$server_ip:${metrics_port:-9090}"
-    export SERVER_ADDR METRICS_ADDR
-    log "connecting to server at $SERVER_ADDR (metrics $METRICS_ADDR)"
+    METRICS_ENDPOINTS=
+    if [ "$CLUSTER_SIZE" -gt 1 ]; then
+        CLUSTER_ADDRS=
+        i=1
+        while [ "$i" -le "$CLUSTER_SIZE" ]; do
+            srv_results="$REMOTE_RESULTS_ROOT/server-$i"
+            log "waiting for server-$i ready at $srv_results/ready"
+            while :; do
+                if gcs_exists "$srv_results/ready"; then
+                    break
+                fi
+                if gcs_exists "$srv_results/DONE"; then
+                    log "server-$i finished without becoming ready"
+                    return 1
+                fi
+                sleep "$poll"
+            done
+            gcs_cp "$srv_results/ready" "$STATE/server-$i.ready" || return 1
+            s_ip=$(sed -n 's/^ip=//p' "$STATE/server-$i.ready")
+            s_port=$(sed -n 's/^port=//p' "$STATE/server-$i.ready")
+            m_port=$(sed -n 's/^metrics_port=//p' "$STATE/server-$i.ready")
+            s_addr="$s_ip:${s_port:-7420}"
+            m_addr="$s_ip:${m_port:-9090}"
+            sep=
+            [ -n "$CLUSTER_ADDRS" ] && sep=,
+            CLUSTER_ADDRS="${CLUSTER_ADDRS}${sep}${s_addr}"
+            if [ "$i" = 1 ]; then
+                SERVER_ADDR=$s_addr
+                METRICS_ADDR=$m_addr
+            fi
+            METRICS_ENDPOINTS="$METRICS_ENDPOINTS server-$i=$m_addr"
+            i=$((i + 1))
+        done
+        export CLUSTER_ADDRS SERVER_ADDR METRICS_ADDR
+        log "connecting to cluster at $CLUSTER_ADDRS"
+    else
+        log "waiting for server ready at $REMOTE_SERVER_RESULTS/ready"
+        while :; do
+            if gcs_exists "$REMOTE_SERVER_RESULTS/ready"; then
+                break
+            fi
+            if gcs_exists "$REMOTE_SERVER_RESULTS/DONE"; then
+                log "server finished without becoming ready"
+                return 1
+            fi
+            sleep "$poll"
+        done
+        gcs_cp "$REMOTE_SERVER_RESULTS/ready" "$STATE/server.ready" || return 1
+        server_ip=$(sed -n 's/^ip=//p' "$STATE/server.ready")
+        server_port=$(sed -n 's/^port=//p' "$STATE/server.ready")
+        metrics_port=$(sed -n 's/^metrics_port=//p' "$STATE/server.ready")
+        SERVER_ADDR="$server_ip:${server_port:-7420}"
+        METRICS_ADDR="$server_ip:${metrics_port:-9090}"
+        CLUSTER_ADDRS=$SERVER_ADDR
+        METRICS_ENDPOINTS="server=$METRICS_ADDR"
+        export CLUSTER_ADDRS SERVER_ADDR METRICS_ADDR
+        log "connecting to server at $SERVER_ADDR (metrics $METRICS_ADDR)"
+    fi
 
     while read -r name bin raw_args <&4; do
         case $name in
@@ -753,11 +830,17 @@ run_client_role() {
         echo "$name none $rc $elapsed $note" >>"$RESULTS/status"
         log "step $name (none): $note after ${elapsed}s"
         if command -v curl >/dev/null 2>&1; then
-            if curl -fsS --max-time 5 "http://$METRICS_ADDR/metrics" >"$RESULTS/$name.metrics.txt" 2>/dev/null; then
-                files="$files $RESULTS/$name.metrics.txt"
-            else
-                rm -f "$RESULTS/$name.metrics.txt"
-            fi
+            for pair in $METRICS_ENDPOINTS; do
+                m_name=${pair%%=*}
+                m_addr=${pair#*=}
+                out_file="$RESULTS/$name.metrics.txt"
+                [ "$CLUSTER_SIZE" -gt 1 ] && out_file="$RESULTS/$name.$m_name.metrics.txt"
+                if curl -fsS --max-time 5 "http://$m_addr/metrics" >"$out_file" 2>/dev/null; then
+                    files="$files $out_file"
+                else
+                    rm -f "$out_file"
+                fi
+            done
         fi
         # shellcheck disable=SC2086 # one file per line
         upload $files "$RESULTS/status"
@@ -773,18 +856,21 @@ main() {
     fi
     ROLE=$(metadata instance/attributes/peppydb-role 2>/dev/null || true)
     ROLE=${ROLE:-single}
+    CLUSTER_SIZE=$(metadata instance/attributes/peppydb-cluster-size 2>/dev/null || true)
+    CLUSTER_SIZE=${CLUSTER_SIZE:-1}
     REMOTE_ARTIFACTS=gs://$BUCKET/peppydb-bench/artifacts/$RUN_ID
+    REMOTE_RESULTS_ROOT=gs://$BUCKET/peppydb-bench/results/$RUN_ID
     case $ROLE in
         single)
-            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID
+            REMOTE_RESULTS=$REMOTE_RESULTS_ROOT
             ;;
-        server)
-            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/server
-            REMOTE_CLIENT_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/client
+        server | server-*)
+            REMOTE_RESULTS=$REMOTE_RESULTS_ROOT/$ROLE
+            REMOTE_CLIENT_RESULTS=$REMOTE_RESULTS_ROOT/client
             ;;
         client)
-            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/client
-            REMOTE_SERVER_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/server
+            REMOTE_RESULTS=$REMOTE_RESULTS_ROOT/client
+            REMOTE_SERVER_RESULTS=$REMOTE_RESULTS_ROOT/server
             ;;
         *)
             log "unknown peppydb-role: $ROLE"
@@ -872,7 +958,7 @@ main() {
                     ;;
             esac
             ;;
-        server)
+        server | server-*)
             run_server_role || {
                 finish failed "server role failed"
                 return 1

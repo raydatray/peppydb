@@ -501,6 +501,46 @@ expect_code 0
 expect_output "peppydb-role=server"
 expect_output "peppydb-role=client"
 
+# --- 3-node cluster suite: 3 server VMs + 1 client VM in one zone.
+cat >"$TMP/cluster-suite.txt" <<'EOF'
+# mode: cluster
+# nodes: 3
+server engine-unittest serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090 --node-id $NODE_ID --peers $PEERS $BOOTSTRAP
+load-put bf-tree-store-unittest --addr $CLUSTER_ADDRS
+EOF
+
+cluster_run_args() {
+    echo "run --project test-project --bucket test-bucket --suite $TMP/cluster-suite.txt --prebuilt $TMP/cs-prebuilt --max-run 60s"
+}
+
+new_case cluster-ok
+# shellcheck disable=SC2046
+driver $(cluster_run_args)
+expect_code 0
+expect_no_instances
+for role in server-1 server-2 server-3 client; do
+    expect_called "peppydb-role=$role"
+    grep -qx "status=ok" "$(run_dir)/results/$role/DONE" || fail "$role DONE missing"
+done
+grep -qx "suite_mode=cluster" "$(run_dir)/artifacts/MANIFEST" || fail "MANIFEST suite_mode"
+grep -qx "cluster_nodes=3" "$(run_dir)/artifacts/MANIFEST" || fail "MANIFEST cluster_nodes"
+grep -q -- "--node-id 1 --peers 1=127.0.0.1:7420,2=127.0.0.1:7420,3=127.0.0.1:7420 --bootstrap" \
+    "$(run_dir)/results/server-1/server.log" || fail "server-1 args: $(cat "$(run_dir)/results/server-1/server.log")"
+grep -q -- "--node-id 2 --peers 1=127.0.0.1:7420,2=127.0.0.1:7420,3=127.0.0.1:7420" \
+    "$(run_dir)/results/server-2/server.log" || fail "server-2 args: $(cat "$(run_dir)/results/server-2/server.log")"
+grep -q -- "--bootstrap" "$(run_dir)/results/server-2/server.log" && fail "server-2 must not have --bootstrap"
+grep -q "client ran: --addr 127.0.0.1:7420,127.0.0.1:7420,127.0.0.1:7420" \
+    "$(run_dir)/results/client/load-put.log" || fail "client CLUSTER_ADDRS not expanded"
+
+new_case cluster-dry-run
+# shellcheck disable=SC2046
+driver $(cluster_run_args) --dry-run
+expect_code 0
+[ ! -f "$CASE_DIR/fake.log" ] || fail "gcloud was called in a dry run"
+for role in server-1 server-2 server-3 client; do
+    expect_output "peppydb-role=$role"
+done
+
 if [ "$failures" -ne 0 ]; then
     echo "test-driver: $failures failure(s)" >&2
     exit 1
