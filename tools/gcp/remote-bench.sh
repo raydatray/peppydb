@@ -556,13 +556,14 @@ wait_tcp() {
 }
 
 # expand_args TEXT: substitute $BENCH_DIR, $SERVER_ADDR, $METRICS_ADDR,
-# $CLUSTER_ADDRS, $NODE_ID, $PEERS, and $BOOTSTRAP.
+# $CLUSTER_ADDRS, $GATEWAY_ADDR, $NODE_ID, $PEERS, and $BOOTSTRAP.
 expand_args() {
     printf '%s' "$1" | sed \
         -e "s|\\\$BENCH_DIR|${PEPPYDB_BENCH_DIR:-}|g" \
         -e "s|\\\$SERVER_ADDR|${SERVER_ADDR:-}|g" \
         -e "s|\\\$METRICS_ADDR|${METRICS_ADDR:-}|g" \
         -e "s|\\\$CLUSTER_ADDRS|${CLUSTER_ADDRS:-}|g" \
+        -e "s|\\\$GATEWAY_ADDR|${GATEWAY_ADDR:-}|g" \
         -e "s|\\\$NODE_ID|${NODE_ID:-}|g" \
         -e "s|\\\$PEERS|${PEERS:-}|g" \
         -e "s|\\\$BOOTSTRAP|${BOOTSTRAP:-}|g"
@@ -737,10 +738,9 @@ stop_server() {
     wait "$2"
 }
 
-# run_client_role: wait for server(s) to publish ready, then run every
-# non-server step in suite.txt.
-run_client_role() {
-    : >"$RESULTS/status"
+# wait_servers_ready: wait for server (or server-1..N) to publish ready,
+# populating CLUSTER_ADDRS, SERVER_ADDR, METRICS_ADDR, and METRICS_ENDPOINTS.
+wait_servers_ready() {
     poll=${PEPPYDB_REMOTE_POLL:-5}
     METRICS_ENDPOINTS=
     if [ "$CLUSTER_SIZE" -gt 1 ]; then
@@ -776,7 +776,7 @@ run_client_role() {
             i=$((i + 1))
         done
         export CLUSTER_ADDRS SERVER_ADDR METRICS_ADDR
-        log "connecting to cluster at $CLUSTER_ADDRS"
+        log "discovered cluster servers at $CLUSTER_ADDRS"
     else
         log "waiting for server ready at $REMOTE_SERVER_RESULTS/ready"
         while :; do
@@ -798,13 +798,156 @@ run_client_role() {
         CLUSTER_ADDRS=$SERVER_ADDR
         METRICS_ENDPOINTS="server=$METRICS_ADDR"
         export CLUSTER_ADDRS SERVER_ADDR METRICS_ADDR
-        log "connecting to server at $SERVER_ADDR (metrics $METRICS_ADDR)"
+        log "discovered server at $SERVER_ADDR (metrics $METRICS_ADDR)"
+    fi
+}
+
+# run_gateway_role: wait for servers to publish ready, start the gateway line
+# from suite.txt under the run's profiler, publish gateway/ready, wait for
+# client/DONE, and stop cleanly.
+run_gateway_role() {
+    : >"$RESULTS/status"
+    case $PROFILE in
+        *,*)
+            log "a multi-VM run takes one profiler, not $PROFILE"
+            echo "gateway - 2 0 too-many-profilers" >>"$RESULTS/status"
+            return 2
+            ;;
+    esac
+    known_profiler "$PROFILE" || {
+        log "unknown profiler: $PROFILE"
+        echo "gateway - 2 0 unknown-profiler" >>"$RESULTS/status"
+        return 2
+    }
+    gateway_line=$(awk '$1 == "gateway" { $1 = ""; sub(/^ /, ""); print; exit }' "$ARTIFACTS/suite.txt")
+    if [ -z "$gateway_line" ]; then
+        log "suite.txt has no gateway line"
+        return 2
+    fi
+    set -- $gateway_line
+    bin=$1
+    shift
+    raw_args=$*
+    exe=$ARTIFACTS/bin/$bin
+    if [ ! -x "$exe" ]; then
+        log "gateway binary not executable: $bin"
+        return 2
+    fi
+    listen_port=7430
+    metrics_port=9090
+    prev=
+    for tok in $raw_args; do
+        case $prev in
+            --listen) listen_port=${tok##*:} ;;
+            --metrics-listen) metrics_port=${tok##*:} ;;
+        esac
+        prev=$tok
+    done
+
+    wait_servers_ready || return 1
+
+    ip=$(metadata instance/network-interfaces/0/ip 2>/dev/null || true)
+    ip=${ip:-127.0.0.1}
+    poll=${PEPPYDB_REMOTE_POLL:-5}
+
+    args=$(expand_args "$raw_args")
+    pid_file=$STATE/gateway.pid
+    launcher=$STATE/gateway-launch
+    gw_files=$STATE/gateway.files
+    rm -f "$pid_file" "$gw_files"
+    {
+        echo '#!/bin/sh'
+        echo "echo \$\$ >\"$pid_file\""
+        echo "exec \"$exe\" \"\$@\""
+    } >"$launcher" && chmod +x "$launcher" || return 2
+    started=$(date +%s)
+    log "starting gateway ($PROFILE): $bin $args"
+    # shellcheck disable=SC2086 # args split on whitespace by design
+    MAPS_EXE=$exe run_profiled "$PROFILE" gateway "$launcher" $args \
+        3>"$gw_files" </dev/null &
+    runner=$!
+
+    if ! wait_tcp 127.0.0.1 "$listen_port" "$runner"; then
+        stop_server "$pid_file" "$runner"
+        elapsed=$(($(date +%s) - started))
+        echo "gateway $PROFILE 1 $elapsed failed-to-listen" >>"$RESULTS/status"
+        # shellcheck disable=SC2046 # one file per line
+        upload $(cat "$gw_files") "$RESULTS/status"
+        return 1
+    fi
+
+    {
+        echo "ip=$ip"
+        echo "port=$listen_port"
+        echo "metrics_port=$metrics_port"
+    } >"$RESULTS/ready"
+    upload "$RESULTS/ready"
+    log "gateway ready at $ip:$listen_port (metrics :$metrics_port)"
+
+    while :; do
+        if gcs_exists "$REMOTE_CLIENT_RESULTS/DONE"; then
+            log "client finished; stopping gateway"
+            break
+        fi
+        if ! kill -0 "$runner" 2>/dev/null; then
+            wait "$runner"
+            rc=$?
+            elapsed=$(($(date +%s) - started))
+            log "gateway exited early with status $rc"
+            echo "gateway $PROFILE $rc $elapsed exited-early" >>"$RESULTS/status"
+            # shellcheck disable=SC2046 # one file per line
+            upload $(cat "$gw_files") "$RESULTS/status"
+            return 1
+        fi
+        sleep "$poll"
+    done
+
+    stop_server "$pid_file" "$runner"
+    rc=$?
+    elapsed=$(($(date +%s) - started))
+    note=ok
+    [ "$rc" = 0 ] || note=exit-$rc
+    echo "gateway $PROFILE $rc $elapsed $note" >>"$RESULTS/status"
+    log "gateway ($PROFILE): $note after ${elapsed}s"
+    # shellcheck disable=SC2046 # one file per line
+    upload $(cat "$gw_files") "$RESULTS/status"
+    return 0
+}
+
+# run_client_role: wait for server(s) (and optional gateway) to publish ready,
+# then run every non-server, non-gateway step in suite.txt.
+run_client_role() {
+    : >"$RESULTS/status"
+    poll=${PEPPYDB_REMOTE_POLL:-5}
+    wait_servers_ready || return 1
+
+    if [ "$HAS_GATEWAY" = 1 ]; then
+        gw_results="$REMOTE_RESULTS_ROOT/gateway"
+        log "waiting for gateway ready at $gw_results/ready"
+        while :; do
+            if gcs_exists "$gw_results/ready"; then
+                break
+            fi
+            if gcs_exists "$gw_results/DONE"; then
+                log "gateway finished without becoming ready"
+                return 1
+            fi
+            sleep "$poll"
+        done
+        gcs_cp "$gw_results/ready" "$STATE/gateway.ready" || return 1
+        gw_ip=$(sed -n 's/^ip=//p' "$STATE/gateway.ready")
+        gw_port=$(sed -n 's/^port=//p' "$STATE/gateway.ready")
+        gw_mport=$(sed -n 's/^metrics_port=//p' "$STATE/gateway.ready")
+        GATEWAY_ADDR="$gw_ip:${gw_port:-7430}"
+        export GATEWAY_ADDR
+        METRICS_ENDPOINTS="$METRICS_ENDPOINTS gateway=$gw_ip:${gw_mport:-9090}"
+        log "connecting to gateway at $GATEWAY_ADDR"
     fi
 
     while read -r name bin raw_args <&4; do
         case $name in
             '' | '#'*) continue ;;
-            server) continue ;;
+            server | gateway) continue ;;
         esac
         if ! echo "$name" | grep -Eq '^[a-z0-9][a-z0-9-]*$' ||
             [ ! -x "$ARTIFACTS/bin/$bin" ]; then
@@ -834,7 +977,9 @@ run_client_role() {
                 m_name=${pair%%=*}
                 m_addr=${pair#*=}
                 out_file="$RESULTS/$name.metrics.txt"
-                [ "$CLUSTER_SIZE" -gt 1 ] && out_file="$RESULTS/$name.$m_name.metrics.txt"
+                if [ "$CLUSTER_SIZE" -gt 1 ] || [ "$HAS_GATEWAY" = 1 ]; then
+                    out_file="$RESULTS/$name.$m_name.metrics.txt"
+                fi
                 if curl -fsS --max-time 5 "http://$m_addr/metrics" >"$out_file" 2>/dev/null; then
                     files="$files $out_file"
                 else
@@ -858,6 +1003,8 @@ main() {
     ROLE=${ROLE:-single}
     CLUSTER_SIZE=$(metadata instance/attributes/peppydb-cluster-size 2>/dev/null || true)
     CLUSTER_SIZE=${CLUSTER_SIZE:-1}
+    HAS_GATEWAY=$(metadata instance/attributes/peppydb-has-gateway 2>/dev/null || true)
+    HAS_GATEWAY=${HAS_GATEWAY:-0}
     REMOTE_ARTIFACTS=gs://$BUCKET/peppydb-bench/artifacts/$RUN_ID
     REMOTE_RESULTS_ROOT=gs://$BUCKET/peppydb-bench/results/$RUN_ID
     case $ROLE in
@@ -867,6 +1014,11 @@ main() {
         server | server-*)
             REMOTE_RESULTS=$REMOTE_RESULTS_ROOT/$ROLE
             REMOTE_CLIENT_RESULTS=$REMOTE_RESULTS_ROOT/client
+            ;;
+        gateway)
+            REMOTE_RESULTS=$REMOTE_RESULTS_ROOT/gateway
+            REMOTE_CLIENT_RESULTS=$REMOTE_RESULTS_ROOT/client
+            REMOTE_SERVER_RESULTS=$REMOTE_RESULTS_ROOT/server
             ;;
         client)
             REMOTE_RESULTS=$REMOTE_RESULTS_ROOT/client
@@ -910,7 +1062,7 @@ main() {
         log "tool installation failed; continuing without profiling tools"
     fi
 
-    if [ "$ROLE" = client ]; then
+    if [ "$ROLE" = client ] || [ "$ROLE" = gateway ]; then
         PEPPYDB_BENCH_DIR=${PEPPYDB_BENCH_DIR:-$STATE/bench}
         mkdir -p "$PEPPYDB_BENCH_DIR"
     else
@@ -961,6 +1113,12 @@ main() {
         server | server-*)
             run_server_role || {
                 finish failed "server role failed"
+                return 1
+            }
+            ;;
+        gateway)
+            run_gateway_role || {
+                finish failed "gateway role failed"
                 return 1
             }
             ;;
