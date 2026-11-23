@@ -59,8 +59,10 @@ pub(crate) async fn build<RT: AsyncRuntime>(
         let _paused = lock(&shared.gate);
         let mut committed = lock(&shared.committed);
         let sync = Arc::clone(&shared.sync);
-        db.checkpoint_with(|_captured| sync().map_err(Into::into))
+        let ckpt = db
+            .checkpoint_with(|_captured| sync().map_err(Into::into))
             .map_err(io::Error::other)?;
+        *lock(&shared.last_checkpoint) = Some(ckpt);
         let (applied, membership) = applied_state_of(&db)?;
         let meta = OrSnapshotMeta {
             last_log_id: applied,

@@ -13,8 +13,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kv_proto::kv::v1::admin_service_client::AdminServiceClient;
 use kv_proto::kv::v1::kv_service_client::KvServiceClient;
-use kv_proto::kv::v1::{GetRequest, PutRequest};
+use kv_proto::kv::v1::{GetRequest, PutRequest, StatusRequest};
 
 /// Set in the child: the command-line arguments, separated by newlines.
 const CHILD_ARGS: &str = "PEPPYDB_TEST_CHILD_ARGS";
@@ -128,10 +129,29 @@ fn key(i: u32) -> Vec<u8> {
     i.to_be_bytes().to_vec()
 }
 
+async fn wait_leader(addr: SocketAddr) {
+    let mut admin = AdminServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("connect admin");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(resp) = admin.status(StatusRequest {}).await
+                && resp.into_inner().role == "leader"
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("child server elected leader");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn acknowledged_writes_survive_sigkill_and_sigterm_stops_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let (mut child, addr) = ServerProcess::start(dir.path());
+    wait_leader(addr).await;
     let mut kv = client(addr).await;
     // Concurrent writers, so the kill can land while syncs are in flight.
     let mut writers = Vec::new();
@@ -162,6 +182,7 @@ async fn acknowledged_writes_survive_sigkill_and_sigterm_stops_cleanly() {
     drop(kv);
 
     let (mut child, addr) = ServerProcess::start(dir.path());
+    wait_leader(addr).await;
     kv = client(addr).await;
     for &i in &acknowledged {
         let value = kv

@@ -1,28 +1,26 @@
-//! The peppydb server (plan 0026): the `peppydb.kv.v1` gRPC services over
-//! one [`engine::Db`].
+//! The peppydb server (plans 0026, 0031, 0032): the `peppydb.kv.v1` and
+//! `peppydb.raft.v1` gRPC services over [`server_raft::RaftNode`] and an
+//! external-mode [`engine::Db`].
 //!
-//! [`serve`] is the entry point. It takes an opened database and a bound
-//! listener, serves until its shutdown future completes, then drains
-//! requests and closes the database. A WAL failure stops it too
-//! ([`Exit::Fatal`]): the engine refuses writes until a reopen, so the
-//! process should exit and be restarted.
-//!
-//! - **Semantics are the engine's.** A `Put` or `Delete` returns `OK` only
-//!   once durable; single keys are linearizable; scans are consistent per
-//!   leaf ([`engine`], "Consistency").
-//! - **Errors are gRPC statuses**, mapped from [`engine::Error`]: limits
-//!   are `INVALID_ARGUMENT`, a WAL failure is `UNAVAILABLE`, and store
-//!   errors are `INTERNAL`.
-//! - **Stored keys carry a namespace byte**: user keys are stored as
-//!   `0x01 ‖ key`; `0x00` is the server's system keyspace.
+//! [`serve`] is the entry point. Every server runs Raft (roadmap decision 10);
+//! a single node is a 1-node group. Writes propose through Raft, reads pass a
+//! linearizable read barrier (`ReadIndex`) and read the local engine on the
+//! blocking pool, and non-leaders answer `UNAVAILABLE` with a `LeaderHint` in
+//! status details.
 
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::Db;
 use kv_proto::kv::v1::admin_service_server::AdminServiceServer;
 use kv_proto::kv::v1::kv_service_server::KvServiceServer;
+use raft_proto::raft::v1::raft_service_server::RaftServiceServer;
+use server_raft::{
+    Command, DbStateMachine, DiskLog, LogOptions, NodeId, Op, PeerInfo, RaftConfig, RaftNode, Role,
+    StartError,
+};
 use tokio::net::TcpListener;
 use tonic::server::NamedService;
 use tonic::transport::server::TcpIncoming;
@@ -112,15 +110,28 @@ impl Config {
     }
 }
 
+/// Configuration for one Raft-replicated server node.
+#[derive(Clone, Debug)]
+pub struct NodeConfig {
+    pub node_id: NodeId,
+    pub data_dir: PathBuf,
+    pub peers: BTreeMap<NodeId, PeerInfo>,
+    /// Initialize a brand-new cluster when this node starts empty. Ignored on
+    /// restart. Always enabled for 1-node clusters.
+    pub bootstrap: bool,
+    pub direct_io: bool,
+    pub log: LogOptions,
+    pub raft: RaftConfig,
+    pub server: Config,
+}
+
 /// How [`serve`] ended.
 #[derive(Debug)]
 pub enum Exit {
-    /// The shutdown future completed; the database closed with a
-    /// checkpoint.
+    /// The shutdown future completed cleanly.
     Clean,
-    /// A WAL failure stopped the server. The database was dropped without
-    /// a checkpoint; a restart reopens it and replays the durable WAL.
-    Fatal(engine::Error),
+    /// A fatal Raft or storage failure stopped the server.
+    Fatal(String),
 }
 
 /// Why [`serve`] failed.
@@ -128,67 +139,111 @@ pub enum Exit {
 pub enum ServeError {
     #[error("invalid server configuration: {0}")]
     Config(&'static str),
+    #[error("invalid peer configuration: {0}")]
+    Peers(String),
     #[error(transparent)]
     Format(#[from] FormatError),
+    #[error("storage error: {0}")]
+    Storage(#[from] std::io::Error),
+    #[error("raft startup error: {0}")]
+    Raft(#[from] StartError),
     #[error("transport error: {0}")]
     Transport(#[from] tonic::transport::Error),
-    #[error("closing the database failed: {0}")]
-    Close(#[source] engine::Error),
     #[error("a blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
 
-/// Serve `db` on `listener` until `shutdown` completes or the WAL fails,
-/// then drain requests and close the database.
-///
-/// On an empty database `serve` writes the format marker; a database with
-/// data but no marker is refused with [`FormatError::Missing`].
-///
-/// Shutdown marks every service `NOT_SERVING` in the health service, stops
-/// accepting connections, waits up to [`Config::shutdown_grace`] for
-/// in-flight requests, then waits for every engine call to return. On a
-/// clean shutdown it closes the database, which checkpoints; after a WAL
-/// failure it drops it.
+/// Serve a Raft-replicated peppydb node on `listener` (and optional HTTP
+/// `metrics_listener`) until `shutdown` completes or a fatal storage error
+/// stops the node.
 pub async fn serve(
-    db: Db,
-    listener: TcpListener,
-    config: Config,
-    shutdown: impl Future<Output = ()> + Send,
-) -> Result<Exit, ServeError> {
-    serve_with_metrics(db, listener, None, config, shutdown).await
-}
-
-/// Like [`serve`], plus an optional HTTP/1.1 listener serving Prometheus
-/// metrics on `GET /metrics`.
-pub async fn serve_with_metrics(
-    db: Db,
+    node_config: NodeConfig,
     listener: TcpListener,
     metrics_listener: Option<TcpListener>,
-    config: Config,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Exit, ServeError> {
-    let inner = prepare(db, config).await?;
-    run(inner, listener, metrics_listener, shutdown).await
+    let (inner, has_format, should_bootstrap) = prepare(node_config).await?;
+    run(
+        inner,
+        has_format,
+        should_bootstrap,
+        listener,
+        metrics_listener,
+        shutdown,
+    )
+    .await
 }
 
-/// Check the configuration and the format marker.
-pub(crate) async fn prepare(db: Db, config: Config) -> Result<Arc<bridge::Inner>, ServeError> {
-    config.validate()?;
-    let db = tokio::task::spawn_blocking(move || keys::check_format(&db).map(|()| db)).await??;
-    Ok(Arc::new(bridge::Inner::new(db, config)))
+pub(crate) async fn prepare(
+    node_config: NodeConfig,
+) -> Result<(Arc<bridge::Inner>, bool, bool), ServeError> {
+    node_config.server.validate()?;
+    if !node_config.peers.contains_key(&node_config.node_id) {
+        return Err(ServeError::Peers(format!(
+            "peers map does not contain this node's id {}",
+            node_config.node_id
+        )));
+    }
+    let data_dir = node_config.data_dir.clone();
+    let log_options = node_config.log;
+    let direct_io = node_config.direct_io;
+    let (log, sm, has_format, limits) = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&data_dir)?;
+        let log = DiskLog::open_real(&data_dir.join("raft-log"), log_options)?;
+        let sync = log.sync_hook();
+        let sm = DbStateMachine::open_dir(&data_dir.join("db"), direct_io, sync)?;
+        let db = sm.db()?;
+        let has_format = keys::check_format_readonly(&db).map_err(|e| match e {
+            FormatError::Engine(engine::Error::Io { source, .. }) => ServeError::Storage(source),
+            other => ServeError::Format(other),
+        })?;
+        let limits = sm.limits()?;
+        Ok::<_, ServeError>((log, sm, has_format, limits))
+    })
+    .await??;
+
+    let transport = Arc::new(
+        raft_transport::GrpcTransport::new(&node_config.peers).map_err(ServeError::Peers)?,
+    );
+    let node = Arc::new(
+        RaftNode::start(
+            node_config.node_id,
+            &node_config.raft,
+            log,
+            sm.clone(),
+            transport,
+        )
+        .await?,
+    );
+    let should_bootstrap = node_config.bootstrap || node_config.peers.len() == 1;
+    let inner = Arc::new(bridge::Inner::new(
+        node,
+        sm,
+        node_config.peers,
+        limits,
+        node_config.server,
+    ));
+    Ok((inner, has_format, should_bootstrap))
 }
 
-/// Serve, drain, and close.
 pub(crate) async fn run(
     inner: Arc<bridge::Inner>,
+    has_format: bool,
+    should_bootstrap: bool,
     listener: TcpListener,
     metrics_listener: Option<TcpListener>,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Exit, ServeError> {
     let config = inner.config;
-    let (metrics_stop_tx, metrics_stop_rx) = tokio::sync::watch::channel(false);
-    let metrics_task = metrics_listener
-        .map(|ml| tokio::spawn(metrics::serve_http(ml, Arc::clone(&inner), metrics_stop_rx)));
+    let (bg_stop_tx, bg_stop_rx) = tokio::sync::watch::channel(false);
+    let metrics_task = metrics_listener.map(|ml| {
+        tokio::spawn(metrics::serve_http(
+            ml,
+            Arc::clone(&inner),
+            bg_stop_rx.clone(),
+        ))
+    });
+
     let kv = KvServiceServer::new(kv::Kv {
         inner: Arc::clone(&inner),
     })
@@ -197,6 +252,9 @@ pub(crate) async fn run(
         inner: Arc::clone(&inner),
     })
     .max_decoding_message_size(config.max_request_bytes);
+    let raft_svc = RaftServiceServer::new(raft_transport::RaftRpcServer {
+        node: Arc::clone(&inner.node),
+    });
 
     let (health, health_service) = tonic_health::server::health_reporter();
     let names = [
@@ -210,6 +268,52 @@ pub(crate) async fn run(
             .await;
     }
 
+    // Bootstrap (when requested and empty) and write the format marker once a
+    // leader is elected, in the background so tonic starts serving peer RPCs
+    // immediately.
+    let bootstrap_task = {
+        let inner = Arc::clone(&inner);
+        let mut stop_rx = bg_stop_rx.clone();
+        tokio::spawn(async move {
+            if should_bootstrap {
+                let st = inner.raft_status();
+                if st.last_log_index.is_none() && st.applied.is_none() && st.snapshot.is_none() {
+                    let voters = inner_peers(&inner);
+                    if let Err(err) = inner.node.initialize(voters).await {
+                        tracing::debug!(%err, "cluster initialize skipped or already initialized");
+                    }
+                }
+            }
+            if !has_format {
+                loop {
+                    if *stop_rx.borrow() {
+                        break;
+                    }
+                    if let Ok(db) = inner.sm.db()
+                        && db.get(keys::FORMAT_KEY).ok().flatten().is_some()
+                    {
+                        break;
+                    }
+                    if inner.raft_status().role == Role::Leader {
+                        let cmd = Command {
+                            ops: vec![Op::Put {
+                                key: keys::FORMAT_KEY.to_vec(),
+                                value: keys::FORMAT_VERSION.to_vec(),
+                            }],
+                        };
+                        if inner.node.propose(cmd).await.is_ok() {
+                            break;
+                        }
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                        _ = stop_rx.changed() => break,
+                    }
+                }
+            }
+        })
+    };
+
     let (stopping, stopped) = tokio::sync::oneshot::channel();
     let signal = {
         let inner = Arc::clone(&inner);
@@ -219,8 +323,6 @@ pub(crate) async fn run(
                 () = shutdown => tracing::info!("shutting down"),
                 () = inner.fatal_notify.notified() => {}
             }
-            // Watchers see NOT_SERVING; clearing the statuses then ends
-            // their streams, so they do not hold up the drain.
             for name in names {
                 health
                     .set_service_status(name, ServingStatus::NotServing)
@@ -234,6 +336,7 @@ pub(crate) async fn run(
         .add_service(health_service)
         .add_service(kv)
         .add_service(admin)
+        .add_service(raft_svc)
         .serve_with_incoming_shutdown(incoming(listener), signal);
     tokio::select! {
         result = server => result?,
@@ -243,21 +346,20 @@ pub(crate) async fn run(
         } => tracing::warn!("shutdown grace period expired with requests in flight"),
     }
 
-    let _ = metrics_stop_tx.send(true);
+    let _ = bg_stop_tx.send(true);
+    let _ = bootstrap_task.await;
     if let Some(task) = metrics_task {
         let _ = task.await;
     }
 
-    let db = inner.take_db().await.expect("only run takes the database");
     if let Some(error) = inner.take_fatal() {
-        // A checkpoint cannot commit after a WAL failure: its hook syncs
-        // the WAL. The restart replays the durable WAL instead.
-        tokio::task::spawn_blocking(move || drop(db)).await?;
+        inner.drain_and_shutdown().await;
         return Ok(Exit::Fatal(error));
     }
-    tokio::task::spawn_blocking(move || db.close())
-        .await?
-        .map_err(ServeError::Close)?;
+    // Best-effort checkpoint on clean shutdown so restart replays less log.
+    let sm = inner.sm.clone();
+    let _ = tokio::task::spawn_blocking(move || sm.checkpoint_now()).await;
+    inner.drain_and_shutdown().await;
     Ok(Exit::Clean)
 }
 
@@ -270,4 +372,8 @@ pub(crate) async fn run(
 /// option unset, and `Server::tcp_nodelay` applies only to `Server::serve`.
 pub(crate) fn incoming(listener: TcpListener) -> TcpIncoming {
     TcpIncoming::from(listener).with_nodelay(Some(true))
+}
+
+fn inner_peers(inner: &bridge::Inner) -> BTreeMap<NodeId, PeerInfo> {
+    inner.peers_map()
 }
