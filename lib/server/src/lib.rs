@@ -199,7 +199,7 @@ pub(crate) async fn run(
         .add_service(health_service)
         .add_service(kv)
         .add_service(admin)
-        .serve_with_incoming_shutdown(TcpIncoming::from(listener), signal);
+        .serve_with_incoming_shutdown(incoming(listener), signal);
     tokio::select! {
         result = server => result?,
         () = async {
@@ -219,4 +219,15 @@ pub(crate) async fn run(
         .await?
         .map_err(ServeError::Close)?;
     Ok(Exit::Clean)
+}
+
+/// The accepted connections of `listener`, with `TCP_NODELAY` set.
+///
+/// A gRPC response is several small writes (HEADERS, DATA, trailers). With
+/// Nagle's algorithm on, a later write waits for the ACK of an earlier one,
+/// and the client delays that ACK by up to 40 ms on Linux, so one request
+/// at a time completes about every 40 ms. `TcpIncoming::from` leaves the
+/// option unset, and `Server::tcp_nodelay` applies only to `Server::serve`.
+pub(crate) fn incoming(listener: TcpListener) -> TcpIncoming {
+    TcpIncoming::from(listener).with_nodelay(Some(true))
 }

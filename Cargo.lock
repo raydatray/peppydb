@@ -1294,6 +1294,7 @@ dependencies = [
  "arc-swap",
  "clap",
  "engine",
+ "futures-util",
  "kv-proto",
  "server-keys",
  "tempfile",

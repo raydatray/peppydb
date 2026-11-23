@@ -5,6 +5,7 @@ mod admin;
 mod kv;
 mod process;
 mod scan;
+mod transport;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

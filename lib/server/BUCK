@@ -20,6 +20,8 @@ peppy_rust_library(
     test_deps = [
         # Db::fail_next_wal_sync, for the fail-stop tests.
         "//lib/engine:engine-fault-injection",
+        # StreamExt::next on TcpIncoming, for the transport tests.
+        "//third-party/rust:futures-util",
         "//third-party/rust:tempfile",
     ],
     visibility = ["//bin/peppydb:"],

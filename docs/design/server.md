@@ -204,6 +204,16 @@ sequenceDiagram
 - **The grace period bounds only the network drain**
   (`Config::shutdown_grace`, default 10 s). Engine calls are short, so the
   permit wait has no timeout.
+- **Accepted connections set `TCP_NODELAY`.** A gRPC response is
+  several small writes (HEADERS, DATA, trailers). With Nagle's algorithm
+  on, a later write waits for the ACK of an earlier one, and the client
+  delays that ACK by up to 40 ms on Linux. A client with one request in
+  flight then completes about one request per 40 ms. `serve` passes the
+  listener through `incoming`, because `TcpIncoming::from` leaves the
+  option unset and `Server::tcp_nodelay` applies only to `Server::serve`.
+  A 2026-11-23 GCP `server-perf` run without this option measured
+  24 puts/s at concurrency 1 (p50 41 ms) against a server-side handler
+  time of 134 µs.
 - **Signals.** `SIGINT` or `SIGTERM` starts the clean shutdown; a second
   signal exits at once with status 1, which is safe because acknowledged
   writes are durable. The handlers are installed before the `listening on`
@@ -277,6 +287,7 @@ Test paths are relative to `lib/server/src/tests/` unless noted.
 | 14. A second server on a locked database exits 1. | `process.rs`: `a_second_server_on_a_locked_database_exits_with_an_error` |
 | 15. The generated code matches `proto/`, which passes lint and the breaking-change check. | `tools/gen-proto --check` |
 | 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `lib/load/load_test.go` |
+| 17. Accepted connections set `TCP_NODELAY`. | `transport.rs`: `accepted_connections_set_nodelay` |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
 `lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
