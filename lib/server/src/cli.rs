@@ -48,6 +48,23 @@ struct ServeArgs {
     /// Optional HTTP address serving Prometheus metrics at `GET /metrics`.
     #[arg(long)]
     metrics_listen: Option<SocketAddr>,
+    /// This server's Raft node id.
+    #[arg(long, default_value_t = 1)]
+    node_id: u64,
+    /// Comma-separated static cluster peers (`id=host:port,...`). When omitted,
+    /// the server runs as a 1-node cluster at `--listen`.
+    #[arg(long)]
+    peers: Option<String>,
+    /// Initialize a new multi-node cluster when starting empty. Ignored on
+    /// restart; automatic in 1-node mode.
+    #[arg(long, default_value_t = false)]
+    bootstrap: bool,
+    /// Trigger an automatic snapshot after this many log entries.
+    #[arg(long)]
+    snapshot_after: Option<u64>,
+    /// Keep at least this many log entries below the latest snapshot.
+    #[arg(long)]
+    keep_below_snapshot: Option<u64>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -113,20 +130,33 @@ fn run(args: ServeArgs) -> Result<Exit, Box<dyn std::error::Error>> {
             }
             None => None,
         };
-        let peers = BTreeMap::from([(
-            1,
-            PeerInfo {
-                addr: bound_addr.to_string(),
-            },
-        )]);
+        let (peers, bootstrap) = match args.peers.as_deref() {
+            Some(spec) => (parse_peers(spec)?, args.bootstrap),
+            None => (
+                BTreeMap::from([(
+                    args.node_id,
+                    PeerInfo {
+                        addr: bound_addr.to_string(),
+                    },
+                )]),
+                true,
+            ),
+        };
+        let mut raft = RaftConfig::default();
+        if let Some(after) = args.snapshot_after {
+            raft.snapshot_after = Some(after);
+        }
+        if let Some(keep) = args.keep_below_snapshot {
+            raft.keep_below_snapshot = keep;
+        }
         let node_config = NodeConfig {
-            node_id: 1,
+            node_id: args.node_id,
             data_dir: args.data_dir,
             peers,
-            bootstrap: true,
+            bootstrap,
             direct_io: matches!(args.io, IoMode::Direct),
             log: LogOptions::default(),
-            raft: RaftConfig::default(),
+            raft,
             server: config,
         };
         let (inner, has_format, should_bootstrap) = prepare(node_config).await?;
@@ -165,4 +195,58 @@ fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send> {
             std::process::exit(1);
         });
     })
+}
+
+fn parse_peers(spec: &str) -> Result<BTreeMap<u64, PeerInfo>, String> {
+    let mut peers = BTreeMap::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let (id_str, addr) = item
+            .split_once('=')
+            .ok_or_else(|| format!("peer entry {item:?} must be `id=addr`"))?;
+        let id: u64 = id_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid node id {id_str:?} in --peers"))?;
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err(format!("empty address for node {id} in --peers"));
+        }
+        if peers
+            .insert(
+                id,
+                PeerInfo {
+                    addr: addr.to_owned(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate node id {id} in --peers"));
+        }
+    }
+    if peers.is_empty() {
+        return Err("--peers must list at least one peer".to_owned());
+    }
+    Ok(peers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_peers_accepts_valid_and_rejects_malformed() {
+        let parsed = parse_peers("1=127.0.0.1:7420, 2=127.0.0.1:7421, 3=127.0.0.1:7422").unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[&2].addr, "127.0.0.1:7421");
+
+        assert!(parse_peers("").is_err());
+        assert!(parse_peers("1:127.0.0.1:7420").is_err());
+        assert!(parse_peers("abc=127.0.0.1:7420").is_err());
+        assert!(parse_peers("1=").is_err());
+        assert!(parse_peers("1=127.0.0.1:7420,1=127.0.0.1:7421").is_err());
+    }
 }
