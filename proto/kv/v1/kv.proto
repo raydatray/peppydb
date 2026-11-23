@@ -107,11 +107,29 @@ message ScanResponse {
 
 message StatusRequest {}
 
+// Encoded in gRPC UNAVAILABLE status details when a non-leader knows the
+// current leader.
+message LeaderHint {
+  uint64 leader_id = 1;
+  // Client gRPC address of the current leader.
+  string leader_addr = 2;
+}
+
 message StatusResponse {
   // Every write with a sequence at or below this is applied.
   uint64 applied_seq = 1;
   // The server's version.
   string version = 2;
+  // This server's Raft node id.
+  uint64 node_id = 3;
+  // Raft role: "leader", "follower", "candidate", "learner", or "shutdown".
+  string role = 4;
+  // Current Raft term.
+  uint64 term = 5;
+  // Known leader id, if any.
+  optional uint64 leader_id = 6;
+  // Known leader address, if any.
+  optional string leader_addr = 7;
 }
 
 message CheckpointRequest {}

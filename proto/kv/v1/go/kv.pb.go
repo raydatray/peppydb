@@ -510,19 +510,84 @@ func (*StatusRequest) Descriptor() ([]byte, []int) {
 	return file_kv_v1_kv_proto_rawDescGZIP(), []int{9}
 }
 
+// Encoded in gRPC UNAVAILABLE status details when a non-leader knows the
+// current leader.
+type LeaderHint struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	LeaderId uint64                 `protobuf:"varint,1,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	// Client gRPC address of the current leader.
+	LeaderAddr    string `protobuf:"bytes,2,opt,name=leader_addr,json=leaderAddr,proto3" json:"leader_addr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LeaderHint) Reset() {
+	*x = LeaderHint{}
+	mi := &file_kv_v1_kv_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaderHint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaderHint) ProtoMessage() {}
+
+func (x *LeaderHint) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaderHint.ProtoReflect.Descriptor instead.
+func (*LeaderHint) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *LeaderHint) GetLeaderId() uint64 {
+	if x != nil {
+		return x.LeaderId
+	}
+	return 0
+}
+
+func (x *LeaderHint) GetLeaderAddr() string {
+	if x != nil {
+		return x.LeaderAddr
+	}
+	return ""
+}
+
 type StatusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Every write with a sequence at or below this is applied.
 	AppliedSeq uint64 `protobuf:"varint,1,opt,name=applied_seq,json=appliedSeq,proto3" json:"applied_seq,omitempty"`
 	// The server's version.
-	Version       string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Version string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	// This server's Raft node id.
+	NodeId uint64 `protobuf:"varint,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// Raft role: "leader", "follower", "candidate", "learner", or "shutdown".
+	Role string `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	// Current Raft term.
+	Term uint64 `protobuf:"varint,5,opt,name=term,proto3" json:"term,omitempty"`
+	// Known leader id, if any.
+	LeaderId *uint64 `protobuf:"varint,6,opt,name=leader_id,json=leaderId,proto3,oneof" json:"leader_id,omitempty"`
+	// Known leader address, if any.
+	LeaderAddr    *string `protobuf:"bytes,7,opt,name=leader_addr,json=leaderAddr,proto3,oneof" json:"leader_addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[10]
+	mi := &file_kv_v1_kv_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -534,7 +599,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[10]
+	mi := &file_kv_v1_kv_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -547,7 +612,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{10}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *StatusResponse) GetAppliedSeq() uint64 {
@@ -564,6 +629,41 @@ func (x *StatusResponse) GetVersion() string {
 	return ""
 }
 
+func (x *StatusResponse) GetNodeId() uint64 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetLeaderId() uint64 {
+	if x != nil && x.LeaderId != nil {
+		return *x.LeaderId
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetLeaderAddr() string {
+	if x != nil && x.LeaderAddr != nil {
+		return *x.LeaderAddr
+	}
+	return ""
+}
+
 type CheckpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -572,7 +672,7 @@ type CheckpointRequest struct {
 
 func (x *CheckpointRequest) Reset() {
 	*x = CheckpointRequest{}
-	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	mi := &file_kv_v1_kv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -584,7 +684,7 @@ func (x *CheckpointRequest) String() string {
 func (*CheckpointRequest) ProtoMessage() {}
 
 func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	mi := &file_kv_v1_kv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -597,7 +697,7 @@ func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointRequest.ProtoReflect.Descriptor instead.
 func (*CheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{11}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{12}
 }
 
 type CheckpointResponse struct {
@@ -612,7 +712,7 @@ type CheckpointResponse struct {
 
 func (x *CheckpointResponse) Reset() {
 	*x = CheckpointResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[12]
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -624,7 +724,7 @@ func (x *CheckpointResponse) String() string {
 func (*CheckpointResponse) ProtoMessage() {}
 
 func (x *CheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[12]
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -637,7 +737,7 @@ func (x *CheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointResponse.ProtoReflect.Descriptor instead.
 func (*CheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{12}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CheckpointResponse) GetAppliedSeq() uint64 {
@@ -666,7 +766,7 @@ type SnapshotRequest struct {
 
 func (x *SnapshotRequest) Reset() {
 	*x = SnapshotRequest{}
-	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -678,7 +778,7 @@ func (x *SnapshotRequest) String() string {
 func (*SnapshotRequest) ProtoMessage() {}
 
 func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -691,7 +791,7 @@ func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{13}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SnapshotRequest) GetCheckpoint() bool {
@@ -714,7 +814,7 @@ type SnapshotResponse struct {
 
 func (x *SnapshotResponse) Reset() {
 	*x = SnapshotResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +826,7 @@ func (x *SnapshotResponse) String() string {
 func (*SnapshotResponse) ProtoMessage() {}
 
 func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +839,7 @@ func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{14}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SnapshotResponse) GetPayload() isSnapshotResponse_Payload {
@@ -802,7 +902,7 @@ type SnapshotTrailer struct {
 
 func (x *SnapshotTrailer) Reset() {
 	*x = SnapshotTrailer{}
-	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	mi := &file_kv_v1_kv_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -814,7 +914,7 @@ func (x *SnapshotTrailer) String() string {
 func (*SnapshotTrailer) ProtoMessage() {}
 
 func (x *SnapshotTrailer) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	mi := &file_kv_v1_kv_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -827,7 +927,7 @@ func (x *SnapshotTrailer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotTrailer.ProtoReflect.Descriptor instead.
 func (*SnapshotTrailer) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{15}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SnapshotTrailer) GetAppliedSeq() uint64 {
@@ -891,11 +991,25 @@ const file_kv_v1_kv_proto_rawDesc = "" +
 	"\n" +
 	"next_start\x18\x02 \x01(\fH\x00R\tnextStart\x88\x01\x01B\r\n" +
 	"\v_next_start\"\x0f\n" +
-	"\rStatusRequest\"K\n" +
+	"\rStatusRequest\"J\n" +
+	"\n" +
+	"LeaderHint\x12\x1b\n" +
+	"\tleader_id\x18\x01 \x01(\x04R\bleaderId\x12\x1f\n" +
+	"\vleader_addr\x18\x02 \x01(\tR\n" +
+	"leaderAddr\"\xf2\x01\n" +
 	"\x0eStatusResponse\x12\x1f\n" +
 	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
 	"appliedSeq\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\tR\aversion\"\x13\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\x04R\x06nodeId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role\x12\x12\n" +
+	"\x04term\x18\x05 \x01(\x04R\x04term\x12 \n" +
+	"\tleader_id\x18\x06 \x01(\x04H\x00R\bleaderId\x88\x01\x01\x12$\n" +
+	"\vleader_addr\x18\a \x01(\tH\x01R\n" +
+	"leaderAddr\x88\x01\x01B\f\n" +
+	"\n" +
+	"_leader_idB\x0e\n" +
+	"\f_leader_addr\"\x13\n" +
 	"\x11CheckpointRequest\"Z\n" +
 	"\x12CheckpointResponse\x12\x1f\n" +
 	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
@@ -939,7 +1053,7 @@ func file_kv_v1_kv_proto_rawDescGZIP() []byte {
 	return file_kv_v1_kv_proto_rawDescData
 }
 
-var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_kv_v1_kv_proto_goTypes = []any{
 	(*GetRequest)(nil),         // 0: peppydb.kv.v1.GetRequest
 	(*GetResponse)(nil),        // 1: peppydb.kv.v1.GetResponse
@@ -951,30 +1065,31 @@ var file_kv_v1_kv_proto_goTypes = []any{
 	(*KeyValue)(nil),           // 7: peppydb.kv.v1.KeyValue
 	(*ScanResponse)(nil),       // 8: peppydb.kv.v1.ScanResponse
 	(*StatusRequest)(nil),      // 9: peppydb.kv.v1.StatusRequest
-	(*StatusResponse)(nil),     // 10: peppydb.kv.v1.StatusResponse
-	(*CheckpointRequest)(nil),  // 11: peppydb.kv.v1.CheckpointRequest
-	(*CheckpointResponse)(nil), // 12: peppydb.kv.v1.CheckpointResponse
-	(*SnapshotRequest)(nil),    // 13: peppydb.kv.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),   // 14: peppydb.kv.v1.SnapshotResponse
-	(*SnapshotTrailer)(nil),    // 15: peppydb.kv.v1.SnapshotTrailer
+	(*LeaderHint)(nil),         // 10: peppydb.kv.v1.LeaderHint
+	(*StatusResponse)(nil),     // 11: peppydb.kv.v1.StatusResponse
+	(*CheckpointRequest)(nil),  // 12: peppydb.kv.v1.CheckpointRequest
+	(*CheckpointResponse)(nil), // 13: peppydb.kv.v1.CheckpointResponse
+	(*SnapshotRequest)(nil),    // 14: peppydb.kv.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),   // 15: peppydb.kv.v1.SnapshotResponse
+	(*SnapshotTrailer)(nil),    // 16: peppydb.kv.v1.SnapshotTrailer
 }
 var file_kv_v1_kv_proto_depIdxs = []int32{
 	7,  // 0: peppydb.kv.v1.ScanResponse.records:type_name -> peppydb.kv.v1.KeyValue
-	15, // 1: peppydb.kv.v1.SnapshotResponse.trailer:type_name -> peppydb.kv.v1.SnapshotTrailer
+	16, // 1: peppydb.kv.v1.SnapshotResponse.trailer:type_name -> peppydb.kv.v1.SnapshotTrailer
 	0,  // 2: peppydb.kv.v1.KvService.Get:input_type -> peppydb.kv.v1.GetRequest
 	2,  // 3: peppydb.kv.v1.KvService.Put:input_type -> peppydb.kv.v1.PutRequest
 	4,  // 4: peppydb.kv.v1.KvService.Delete:input_type -> peppydb.kv.v1.DeleteRequest
 	6,  // 5: peppydb.kv.v1.KvService.Scan:input_type -> peppydb.kv.v1.ScanRequest
 	9,  // 6: peppydb.kv.v1.AdminService.Status:input_type -> peppydb.kv.v1.StatusRequest
-	11, // 7: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
-	13, // 8: peppydb.kv.v1.AdminService.Snapshot:input_type -> peppydb.kv.v1.SnapshotRequest
+	12, // 7: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
+	14, // 8: peppydb.kv.v1.AdminService.Snapshot:input_type -> peppydb.kv.v1.SnapshotRequest
 	1,  // 9: peppydb.kv.v1.KvService.Get:output_type -> peppydb.kv.v1.GetResponse
 	3,  // 10: peppydb.kv.v1.KvService.Put:output_type -> peppydb.kv.v1.PutResponse
 	5,  // 11: peppydb.kv.v1.KvService.Delete:output_type -> peppydb.kv.v1.DeleteResponse
 	8,  // 12: peppydb.kv.v1.KvService.Scan:output_type -> peppydb.kv.v1.ScanResponse
-	10, // 13: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
-	12, // 14: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
-	14, // 15: peppydb.kv.v1.AdminService.Snapshot:output_type -> peppydb.kv.v1.SnapshotResponse
+	11, // 13: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
+	13, // 14: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
+	15, // 15: peppydb.kv.v1.AdminService.Snapshot:output_type -> peppydb.kv.v1.SnapshotResponse
 	9,  // [9:16] is the sub-list for method output_type
 	2,  // [2:9] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
@@ -990,7 +1105,8 @@ func file_kv_v1_kv_proto_init() {
 	file_kv_v1_kv_proto_msgTypes[1].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[6].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[8].OneofWrappers = []any{}
-	file_kv_v1_kv_proto_msgTypes[14].OneofWrappers = []any{
+	file_kv_v1_kv_proto_msgTypes[11].OneofWrappers = []any{}
+	file_kv_v1_kv_proto_msgTypes[15].OneofWrappers = []any{
 		(*SnapshotResponse_Chunk)(nil),
 		(*SnapshotResponse_Trailer)(nil),
 	}
@@ -1000,7 +1116,7 @@ func file_kv_v1_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kv_v1_kv_proto_rawDesc), len(file_kv_v1_kv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

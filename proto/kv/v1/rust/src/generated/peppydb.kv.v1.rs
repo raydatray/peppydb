@@ -63,6 +63,16 @@ pub struct ScanResponse {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StatusRequest {}
+/// Encoded in gRPC UNAVAILABLE status details when a non-leader knows the
+/// current leader.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LeaderHint {
+    #[prost(uint64, tag = "1")]
+    pub leader_id: u64,
+    /// Client gRPC address of the current leader.
+    #[prost(string, tag = "2")]
+    pub leader_addr: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StatusResponse {
     /// Every write with a sequence at or below this is applied.
@@ -71,6 +81,21 @@ pub struct StatusResponse {
     /// The server's version.
     #[prost(string, tag = "2")]
     pub version: ::prost::alloc::string::String,
+    /// This server's Raft node id.
+    #[prost(uint64, tag = "3")]
+    pub node_id: u64,
+    /// Raft role: "leader", "follower", "candidate", "learner", or "shutdown".
+    #[prost(string, tag = "4")]
+    pub role: ::prost::alloc::string::String,
+    /// Current Raft term.
+    #[prost(uint64, tag = "5")]
+    pub term: u64,
+    /// Known leader id, if any.
+    #[prost(uint64, optional, tag = "6")]
+    pub leader_id: ::core::option::Option<u64>,
+    /// Known leader address, if any.
+    #[prost(string, optional, tag = "7")]
+    pub leader_addr: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckpointRequest {}

@@ -139,6 +139,11 @@ impl AdminService for Admin {
             Ok(Response::new(StatusResponse {
                 applied_seq,
                 version: VERSION.to_owned(),
+                node_id: 0,
+                role: String::new(),
+                term: 0,
+                leader_id: None,
+                leader_addr: None,
             }))
         }
         .await;
