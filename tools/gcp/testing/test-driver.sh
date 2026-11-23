@@ -404,6 +404,81 @@ check 0 "{\"location\": \"US-EAST1\", \"lifecycle_config\": {\"rule\": [$A, $R, 
 grep -q "warning: unrelated rule" "$TMP/check.out" || fail "unrelated rule not warned about"
 check 1 "{\"location\": \"US-EAST4\", \"lifecycle_config\": {\"rule\": [$A, $R]}}"
 
+# --- Multi-VM client-server suite setup.
+mkdir -p "$TMP/cs-prebuilt"
+cat >"$TMP/cs-prebuilt/engine-unittest" <<'EOF'
+#!/bin/sh
+if [ "$1" = serve ]; then
+    trap 'echo "server stopped"; exit 0' TERM
+    echo "server started: $*"
+    while :; do sleep 1; done
+fi
+echo "running 1 test"
+echo "test result: ok. 1 passed; 0 failed; 0 ignored"
+EOF
+cat >"$TMP/cs-prebuilt/bf-tree-store-unittest" <<'EOF'
+#!/bin/sh
+echo "client ran: $*"
+EOF
+chmod +x "$TMP/cs-prebuilt/engine-unittest" "$TMP/cs-prebuilt/bf-tree-store-unittest"
+cat >"$TMP/cs-suite.txt" <<'EOF'
+# mode: client-server
+server engine-unittest serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090
+load-put bf-tree-store-unittest --addr $SERVER_ADDR --metrics $METRICS_ADDR
+EOF
+
+cs_run_args() {
+    echo "run --project test-project --bucket test-bucket --suite $TMP/cs-suite.txt --prebuilt $TMP/cs-prebuilt --max-run 60s"
+}
+
+# --- Multi-VM happy path: both VMs created in same zone, coordinate, deleted.
+new_case client-server-ok
+# shellcheck disable=SC2046
+driver $(cs_run_args)
+expect_code 0
+expect_no_instances
+expect_called "peppydb-role=server"
+expect_called "peppydb-role=client"
+expect_called "machine-type=c4d-standard-8-lssd"
+expect_called "machine-type=n4-standard-8"
+grep -qx "suite_mode=client-server" "$(run_dir)/artifacts/MANIFEST" || fail "MANIFEST suite_mode"
+grep -qx "status=ok" "$(run_dir)/results/server/DONE" || fail "server DONE missing"
+grep -qx "status=ok" "$(run_dir)/results/client/DONE" || fail "client DONE missing"
+grep -q "client ran: --addr 127.0.0.1:7420 --metrics 127.0.0.1:9090" "$(run_dir)/results/client/load-put.log" ||
+    fail "client log missing expanded addr"
+
+# --- Multi-VM capacity fallback on the second VM deletes the first VM and
+# retries both in the next zone.
+new_case client-server-capacity
+EXTRA_ENV="PEPPYDB_FAKE_CAPACITY_CLIENT_ZONE=us-east1-b"
+# shellcheck disable=SC2046
+driver $(cs_run_args)
+EXTRA_ENV=
+expect_code 0
+expect_no_instances
+expect_called "compute instances delete .*server --zone=us-east1-b"
+expect_called "compute instances create .*server --zone=us-east1-c"
+expect_called "compute instances create .*client --zone=us-east1-c"
+
+# --- Multi-VM preemption of one VM deletes the peer VM and exits 3.
+new_case client-server-preempted
+EXTRA_ENV="PEPPYDB_FAKE_VM=vanish PEPPYDB_FAKE_PREEMPTED=1"
+# shellcheck disable=SC2046
+driver $(cs_run_args)
+EXTRA_ENV=
+expect_code 3
+expect_output "preempted"
+expect_no_instances
+
+# --- Multi-VM dry-run shows both server and client VMs.
+new_case client-server-dry-run
+# shellcheck disable=SC2046
+driver $(cs_run_args) --dry-run
+expect_code 0
+[ ! -f "$CASE_DIR/fake.log" ] || fail "gcloud was called in a dry run"
+expect_output "peppydb-role=server"
+expect_output "peppydb-role=client"
+
 if [ "$failures" -ne 0 ]; then
     echo "test-driver: $failures failure(s)" >&2
     exit 1

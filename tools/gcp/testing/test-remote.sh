@@ -378,6 +378,60 @@ rm "$CASE_DIR/metadata/instance_attributes_peppydb-bucket"
 run_remote
 grep -q "missing from metadata" "$CASE_DIR/output" || fail "missing metadata not reported"
 
+# --- Client-server roles coordinate through GCS ready and DONE.
+new_case client-server-roles
+cat >"$CASE_DIR/stage/bin/srv" <<'EOF'
+#!/bin/sh
+trap 'echo "caught SIGTERM"; exit 0' TERM
+echo "srv args: $*"
+while :; do sleep 1; done
+EOF
+cat >"$CASE_DIR/stage/bin/cli" <<'EOF'
+#!/bin/sh
+echo "cli args: $*"
+EOF
+chmod +x "$CASE_DIR/stage/bin/srv" "$CASE_DIR/stage/bin/cli"
+cat >"$CASE_DIR/stage/suite.txt" <<'EOF'
+server srv serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090
+load-put cli --addr $SERVER_ADDR --metrics $METRICS_ADDR
+EOF
+publish
+mkdir -p "$CASE_DIR/meta-server" "$CASE_DIR/meta-client"
+cp -R "$CASE_DIR/metadata/"* "$CASE_DIR/meta-server/"
+cp -R "$CASE_DIR/metadata/"* "$CASE_DIR/meta-client/"
+echo server >"$CASE_DIR/meta-server/instance_attributes_peppydb-role"
+echo 10.0.0.5 >"$CASE_DIR/meta-server/instance_network-interfaces_0_ip"
+echo client >"$CASE_DIR/meta-client/instance_attributes_peppydb-role"
+env PATH="$ROOT/tools/gcp/testing/bin:$PATH" \
+    PEPPYDB_FAKE_GCS="$CASE_DIR/gcs" \
+    PEPPYDB_FAKE_LOG="$CASE_DIR/fake.log" \
+    PEPPYDB_REMOTE_STATE="$CASE_DIR/state-server" \
+    PEPPYDB_REMOTE_METADATA="$CASE_DIR/meta-server" \
+    PEPPYDB_REMOTE_NO_MKFS=1 \
+    PEPPYDB_REMOTE_POLL=1 \
+    PEPPYDB_REMOTE_SKIP_TCP_WAIT=1 \
+    PEPPYDB_BENCH_DIR="$CASE_DIR/bench-server" \
+    sh "$SCRIPT" >"$CASE_DIR/server.out" 2>&1 &
+srv_pid=$!
+env PATH="$ROOT/tools/gcp/testing/bin:$PATH" \
+    PEPPYDB_FAKE_GCS="$CASE_DIR/gcs" \
+    PEPPYDB_FAKE_LOG="$CASE_DIR/fake.log" \
+    PEPPYDB_REMOTE_STATE="$CASE_DIR/state-client" \
+    PEPPYDB_REMOTE_METADATA="$CASE_DIR/meta-client" \
+    PEPPYDB_REMOTE_NO_MKFS=1 \
+    PEPPYDB_REMOTE_POLL=1 \
+    PEPPYDB_BENCH_DIR="$CASE_DIR/bench-client" \
+    sh "$SCRIPT" >"$CASE_DIR/client.out" 2>&1 &
+cli_pid=$!
+wait "$cli_pid"
+wait "$srv_pid"
+grep -qx "status=ok" "$(results)/server/DONE" || fail "server DONE: $(cat "$(results)/server/DONE" 2>/dev/null)"
+grep -qx "status=ok" "$(results)/client/DONE" || fail "client DONE: $(cat "$(results)/client/DONE" 2>/dev/null)"
+grep -q "cli args: --addr 10.0.0.5:7420 --metrics 10.0.0.5:9090" "$(results)/client/load-put.log" ||
+    fail "client args not expanded: $(cat "$(results)/client/load-put.log" 2>/dev/null)"
+grep -q "caught SIGTERM" "$(results)/server/server.log" ||
+    fail "server did not receive SIGTERM: $(cat "$(results)/server/server.log" 2>/dev/null)"
+
 if [ "$failures" -ne 0 ]; then
     echo "test-remote: $failures failure(s)" >&2
     exit 1

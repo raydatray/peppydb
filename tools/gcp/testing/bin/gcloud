@@ -118,17 +118,26 @@ boot() {
     done
     echo "zones/$(flag zone)" >"$vm/metadata/instance_zone"
     echo "machineTypes/$(flag machine-type)" >"$vm/metadata/instance_machine-type"
+    echo "127.0.0.1" >"$vm/metadata/instance_network-interfaces_0_ip"
     case ${PEPPYDB_FAKE_VM:-run} in
         run)
             PEPPYDB_REMOTE_STATE=$vm/state PEPPYDB_REMOTE_METADATA=$vm/metadata \
                 PEPPYDB_REMOTE_NO_MKFS=1 PEPPYDB_BENCH_DIR=${PEPPYDB_FAKE_BENCH_DIR:-$vm/bench} \
+                PEPPYDB_REMOTE_POLL=1 PEPPYDB_REMOTE_SKIP_TCP_WAIT=1 \
                 sh "$script" >"$vm/console" 2>&1 &
+            echo $! >"$vm/pid"
             ;;
         hang)
             bucket=$(cat "$vm/metadata/instance_attributes_peppydb-bucket")
             run=$(cat "$vm/metadata/instance_attributes_peppydb-run-id")
-            mkdir -p "$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run"
-            date >"$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run/started"
+            role=$(cat "$vm/metadata/instance_attributes_peppydb-role" 2>/dev/null || true)
+            if [ -n "$role" ]; then
+                mkdir -p "$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run/$role"
+                date >"$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run/$role/started"
+            else
+                mkdir -p "$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run"
+                date >"$PEPPYDB_FAKE_GCS/$bucket/peppydb-bench/results/$run/started"
+            fi
             ;;
     esac
 }
@@ -146,6 +155,13 @@ instances() {
                 [ "$capacity_zone" = "$zone" ] &&
                     error="The zone '$zone' does not have enough resources available (ZONE_RESOURCE_POOL_EXHAUSTED)."
             done
+            if [ "${PEPPYDB_FAKE_CAPACITY_CLIENT_ZONE:-}" = "$zone" ]; then
+                case $name in
+                    *-client)
+                        error="The zone '$zone' does not have enough resources available (ZONE_RESOURCE_POOL_EXHAUSTED)."
+                        ;;
+                esac
+            fi
             if [ -n "$error" ]; then
                 if [ "${PEPPYDB_FAKE_CREATE_LEAKS:-}" = 1 ]; then
                     echo "$zone RUNNING $ARGS" >"$COMPUTE/instances/$name"
@@ -197,7 +213,10 @@ print(json.dumps({"name": name, "status": status, "scheduling": scheduling,
 PY
             ;;
         delete)
-            rm -f "$COMPUTE/instances/$1" "$COMPUTE/instances/$1.describes"
+            if [ -f "$COMPUTE/vm/$1/pid" ]; then
+                kill "$(cat "$COMPUTE/vm/$1/pid")" 2>/dev/null || true
+            fi
+            rm -rf "$COMPUTE/instances/$1" "$COMPUTE/instances/$1.describes" "$COMPUTE/vm/$1"
             ;;
         list)
             for file in "$COMPUTE"/instances/*; do
