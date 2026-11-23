@@ -33,6 +33,7 @@ mod bridge;
 pub mod cli;
 mod keys;
 mod kv;
+mod metrics;
 mod status;
 
 #[cfg(test)]
@@ -153,8 +154,20 @@ pub async fn serve(
     config: Config,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Exit, ServeError> {
+    serve_with_metrics(db, listener, None, config, shutdown).await
+}
+
+/// Like [`serve`], plus an optional HTTP/1.1 listener serving Prometheus
+/// metrics on `GET /metrics`.
+pub async fn serve_with_metrics(
+    db: Db,
+    listener: TcpListener,
+    metrics_listener: Option<TcpListener>,
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<Exit, ServeError> {
     let inner = prepare(db, config).await?;
-    run(inner, listener, shutdown).await
+    run(inner, listener, metrics_listener, shutdown).await
 }
 
 /// Check the configuration and the format marker.
@@ -168,9 +181,13 @@ pub(crate) async fn prepare(db: Db, config: Config) -> Result<Arc<bridge::Inner>
 pub(crate) async fn run(
     inner: Arc<bridge::Inner>,
     listener: TcpListener,
+    metrics_listener: Option<TcpListener>,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Exit, ServeError> {
     let config = inner.config;
+    let (metrics_stop_tx, metrics_stop_rx) = tokio::sync::watch::channel(false);
+    let metrics_task = metrics_listener
+        .map(|ml| tokio::spawn(metrics::serve_http(ml, Arc::clone(&inner), metrics_stop_rx)));
     let kv = KvServiceServer::new(kv::Kv {
         inner: Arc::clone(&inner),
     })
@@ -223,6 +240,11 @@ pub(crate) async fn run(
             let _ = stopped.await;
             tokio::time::sleep(config.shutdown_grace).await;
         } => tracing::warn!("shutdown grace period expired with requests in flight"),
+    }
+
+    let _ = metrics_stop_tx.send(true);
+    if let Some(task) = metrics_task {
+        let _ = task.await;
     }
 
     let db = inner.take_db().await.expect("only run takes the database");

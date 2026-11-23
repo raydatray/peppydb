@@ -14,6 +14,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tonic::Status;
 
 use crate::Config;
+use crate::metrics::Metrics;
 
 /// State shared by the services.
 pub(crate) struct Inner {
@@ -22,6 +23,7 @@ pub(crate) struct Inner {
     inflight: Arc<Semaphore>,
     snapshots: Arc<Semaphore>,
     pub(crate) config: Config,
+    pub(crate) metrics: Metrics,
     /// The first WAL failure: the server must stop (fail-stop).
     fatal: Mutex<Option<engine::Error>>,
     /// Woken once, by the first WAL failure.
@@ -35,15 +37,23 @@ impl Inner {
             inflight: Arc::new(Semaphore::new(config.max_inflight)),
             snapshots: Arc::new(Semaphore::new(config.max_concurrent_snapshots)),
             config,
+            metrics: Metrics::new(),
             fatal: Mutex::new(None),
             fatal_notify: Notify::new(),
         }
     }
 
+    /// Render the current Prometheus metrics, reading `applied_seq` if the
+    /// database is still open.
+    pub(crate) fn render_metrics(&self) -> String {
+        let applied_seq = self.db.load().as_deref().map(Db::applied_seq);
+        self.metrics.render(applied_seq)
+    }
+
     /// Run `f` on the blocking pool, holding one in-flight permit until the
     /// engine call returns, even if the client goes away first.
     pub(crate) async fn blocking<T: Send + 'static>(
-        &self,
+        self: &Arc<Self>,
         f: impl FnOnce(&Db) -> Result<T, engine::Error> + Send + 'static,
     ) -> Result<T, Status> {
         match self.run(f).await? {
@@ -58,7 +68,7 @@ impl Inner {
     /// The blocking task owns both permits and drops the `Db` handle before
     /// the permits, so `take_db` waits for running snapshots to finish.
     pub(crate) async fn spawn_snapshot(
-        &self,
+        self: &Arc<Self>,
         f: impl FnOnce(&Db) + Send + 'static,
     ) -> Result<(), Status> {
         let snapshot_permit = Arc::clone(&self.snapshots)
@@ -70,11 +80,15 @@ impl Inner {
             .await
             .map_err(|_| shutting_down())?;
         let db = self.db.load_full().ok_or_else(shutting_down)?;
+        let inner = Arc::clone(self);
+        inner.metrics.inc_inflight();
+        inner.metrics.inc_snapshot_active();
         tokio::task::spawn_blocking(move || {
             // Declared first, so dropped last: `db` is released before both
             // permits, preserving `take_db`'s exclusive-ownership invariant.
             let _inflight: OwnedSemaphorePermit = inflight_permit;
             let _snapshot: OwnedSemaphorePermit = snapshot_permit;
+            let _guard = SnapshotGuard(inner);
             let db = db;
             f(&db);
         });
@@ -106,7 +120,7 @@ impl Inner {
     }
 
     async fn run<R: Send + 'static>(
-        &self,
+        self: &Arc<Self>,
         f: impl FnOnce(&Db) -> R + Send + 'static,
     ) -> Result<R, Status> {
         let permit = Arc::clone(&self.inflight)
@@ -114,11 +128,14 @@ impl Inner {
             .await
             .map_err(|_| shutting_down())?;
         let db = self.db.load_full().ok_or_else(shutting_down)?;
+        let inner = Arc::clone(self);
+        inner.metrics.inc_inflight();
         tokio::task::spawn_blocking(move || {
             // Declared first, so dropped last: the database reference is
             // released before the permit, and shutdown, which waits for
             // every permit, then holds the only reference.
             let _permit = permit;
+            let _guard = InflightGuard(inner);
             let db = db;
             f(&db)
         })
@@ -140,6 +157,23 @@ impl Inner {
             panic!("every engine call has returned, so no other reference exists")
         });
         Some(db)
+    }
+}
+
+struct InflightGuard(Arc<Inner>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.metrics.dec_inflight();
+    }
+}
+
+struct SnapshotGuard(Arc<Inner>);
+
+impl Drop for SnapshotGuard {
+    fn drop(&mut self) {
+        self.0.metrics.dec_snapshot_active();
+        self.0.metrics.dec_inflight();
     }
 }
 

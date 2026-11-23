@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::{Config, Exit, serve};
+use crate::{Config, Exit, serve_with_metrics};
 
 #[derive(Parser)]
 #[command(name = "peppydb", version = crate::VERSION, about = "The peppydb key-value server")]
@@ -44,6 +44,9 @@ struct ServeArgs {
     /// Engine calls that may run at once; more requests wait.
     #[arg(long, default_value_t = Config::default().max_inflight)]
     max_inflight: usize,
+    /// Optional HTTP address serving Prometheus metrics at `GET /metrics`.
+    #[arg(long)]
+    metrics_listen: Option<SocketAddr>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -110,8 +113,16 @@ fn run(args: ServeArgs) -> Result<Exit, Box<dyn std::error::Error>> {
     runtime.block_on(async move {
         let shutdown = shutdown_signal()?;
         let listener = tokio::net::TcpListener::bind(args.listen).await?;
+        let metrics_listener = match args.metrics_listen {
+            Some(addr) => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+                tracing::info!("metrics listening on {}", listener.local_addr()?);
+                Some(listener)
+            }
+            None => None,
+        };
         tracing::info!("listening on {}", listener.local_addr()?);
-        Ok(serve(db, listener, config, shutdown).await?)
+        Ok(serve_with_metrics(db, listener, metrics_listener, config, shutdown).await?)
     })
 }
 
