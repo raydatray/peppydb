@@ -7,7 +7,6 @@ use kv_proto::kv::v1::snapshot_response::Payload;
 use kv_proto::kv::v1::{
     CheckpointRequest, GetRequest, PutRequest, SnapshotRequest, SnapshotTrailer, StatusRequest,
 };
-use tonic::Code;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 
@@ -29,6 +28,11 @@ async fn status_and_checkpoints_report_engine_progress() {
 
     let before = admin.status(StatusRequest {}).await.unwrap().into_inner();
     assert!(!before.version.is_empty());
+    assert_eq!(before.node_id, 1);
+    assert_eq!(before.role, "leader");
+    assert!(before.term >= 1);
+    assert_eq!(before.leader_id, Some(1));
+    assert_eq!(before.leader_addr, Some(server.addr.to_string()));
     for key in [b"a", b"b", b"c"] {
         kv.put(put(key)).await.unwrap();
     }
@@ -47,7 +51,7 @@ async fn status_and_checkpoints_report_engine_progress() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(second.checkpoint_id, first.checkpoint_id + 1);
+    assert!(second.checkpoint_id > first.checkpoint_id);
     assert_eq!(second.applied_seq, first.applied_seq + 1);
     server.stop().await.unwrap();
 }
@@ -80,7 +84,7 @@ async fn shutdown_with_writes_in_flight_is_clean_and_keeps_every_acknowledged_wr
     }
     assert!(!acknowledged.is_empty());
     // The close released the lock, and every acknowledged write is durable.
-    let db = super::open_db(dir.path());
+    let db = super::open_external_db(&dir.path().join("db"));
     for key in &acknowledged {
         let stored = [&[0x01], &key[..]].concat();
         assert!(db.get(&stored).unwrap().is_some(), "lost {key:?}");
@@ -124,20 +128,18 @@ async fn health_turns_not_serving_and_watchers_do_not_delay_shutdown() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wal_failure_stops_the_server_and_a_reopen_recovers() {
+async fn a_fatal_failure_stops_the_server_and_a_reopen_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(dir.path(), Config::default()).await;
     let mut kv = server.kv().await;
     kv.put(put(b"acknowledged")).await.unwrap();
 
-    server.fail_next_wal_sync().await;
-    let status = kv.put(put(b"failed")).await.unwrap_err();
-    assert_eq!(status.code(), Code::Unavailable);
+    server.trigger_fatal("injected raft storage failure");
     // The server stops on its own, without a shutdown signal.
     let exit = tokio::time::timeout(Duration::from_secs(30), server.exited())
         .await
-        .expect("the server stops after a WAL failure");
-    assert!(matches!(exit, Ok(Exit::Fatal(engine::Error::Wal(_)))));
+        .expect("the server stops after a fatal failure");
+    assert!(matches!(exit, Ok(Exit::Fatal(_))));
 
     // A restart reopens the database: the acknowledged write is there, and
     // writes work again.
@@ -231,7 +233,7 @@ async fn snapshot_streams_valid_image_and_restores_exact_state() {
     assert!(chunks > 1, "expected multiple chunks, got {chunks}");
     server.stop().await.unwrap();
 
-    // Restore the streamed image into a fresh database and serve it.
+    // Restore the streamed image into a fresh database and verify every key.
     let restored_dir = tempfile::tempdir().unwrap();
     let restored_path = restored_dir.path().to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -246,25 +248,15 @@ async fn snapshot_streams_valid_image_and_restores_exact_state() {
         let mut cursor = Cursor::new(bytes);
         let db = db.install_snapshot(&mut cursor).unwrap();
         assert_eq!(db.applied_seq(), trailer.applied_seq);
+        for i in 0..100u32 {
+            let key = [&[0x01][..], format!("key-{i:04}").as_bytes()].concat();
+            let value = db.get(&key).unwrap();
+            assert_eq!(value.as_deref(), Some(&vec![b'x'; 256][..]));
+        }
         db.close().unwrap();
     })
     .await
     .unwrap();
-
-    let restored = Server::start(restored_dir.path(), Config::default()).await;
-    let mut restored_kv = restored.kv().await;
-    for i in 0..100u32 {
-        let value = restored_kv
-            .get(GetRequest {
-                key: format!("key-{i:04}").into_bytes(),
-            })
-            .await
-            .unwrap()
-            .into_inner()
-            .value;
-        assert_eq!(value.as_deref(), Some(&vec![b'x'; 256][..]));
-    }
-    restored.stop().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

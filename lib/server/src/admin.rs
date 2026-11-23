@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tonic::{Code, Request, Response, Status};
 
 use crate::VERSION;
-use crate::bridge::Inner;
+use crate::bridge::{Inner, role_str};
 use crate::metrics::{Method, result_code};
 
 /// Bounded chunks in flight between the blocking `write_snapshot` call and the
@@ -136,14 +136,16 @@ impl AdminService for Admin {
         let started = Instant::now();
         let result = async {
             let applied_seq = self.inner.blocking(|db| Ok(db.applied_seq())).await?;
+            let raft = self.inner.raft_status();
+            let leader_addr = raft.leader.and_then(|id| self.inner.leader_addr(id));
             Ok(Response::new(StatusResponse {
                 applied_seq,
                 version: VERSION.to_owned(),
-                node_id: 0,
-                role: String::new(),
-                term: 0,
-                leader_id: None,
-                leader_addr: None,
+                node_id: raft.id,
+                role: role_str(raft.role).to_owned(),
+                term: raft.term,
+                leader_id: raft.leader,
+                leader_addr,
             }))
         }
         .await;
@@ -159,7 +161,7 @@ impl AdminService for Admin {
     ) -> Result<Response<CheckpointResponse>, Status> {
         let started = Instant::now();
         let result = async {
-            let checkpoint = self.inner.blocking(|db| db.checkpoint()).await?;
+            let checkpoint = self.inner.checkpoint().await?;
             Ok(Response::new(CheckpointResponse {
                 applied_seq: checkpoint.applied_seq,
                 checkpoint_id: checkpoint.checkpoint_id,
@@ -185,8 +187,8 @@ impl AdminService for Admin {
         let inner = Arc::clone(&self.inner);
         if let Err(status) = self
             .inner
-            .spawn_snapshot(move |db| {
-                if checkpoint_first && let Err(error) = db.checkpoint() {
+            .spawn_snapshot(move |sm| {
+                if checkpoint_first && let Err(error) = sm.checkpoint_now() {
                     let status = inner.engine_status(error);
                     inner
                         .metrics
@@ -194,6 +196,19 @@ impl AdminService for Admin {
                     let _ = tx.blocking_send(Err(status));
                     return;
                 }
+                let db = match sm.db() {
+                    Ok(db) => db,
+                    Err(error) => {
+                        let status = Status::internal(error.to_string());
+                        inner.metrics.record_rpc(
+                            Method::Snapshot,
+                            status.code(),
+                            started.elapsed(),
+                        );
+                        let _ = tx.blocking_send(Err(status));
+                        return;
+                    }
+                };
                 let mut writer = ChannelWriter::new(tx.clone(), Arc::clone(&inner), chunk_size);
                 let code = match db.write_snapshot(&mut writer) {
                     Ok(checkpoint) => {

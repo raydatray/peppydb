@@ -7,21 +7,24 @@ mod process;
 mod scan;
 mod transport;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use kv_proto::kv::v1::admin_service_client::AdminServiceClient;
 use kv_proto::kv::v1::kv_service_client::KvServiceClient;
+use server_raft::{LogOptions, PeerInfo, RaftConfig, Role};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 use tonic_health::pb::health_client::HealthClient;
 
 use crate::bridge::Inner;
-use crate::{Config, Exit, ServeError, prepare, run};
+use crate::{Config, Exit, NodeConfig, ServeError, prepare, run};
 
-/// A running server over a database directory.
+/// A running 1-node Raft server over a data directory.
 pub(super) struct Server {
     pub(super) addr: SocketAddr,
     pub(super) metrics_addr: Option<SocketAddr>,
@@ -31,28 +34,17 @@ pub(super) struct Server {
 }
 
 impl Server {
-    /// Open the database at `path` and serve it with `config`.
+    /// Open the database at `path` and serve it with `config` as a 1-node
+    /// Raft cluster, waiting until it is elected leader and formatted.
     pub(super) async fn start(path: &Path, config: Config) -> Self {
-        let path = PathBuf::from(path);
-        let db = tokio::task::spawn_blocking(move || open_db(&path))
-            .await
-            .unwrap();
-        Self::start_with(db, config).await
-    }
-
-    pub(super) async fn start_with(db: engine::Db, config: Config) -> Self {
-        Self::start_with_metrics(db, config, false).await
+        Self::start_inner(path, config, false).await
     }
 
     pub(super) async fn start_with_metrics_listener(path: &Path, config: Config) -> Self {
-        let path = PathBuf::from(path);
-        let db = tokio::task::spawn_blocking(move || open_db(&path))
-            .await
-            .unwrap();
-        Self::start_with_metrics(db, config, true).await
+        Self::start_inner(path, config, true).await
     }
 
-    async fn start_with_metrics(db: engine::Db, config: Config, enable_metrics: bool) -> Self {
+    async fn start_inner(path: &Path, config: Config, enable_metrics: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (metrics_listener, metrics_addr) = if enable_metrics {
@@ -62,13 +54,54 @@ impl Server {
         } else {
             (None, None)
         };
+        let peers = BTreeMap::from([(
+            1,
+            PeerInfo {
+                addr: addr.to_string(),
+            },
+        )]);
+        let node_config = NodeConfig {
+            node_id: 1,
+            data_dir: PathBuf::from(path),
+            peers,
+            bootstrap: true,
+            direct_io: false,
+            log: LogOptions::default(),
+            raft: RaftConfig::default(),
+            server: config,
+        };
         let (stop, stopped) = oneshot::channel();
-        // The listener is already bound, so clients can connect before
-        // `serve` starts accepting.
-        let inner = prepare(db, config).await.expect("prepare");
-        let task = tokio::spawn(run(Arc::clone(&inner), listener, metrics_listener, async {
-            let _ = stopped.await;
-        }));
+        let (inner, has_format, should_bootstrap) = prepare(node_config).await.expect("prepare");
+        let task = tokio::spawn(run(
+            Arc::clone(&inner),
+            has_format,
+            should_bootstrap,
+            listener,
+            metrics_listener,
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        // Wait until the 1-node cluster elects itself leader and writes the
+        // format marker so callers can issue KV RPCs immediately.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if inner.raft_status().role == Role::Leader
+                    && inner.node.read_barrier().await.is_ok()
+                    && inner
+                        .sm
+                        .db()
+                        .ok()
+                        .and_then(|db| db.get(crate::keys::FORMAT_KEY).ok().flatten())
+                        .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("single-node cluster elected leader");
         Self {
             addr,
             metrics_addr,
@@ -99,15 +132,9 @@ impl Server {
         HealthClient::new(channel)
     }
 
-    /// Make the WAL's next sync fail.
-    pub(super) async fn fail_next_wal_sync(&self) {
-        self.inner
-            .blocking(|db| {
-                db.fail_next_wal_sync();
-                Ok(())
-            })
-            .await
-            .unwrap();
+    /// Inject a fatal storage/Raft failure to test fail-stop shutdown.
+    pub(super) fn trigger_fatal(&self, msg: &str) {
+        self.inner.record_fatal(msg.to_owned());
     }
 
     /// Wait for `serve` to return without triggering shutdown.
@@ -122,18 +149,19 @@ impl Server {
     }
 }
 
-/// Open the database at `path` with default options.
-///
-/// Retries `Locked` for up to 5 s. The process tests fork children from
-/// this test process, and a child holds copies of every open file until it
-/// execs, including another test's `LOCK` file: for that moment the lock
-/// outlives the database that took it. A real double open still fails.
-pub(super) fn open_db(path: &Path) -> engine::Db {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+/// Open the external-mode engine database at `path` (usually `<data-dir>/db`).
+pub(super) fn open_external_db(path: &Path) -> engine::Db {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        match engine::Db::open(path, engine::Options::default()) {
+        match engine::Db::open(
+            path,
+            engine::Options {
+                mode: engine::Mode::External,
+                ..engine::Options::default()
+            },
+        ) {
             Err(engine::Error::Locked) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(10));
             }
             result => return result.expect("open the database"),
         }

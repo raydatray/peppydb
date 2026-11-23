@@ -822,6 +822,11 @@ impl Db {
         &self.path
     }
 
+    /// The options this database was opened with.
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
     /// Make the WAL's next sync fail, as a device error would: the waiting
     /// writes and every later write return `Error::Wal`. Does nothing in
     /// external mode, which has no WAL. For tests of callers only, with the
