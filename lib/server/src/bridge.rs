@@ -65,7 +65,8 @@ impl Inner {
     /// database is still open.
     pub(crate) fn render_metrics(&self) -> String {
         let applied_seq = self.sm.db().ok().map(|db| db.applied_seq());
-        self.metrics.render(applied_seq)
+        let raft = self.node.status();
+        self.metrics.render(applied_seq, Some(&raft))
     }
 
     pub(crate) fn raft_status(&self) -> RaftStatus {
