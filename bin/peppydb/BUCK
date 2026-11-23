@@ -3,5 +3,6 @@ rust_binary(
     name = "peppydb",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
+    visibility = ["//lib/lincheck:"],
     deps = ["//lib/server:server"],
 )
