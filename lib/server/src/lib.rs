@@ -59,6 +59,11 @@ pub struct Config {
     /// A scan page stops once its keys and values reach this many bytes.
     /// Default 1 MiB.
     pub scan_max_bytes: usize,
+    /// Size of each `AdminService.Snapshot` chunk, in bytes. Default 256 KiB.
+    pub snapshot_chunk_bytes: usize,
+    /// Maximum `AdminService.Snapshot` streams that may run at once.
+    /// Default 4.
+    pub max_concurrent_snapshots: usize,
     /// How long shutdown waits for in-flight requests to finish. Default
     /// 10 s.
     pub shutdown_grace: Duration,
@@ -71,6 +76,8 @@ impl Default for Config {
             max_request_bytes: 4 << 20,
             scan_max_records: 1000,
             scan_max_bytes: 1 << 20,
+            snapshot_chunk_bytes: 256 << 10,
+            max_concurrent_snapshots: 4,
             shutdown_grace: Duration::from_secs(10),
         }
     }
@@ -88,6 +95,16 @@ impl Config {
         }
         if self.scan_max_records == 0 || self.scan_max_bytes == 0 {
             return Err(ServeError::Config("scan limits must be positive"));
+        }
+        if self.snapshot_chunk_bytes == 0 {
+            return Err(ServeError::Config("snapshot_chunk_bytes must be positive"));
+        }
+        if self.max_concurrent_snapshots == 0
+            || self.max_concurrent_snapshots > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(ServeError::Config(
+                "max_concurrent_snapshots must be in 1..=Semaphore::MAX_PERMITS",
+            ));
         }
         Ok(())
     }
