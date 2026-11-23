@@ -1,0 +1,159 @@
+// The peppydb internal Raft peer API, version 1 (plan 0032).
+//
+// Mirrors lib/server-raft/src/transport.rs field for field. Command payloads
+// are carried as opaque bytes so the wire format does not depend on openraft.
+syntax = "proto3";
+
+package peppydb.raft.v1;
+
+// Peer-to-peer Raft RPCs between peppydb server nodes.
+service RaftService {
+  // Replicate log entries or send a heartbeat when entries is empty.
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  // Request a vote in a new term.
+  rpc Vote(VoteRequest) returns (VoteResponse);
+  // Pre-vote check before raising the candidate's term.
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+  // Stream a complete engine snapshot to a lagging follower.
+  rpc InstallSnapshot(stream InstallSnapshotRequest) returns (InstallSnapshotResponse);
+  // Ask the target follower to take over leadership.
+  rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
+}
+
+message LogId {
+  uint64 term = 1;
+  uint64 index = 2;
+}
+
+message Vote {
+  uint64 term = 1;
+  uint64 node = 2;
+  bool committed = 3;
+}
+
+message VoterSet {
+  repeated uint64 nodes = 1;
+}
+
+message PeerNode {
+  uint64 id = 1;
+  string addr = 2;
+}
+
+message MembershipConfig {
+  repeated VoterSet configs = 1;
+  repeated PeerNode nodes = 2;
+}
+
+message BlankPayload {}
+
+message Entry {
+  LogId log_id = 1;
+  oneof payload {
+    BlankPayload blank = 2;
+    bytes command = 3;
+    MembershipConfig membership = 4;
+  }
+}
+
+message AppendEntriesRequest {
+  uint64 from = 1;
+  Vote vote = 2;
+  optional LogId prev = 3;
+  repeated Entry entries = 4;
+  optional LogId commit = 5;
+}
+
+message AcceptedReply {
+  optional LogId last = 1;
+}
+
+message ConflictReply {
+  LogId log_id = 1;
+  bool has_hint = 2;
+  repeated LogId hint = 3;
+}
+
+message AppendEntriesResponse {
+  oneof reply {
+    AcceptedReply accepted = 1;
+    ConflictReply conflict = 2;
+    Vote higher_vote = 3;
+  }
+}
+
+message VoteRequest {
+  uint64 from = 1;
+  Vote vote = 2;
+  optional LogId last = 3;
+  optional Vote transfer_from = 4;
+}
+
+message VoteResponse {
+  Vote vote = 1;
+  bool granted = 2;
+  optional LogId last = 3;
+}
+
+message PreVoteRequest {
+  uint64 from = 1;
+  Vote vote = 2;
+  optional LogId last = 3;
+  optional Vote transfer_from = 4;
+}
+
+message PreVoteResponse {
+  Vote vote = 1;
+  bool granted = 2;
+  optional LogId last = 3;
+}
+
+message SnapshotMeta {
+  optional LogId last = 1;
+  optional LogId membership_log_id = 2;
+  MembershipConfig membership = 3;
+}
+
+message InstallSnapshotHeader {
+  uint64 from = 1;
+  Vote vote = 2;
+  SnapshotMeta meta = 3;
+}
+
+message InstallSnapshotRequest {
+  oneof payload {
+    InstallSnapshotHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message InstallSnapshotResponse {
+  Vote vote = 1;
+}
+
+message TransferLeaderRequest {
+  uint64 from_node = 1;
+  Vote from_vote = 2;
+  uint64 to = 3;
+  optional LogId last = 4;
+}
+
+message TransferAccepted {}
+
+message VoteChanged {
+  Vote expected = 1;
+  Vote actual = 2;
+}
+
+message LogNotFlushed {
+  optional LogId expected = 1;
+  optional LogId actual = 2;
+}
+
+message TransferLeaderResponse {
+  oneof reply {
+    TransferAccepted accepted = 1;
+    VoteChanged vote_changed = 2;
+    LogNotFlushed log_not_flushed = 3;
+  }
+}

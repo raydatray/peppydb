@@ -27,8 +27,6 @@ case "${1:-}" in
     *) sed -n '2,8p' "$0" >&2; exit 2 ;;
 esac
 
-rust_out=proto/kv/v1/rust/src/generated
-
 goroot=$(tools/buck2 build toolchains//:go-root --show-full-simple-output 2>/dev/null)
 go="$goroot/bin/go"
 export GOTOOLCHAIN=local GOFLAGS=-mod=mod
@@ -63,7 +61,7 @@ fi
 mkdir -p "$tmp/out/go" "$tmp/out/rust"
 "$buf" build -o "$tmp/descriptors.binpb"
 tools/buck2 run //tools/protogen:protogen -- "$tmp/descriptors.binpb" "$tmp/out/rust" 2>/dev/null
-"$buf" generate --template buf.gen.yaml -o "$tmp/out"
+"$buf" generate --template buf.gen.yaml --path proto/kv/v1 -o "$tmp/out"
 
 status=0
 # compare <generated dir> <tree dir> <glob>: the files matching <glob> in
@@ -82,6 +80,7 @@ compare() {
         fi
     done
     for f in "$1"/$3; do
+        [ -e "$f" ] || continue
         dest="$2/$(basename "$f")"
         if $check; then
             if ! cmp -s "$f" "$dest"; then
@@ -95,6 +94,23 @@ compare() {
         fi
     done
 }
-compare "$tmp/out/rust" "$rust_out" '*.rs'
+
+# Route each generated peppydb.<api>.<version>.rs to proto/<api>/<version>/rust/src/generated/.
+for f in "$tmp/out/rust"/peppydb.*.rs; do
+    [ -e "$f" ] || continue
+    base_name=$(basename "$f" .rs)
+    rest=${base_name#peppydb.}
+    api=${rest%%.*}
+    ver=${rest#*.}
+    mkdir -p "$tmp/out/rust-by-api/$api/$ver"
+    cp "$f" "$tmp/out/rust-by-api/$api/$ver/"
+done
+for rust_dir in proto/*/*/rust; do
+    [ -d "$rust_dir" ] || continue
+    ver_dir=$(dirname "$rust_dir")
+    ver=$(basename "$ver_dir")
+    api=$(basename "$(dirname "$ver_dir")")
+    compare "$tmp/out/rust-by-api/$api/$ver" "$rust_dir/src/generated" '*.rs'
+done
 compare "$tmp/out/proto/kv/v1/go" proto/kv/v1/go '*.pb.go'
 exit "$status"
