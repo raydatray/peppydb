@@ -8,10 +8,11 @@ use kv_proto::kv::v1::{
     DeleteRequest, DeleteResponse, GetRequest, GetResponse, KeyValue, PutRequest, PutResponse,
     ScanRequest, ScanResponse,
 };
+use server_raft::Op;
 use tonic::{Request, Response, Status};
 
 use crate::bridge::Inner;
-use crate::keys::{strip, user_key, user_range};
+use crate::keys::{check_limits, strip, user_key, user_range};
 use crate::metrics::{Method, result_code};
 
 pub(crate) struct Kv {
@@ -24,6 +25,8 @@ impl KvService for Kv {
         let started = Instant::now();
         let result = async {
             let key = user_key(&request.into_inner().key)?;
+            check_limits(&key, None, self.inner.max_key_len, self.inner.max_value_len)?;
+            self.inner.read_barrier().await?;
             let value = self.inner.blocking(move |db| db.get(&key)).await?;
             Ok(Response::new(GetResponse { value }))
         }
@@ -39,7 +42,13 @@ impl KvService for Kv {
         let result = async {
             let PutRequest { key, value } = request.into_inner();
             let key = user_key(&key)?;
-            self.inner.blocking(move |db| db.put(&key, &value)).await?;
+            check_limits(
+                &key,
+                Some(&value),
+                self.inner.max_key_len,
+                self.inner.max_value_len,
+            )?;
+            self.inner.propose(vec![Op::Put { key, value }]).await?;
             Ok(Response::new(PutResponse {}))
         }
         .await;
@@ -56,7 +65,8 @@ impl KvService for Kv {
         let started = Instant::now();
         let result = async {
             let key = user_key(&request.into_inner().key)?;
-            self.inner.blocking(move |db| db.delete(&key)).await?;
+            check_limits(&key, None, self.inner.max_key_len, self.inner.max_value_len)?;
+            self.inner.propose(vec![Op::Delete { key }]).await?;
             Ok(Response::new(DeleteResponse {}))
         }
         .await;
@@ -77,6 +87,12 @@ impl KvService for Kv {
                 end,
                 page_size,
             } = request.into_inner();
+            if let (Some(s), Some(e)) = (start.as_deref(), end.as_deref())
+                && s > e
+            {
+                return Err(Status::invalid_argument("scan start is after end"));
+            }
+            self.inner.read_barrier().await?;
             let config = self.inner.config;
             let limit = match usize::try_from(page_size).unwrap_or(usize::MAX) {
                 0 => config.scan_max_records,

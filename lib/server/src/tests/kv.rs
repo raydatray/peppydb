@@ -4,11 +4,12 @@
 use std::collections::BTreeMap;
 
 use kv_proto::kv::v1::{DeleteRequest, GetRequest, PutRequest};
+use server_raft::{LogOptions, PeerInfo, RaftConfig};
 use tonic::Code;
 
 use super::{Rng, Server};
 use crate::keys::{FORMAT_KEY, FORMAT_VERSION};
-use crate::{Config, Exit, FormatError, ServeError, serve};
+use crate::{Config, Exit, FormatError, NodeConfig, ServeError, serve};
 
 fn put(key: &[u8], value: &[u8]) -> PutRequest {
     PutRequest {
@@ -88,17 +89,15 @@ async fn invalid_requests_write_nothing() {
     kv.put(put(&longest, b"v")).await.unwrap();
     server.stop().await.unwrap();
 
-    // Only the format marker and the one valid write reached the engine.
-    let db = super::open_db(dir.path());
-    let stored: Vec<_> = db
-        .range(None, None)
+    // Only the one valid user write (plus system keys) reached the engine.
+    let db = super::open_external_db(&dir.path().join("db"));
+    assert_eq!(db.get(FORMAT_KEY).unwrap().as_deref(), Some(FORMAT_VERSION));
+    let user_keys: Vec<_> = db
+        .range(Some(&[0x01]), Some(&[0x02]))
         .unwrap()
         .map(|record| record.unwrap().0)
         .collect();
-    assert_eq!(
-        stored,
-        [FORMAT_KEY.to_vec(), [&[0x01], &longest[..]].concat()]
-    );
+    assert_eq!(user_keys, [[&[0x01], &longest[..]].concat()]);
     db.close().unwrap();
 }
 
@@ -123,7 +122,7 @@ async fn user_keys_are_stored_under_the_user_prefix() {
     }
     server.stop().await.unwrap();
 
-    let db = super::open_db(dir.path());
+    let db = super::open_external_db(&dir.path().join("db"));
     assert_eq!(db.get(FORMAT_KEY).unwrap().as_deref(), Some(FORMAT_VERSION));
     for key in [&b"\x00format"[..], b"\x00", b"\xff\xff", b"plain"] {
         let stored = [&[0x01], key].concat();
@@ -135,11 +134,32 @@ async fn user_keys_are_stored_under_the_user_prefix() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_database_without_the_format_marker_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let db = super::open_db(dir.path());
-    db.put(b"written directly", b"v").unwrap();
+    let db_dir = dir.path().join("db");
+    let db = super::open_external_db(&db_dir);
+    db.apply(
+        1,
+        &[engine::Op::Put {
+            key: b"written directly",
+            value: b"v",
+        }],
+    )
+    .unwrap();
+    db.checkpoint_with(|_| Ok(())).unwrap();
+    db.close().unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let result = serve(db, listener, Config::default(), std::future::pending()).await;
+    let addr = listener.local_addr().unwrap().to_string();
+    let node_config = NodeConfig {
+        node_id: 1,
+        data_dir: dir.path().to_path_buf(),
+        peers: BTreeMap::from([(1, PeerInfo { addr })]),
+        bootstrap: true,
+        direct_io: false,
+        log: LogOptions::default(),
+        raft: RaftConfig::default(),
+        server: Config::default(),
+    };
+    let result = serve(node_config, listener, None, std::future::pending()).await;
     assert!(matches!(
         result,
         Err(ServeError::Format(FormatError::Missing))

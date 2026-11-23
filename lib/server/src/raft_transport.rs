@@ -5,8 +5,6 @@
 //! [`server_raft::RaftNode`]. `server-raft` never depends on tonic or
 //! `raft-proto`.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 

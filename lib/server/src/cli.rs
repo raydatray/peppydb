@@ -3,15 +3,16 @@
 //! `bin/peppydb` calls [`main`]. The code lives here so that the process
 //! tests can run exactly what the binary runs.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use server_raft::{LogOptions, PeerInfo, RaftConfig};
 
-use crate::{Config, Exit, serve_with_metrics};
+use crate::{Config, Exit, NodeConfig, prepare, run as serve_run};
 
 #[derive(Parser)]
 #[command(name = "peppydb", version = crate::VERSION, about = "The peppydb key-value server")]
@@ -95,24 +96,15 @@ fn run(args: ServeArgs) -> Result<Exit, Box<dyn std::error::Error>> {
         max_inflight: args.max_inflight,
         ..Config::default()
     };
-    let options = engine::Options {
-        flush_interval: Duration::from_micros(args.flush_interval_us),
-        io: match args.io {
-            IoMode::Cached => engine::Io::Cached,
-            IoMode::Direct => engine::Io::Direct,
-        },
-        ..engine::Options::default()
-    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         // Every permitted engine call gets a blocking thread at once.
         .max_blocking_threads(config.max_inflight.saturating_add(64))
         .build()?;
-    let db = engine::Db::open(&args.data_dir, options)
-        .map_err(|error| format!("cannot open {}: {error}", args.data_dir.display()))?;
     runtime.block_on(async move {
         let shutdown = shutdown_signal()?;
         let listener = tokio::net::TcpListener::bind(args.listen).await?;
+        let bound_addr = listener.local_addr()?;
         let metrics_listener = match args.metrics_listen {
             Some(addr) => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -121,8 +113,33 @@ fn run(args: ServeArgs) -> Result<Exit, Box<dyn std::error::Error>> {
             }
             None => None,
         };
-        tracing::info!("listening on {}", listener.local_addr()?);
-        Ok(serve_with_metrics(db, listener, metrics_listener, config, shutdown).await?)
+        let peers = BTreeMap::from([(
+            1,
+            PeerInfo {
+                addr: bound_addr.to_string(),
+            },
+        )]);
+        let node_config = NodeConfig {
+            node_id: 1,
+            data_dir: args.data_dir,
+            peers,
+            bootstrap: true,
+            direct_io: matches!(args.io, IoMode::Direct),
+            log: LogOptions::default(),
+            raft: RaftConfig::default(),
+            server: config,
+        };
+        let (inner, has_format, should_bootstrap) = prepare(node_config).await?;
+        tracing::info!("listening on {bound_addr}");
+        Ok(serve_run(
+            inner,
+            has_format,
+            should_bootstrap,
+            listener,
+            metrics_listener,
+            shutdown,
+        )
+        .await?)
     })
 }
 

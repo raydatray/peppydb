@@ -153,8 +153,10 @@ pub(crate) struct Shared<RT: AsyncRuntime> {
     /// its whole length, so they see entry boundaries only.
     pub(crate) gate: Mutex<()>,
     /// The metadata of the committed checkpoint, which is the current
-    /// snapshot; `None` before the first apply is committed.
+    /// snapshot (`get_current_snapshot`).
     pub(crate) committed: Mutex<Option<OrSnapshotMeta>>,
+    /// The latest committed engine checkpoint metadata, if any.
+    pub(crate) last_checkpoint: Mutex<Option<engine::Checkpoint>>,
     /// Set after a failed apply, a failed checkpoint, or a crash.
     failed: Mutex<Option<String>>,
     jobs: Mutex<Option<mpsc::Sender<Job<RT>>>>,
@@ -309,6 +311,7 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
             applier,
             gate: Mutex::new(()),
             committed: Mutex::new(committed),
+            last_checkpoint: Mutex::new(None),
             failed: Mutex::new(None),
             jobs: Mutex::new(None),
             thread: Mutex::new(None),
@@ -394,8 +397,36 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
     }
 
     /// The database, for reads after a read barrier (S7's `Kv` service).
+    /// The underlying engine `Db` (swapped atomically on snapshot install).
     pub fn db(&self) -> Result<Arc<Db>, io::Error> {
         self.shared.db()
+    }
+
+    /// The latest committed engine checkpoint from [`build_snapshot`](openraft::RaftSnapshotBuilder::build_snapshot)
+    /// or [`checkpoint_now`](Self::checkpoint_now).
+    pub fn last_checkpoint(&self) -> Option<engine::Checkpoint> {
+        *lock(&self.shared.last_checkpoint)
+    }
+
+    /// Commit an engine checkpoint now using the Raft log's sync hook,
+    /// pausing the applier at an entry boundary.
+    pub fn checkpoint_now(&self) -> Result<engine::Checkpoint, engine::Error> {
+        let db = self.shared.db().map_err(|e| engine::Error::Io {
+            op: "checkpoint",
+            source: e,
+        })?;
+        let _paused = lock(&self.shared.gate);
+        let sync = Arc::clone(&self.shared.sync);
+        let ckpt = db.checkpoint_with(|_captured| sync().map_err(Into::into))?;
+        *lock(&self.shared.last_checkpoint) = Some(ckpt);
+        Ok(ckpt)
+    }
+
+    /// `(max_key_len, max_value_len)` configured on the engine's tree.
+    pub fn limits(&self) -> Result<(usize, usize), io::Error> {
+        let db = self.shared.db()?;
+        let tree = &db.options().tree;
+        Ok((tree.max_key_len, tree.max_value_len))
     }
 
     /// The value of a stored key.
