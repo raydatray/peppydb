@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 arc-swap.workspace = true
 clap.workspace = true
+crc32c.workspace = true
 engine = { path = "../engine" }
 futures-util.workspace = true
 kv-proto = { path = "../../proto/kv/v1/rust" }
