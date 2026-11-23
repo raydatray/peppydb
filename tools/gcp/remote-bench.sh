@@ -335,14 +335,14 @@ watch_maps() {
     done
 }
 
-# run_profiled PROFILER NAME BIN ARGS...: run one step under one profiler.
+# run_profiled PROFILER NAME EXE ARGS...: run one step under one profiler.
 # The test output goes to RESULTS/NAME.log (no profiler) or
 # RESULTS/NAME.PROFILER.log. Prints the files to upload, one per line, on
-# fd 3. Returns the step's exit code.
+# fd 3. Returns the step's exit code. If EXE is a launcher that execs the
+# real binary, MAPS_EXE names that binary for the offcpu memory map.
 run_profiled() {
-    profiler=$1 name=$2 bin=$3
+    profiler=$1 name=$2 exe=$3
     shift 3
-    exe=$ARTIFACTS/bin/$bin
     base=$RESULTS/$name
     log_file=$(step_log "$name" "$profiler")
     echo "$log_file" >&3
@@ -381,7 +381,7 @@ run_profiled() {
             maps=$base.offcpu.maps
             rm -f "$maps"
             # Not on fd 3 or stdout: the caller reads them to the end.
-            watch_maps "$exe" "$maps" </dev/null >/dev/null 2>&1 3>&- &
+            watch_maps "${MAPS_EXE:-$exe}" "$maps" </dev/null >/dev/null 2>&1 3>&- &
             watcher=$!
             bpftrace -q -o "$base.offcpu.bpftrace.txt" -c "$exe $*" "$ARTIFACTS/offcpu.bt" \
                 >"$log_file" 2>&1
@@ -391,7 +391,7 @@ run_profiled() {
             if [ -s "$maps" ]; then
                 python3 "$ARTIFACTS/fold-stacks.py" --maps "$maps"
             else
-                log "no memory map for $exe; hexadecimal frames stay unresolved"
+                log "no memory map for ${MAPS_EXE:-$exe}; hexadecimal frames stay unresolved"
                 python3 "$ARTIFACTS/fold-stacks.py"
             fi <"$base.offcpu.bpftrace.txt" >"$base.offcpu.folded" 2>>"$log_file"
             echo "$base.offcpu.folded" >&3
@@ -500,7 +500,7 @@ run_suite() {
                 </dev/null >/dev/null 2>&1 3>&- &
             dog=$!
             # shellcheck disable=SC2086 # args split on whitespace by design
-            files=$(run_profiled "$profiler" "$name" "$bin" $args 3>&1 </dev/null)
+            files=$(run_profiled "$profiler" "$name" "$ARTIFACTS/bin/$bin" $args 3>&1 </dev/null)
             rc=$?
             kill "$dog" 2>/dev/null
             wait "$dog" 2>/dev/null
@@ -527,6 +527,243 @@ run_suite() {
     done 4<"$ARTIFACTS/suite.txt"
 }
 
+# gcs_exists URL: true if the object exists in GCS.
+gcs_exists() {
+    gcloud storage ls "$1" >/dev/null 2>&1
+}
+
+# wait_tcp HOST PORT PID: wait up to 30s for HOST:PORT to accept TCP
+# connections while PID stays alive.
+wait_tcp() {
+    [ "${PEPPYDB_REMOTE_SKIP_TCP_WAIT:-}" = 1 ] && return 0
+    host=$1
+    port=$2
+    pid=$3
+    waited=0
+    while [ "$waited" -lt 60 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log "server process $pid exited before listening on $host:$port"
+            return 1
+        fi
+        if python3 -c "import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), 0.5); s.close()" "$host" "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    log "timed out waiting for $host:$port"
+    return 1
+}
+
+# expand_args TEXT: substitute $BENCH_DIR, $SERVER_ADDR, and $METRICS_ADDR.
+expand_args() {
+    printf '%s' "$1" | sed \
+        -e "s|\\\$BENCH_DIR|${PEPPYDB_BENCH_DIR:-}|g" \
+        -e "s|\\\$SERVER_ADDR|${SERVER_ADDR:-}|g" \
+        -e "s|\\\$METRICS_ADDR|${METRICS_ADDR:-}|g"
+}
+
+# run_server_role: start the server line from suite.txt under the run's
+# profiler, publish ready with our internal IP, wait for client/DONE, then
+# stop the server cleanly. The server runs once for the whole client suite,
+# so a client-server run takes one profiler. The profiler runs a launcher
+# that records its PID and then execs the server, so the server keeps the
+# PID that the profiler started (offcpu.bt traces that PID). SIGTERM goes
+# to the server, not to the profiler, so the profiler writes its output
+# after the server exits.
+run_server_role() {
+    : >"$RESULTS/status"
+    case $PROFILE in
+        *,*)
+            log "a client-server run takes one profiler, not $PROFILE"
+            echo "server - 2 0 one-profiler-only" >>"$RESULTS/status"
+            return 2
+            ;;
+    esac
+    known_profiler "$PROFILE" || {
+        log "unknown profiler: $PROFILE"
+        echo "server - 2 0 unknown-profiler" >>"$RESULTS/status"
+        return 2
+    }
+    server_line=$(awk '$1 == "server" { $1 = ""; sub(/^ /, ""); print; exit }' "$ARTIFACTS/suite.txt")
+    if [ -z "$server_line" ]; then
+        log "suite.txt has no server line"
+        return 2
+    fi
+    set -- $server_line
+    bin=$1
+    shift
+    raw_args=$*
+    exe=$ARTIFACTS/bin/$bin
+    if [ ! -x "$exe" ]; then
+        log "server binary not executable: $bin"
+        return 2
+    fi
+    args=$(expand_args "$raw_args")
+    listen_port=7420
+    metrics_port=9090
+    prev=
+    for tok in $args; do
+        case $prev in
+            --listen) listen_port=${tok##*:} ;;
+            --metrics-listen) metrics_port=${tok##*:} ;;
+        esac
+        prev=$tok
+    done
+
+    pid_file=$STATE/server.pid
+    launcher=$STATE/server-launch
+    server_files=$STATE/server.files
+    rm -f "$pid_file" "$server_files"
+    {
+        echo '#!/bin/sh'
+        echo "echo \$\$ >\"$pid_file\""
+        echo "exec \"$exe\" \"\$@\""
+    } >"$launcher" && chmod +x "$launcher" || return 2
+
+    started=$(date +%s)
+    log "starting server ($PROFILE): $bin $args"
+    # shellcheck disable=SC2086 # args split on whitespace by design
+    MAPS_EXE=$exe run_profiled "$PROFILE" server "$launcher" $args \
+        3>"$server_files" </dev/null &
+    runner=$!
+
+    if ! wait_tcp 127.0.0.1 "$listen_port" "$runner"; then
+        stop_server "$pid_file" "$runner"
+        elapsed=$(($(date +%s) - started))
+        echo "server $PROFILE 1 $elapsed failed-to-listen" >>"$RESULTS/status"
+        # shellcheck disable=SC2046 # one file per line
+        upload $(cat "$server_files") "$RESULTS/status"
+        return 1
+    fi
+
+    ip=$(metadata instance/network-interfaces/0/ip 2>/dev/null || true)
+    ip=${ip:-127.0.0.1}
+    {
+        echo "ip=$ip"
+        echo "port=$listen_port"
+        echo "metrics_port=$metrics_port"
+    } >"$RESULTS/ready"
+    upload "$RESULTS/ready"
+    log "server ready at $ip:$listen_port (metrics :$metrics_port)"
+
+    poll=${PEPPYDB_REMOTE_POLL:-5}
+    while :; do
+        if gcs_exists "$REMOTE_CLIENT_RESULTS/DONE"; then
+            log "client finished; stopping server"
+            break
+        fi
+        if ! kill -0 "$runner" 2>/dev/null; then
+            wait "$runner"
+            rc=$?
+            elapsed=$(($(date +%s) - started))
+            log "server exited early with status $rc"
+            echo "server $PROFILE $rc $elapsed exited-early" >>"$RESULTS/status"
+            # shellcheck disable=SC2046 # one file per line
+            upload $(cat "$server_files") "$RESULTS/status"
+            return 1
+        fi
+        sleep "$poll"
+    done
+
+    stop_server "$pid_file" "$runner"
+    rc=$?
+    elapsed=$(($(date +%s) - started))
+    note=ok
+    [ "$rc" = 0 ] || note=exit-$rc
+    echo "server $PROFILE $rc $elapsed $note" >>"$RESULTS/status"
+    log "server ($PROFILE): $note after ${elapsed}s"
+    # shellcheck disable=SC2046 # one file per line
+    upload $(cat "$server_files") "$RESULTS/status"
+    return 0
+}
+
+# stop_server PID_FILE RUNNER: send SIGTERM to the server whose PID is in
+# PID_FILE and SIGKILL if it still runs after 30 s, then wait for RUNNER
+# (run_profiled in the background), which writes the profiler's outputs.
+# Returns RUNNER's exit code.
+stop_server() {
+    pid=$(cat "$1" 2>/dev/null)
+    if [ -n "$pid" ]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log "server did not stop after SIGTERM; sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+    wait "$2"
+}
+
+# run_client_role: wait for server/ready, then run every non-server step in
+# suite.txt with $SERVER_ADDR and $METRICS_ADDR expanded.
+run_client_role() {
+    : >"$RESULTS/status"
+    poll=${PEPPYDB_REMOTE_POLL:-5}
+    log "waiting for server ready at $REMOTE_SERVER_RESULTS/ready"
+    while :; do
+        if gcs_exists "$REMOTE_SERVER_RESULTS/ready"; then
+            break
+        fi
+        if gcs_exists "$REMOTE_SERVER_RESULTS/DONE"; then
+            log "server finished without becoming ready"
+            return 1
+        fi
+        sleep "$poll"
+    done
+    gcs_cp "$REMOTE_SERVER_RESULTS/ready" "$STATE/server.ready" || return 1
+    server_ip=$(sed -n 's/^ip=//p' "$STATE/server.ready")
+    server_port=$(sed -n 's/^port=//p' "$STATE/server.ready")
+    metrics_port=$(sed -n 's/^metrics_port=//p' "$STATE/server.ready")
+    SERVER_ADDR="$server_ip:${server_port:-7420}"
+    METRICS_ADDR="$server_ip:${metrics_port:-9090}"
+    export SERVER_ADDR METRICS_ADDR
+    log "connecting to server at $SERVER_ADDR (metrics $METRICS_ADDR)"
+
+    while read -r name bin raw_args <&4; do
+        case $name in
+            '' | '#'*) continue ;;
+            server) continue ;;
+        esac
+        if ! echo "$name" | grep -Eq '^[a-z0-9][a-z0-9-]*$' ||
+            [ ! -x "$ARTIFACTS/bin/$bin" ]; then
+            log "bad suite line: $name $bin"
+            echo "$name - 2 0 bad-suite-line" >>"$RESULTS/status"
+            return 2
+        fi
+        args=$(expand_args "$raw_args")
+        log "step $name (none): $bin $args"
+        started=$(date +%s)
+        # shellcheck disable=SC2086 # args split on whitespace by design
+        files=$(run_profiled none "$name" "$ARTIFACTS/bin/$bin" $args 3>&1 </dev/null)
+        rc=$?
+        elapsed=$(($(date +%s) - started))
+        note=ok
+        [ "$rc" = 0 ] || note=exit-$rc
+        if problem=$(check_output "$name" "$(step_log "$name" none)"); then
+            :
+        else
+            [ "$rc" = 0 ] && rc=1
+            note=$(echo "$problem" | tr ' ' -)
+        fi
+        echo "$name none $rc $elapsed $note" >>"$RESULTS/status"
+        log "step $name (none): $note after ${elapsed}s"
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsS --max-time 5 "http://$METRICS_ADDR/metrics" >"$RESULTS/$name.metrics.txt" 2>/dev/null; then
+                files="$files $RESULTS/$name.metrics.txt"
+            else
+                rm -f "$RESULTS/$name.metrics.txt"
+            fi
+        fi
+        # shellcheck disable=SC2086 # one file per line
+        upload $files "$RESULTS/status"
+    done 4<"$ARTIFACTS/suite.txt"
+}
+
 main() {
     BUCKET=$(metadata instance/attributes/peppydb-bucket)
     RUN_ID=$(metadata instance/attributes/peppydb-run-id)
@@ -534,8 +771,26 @@ main() {
         log "peppydb-bucket or peppydb-run-id missing from metadata"
         return 1
     fi
+    ROLE=$(metadata instance/attributes/peppydb-role 2>/dev/null || true)
+    ROLE=${ROLE:-single}
     REMOTE_ARTIFACTS=gs://$BUCKET/peppydb-bench/artifacts/$RUN_ID
-    REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID
+    case $ROLE in
+        single)
+            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID
+            ;;
+        server)
+            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/server
+            REMOTE_CLIENT_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/client
+            ;;
+        client)
+            REMOTE_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/client
+            REMOTE_SERVER_RESULTS=gs://$BUCKET/peppydb-bench/results/$RUN_ID/server
+            ;;
+        *)
+            log "unknown peppydb-role: $ROLE"
+            return 1
+            ;;
+    esac
 
     # Startup scripts run on every boot. After a reboot in the middle of a
     # run (for example, a host error), report the run as failed instead of
@@ -552,7 +807,7 @@ main() {
     mkdir -p "$RESULTS" && date -u +%Y-%m-%dT%H:%M:%SZ >"$STATE/started" || return 1
     cp "$STATE/started" "$RESULTS/started"
     upload "$RESULTS/started"
-    log "run $RUN_ID, bucket $BUCKET"
+    log "run $RUN_ID, role $ROLE, bucket $BUCKET"
 
     PROFILE=$(metadata instance/attributes/peppydb-profile)
     PROFILE=${PROFILE:-none}
@@ -569,11 +824,16 @@ main() {
         log "tool installation failed; continuing without profiling tools"
     fi
 
-    log "setting up the Local SSD"
-    setup_disk || {
-        finish failed "Local SSD setup failed"
-        return 1
-    }
+    if [ "$ROLE" = client ]; then
+        PEPPYDB_BENCH_DIR=${PEPPYDB_BENCH_DIR:-$STATE/bench}
+        mkdir -p "$PEPPYDB_BENCH_DIR"
+    else
+        log "setting up the Local SSD"
+        setup_disk || {
+            finish failed "Local SSD setup failed"
+            return 1
+        }
+    fi
     export PEPPYDB_BENCH_DIR
 
     log "downloading artifacts"
@@ -597,16 +857,32 @@ main() {
     write_env
     upload "$RESULTS/env.txt"
 
-    run_suite
-    case $? in
-        0) ;;
-        1)
-            finish failed "a preflight step failed"
-            return 1
+    case $ROLE in
+        single)
+            run_suite
+            case $? in
+                0) ;;
+                1)
+                    finish failed "a preflight step failed"
+                    return 1
+                    ;;
+                *)
+                    finish failed "invalid suite or profiler list"
+                    return 1
+                    ;;
+            esac
             ;;
-        *)
-            finish failed "invalid suite or profiler list"
-            return 1
+        server)
+            run_server_role || {
+                finish failed "server role failed"
+                return 1
+            }
+            ;;
+        client)
+            run_client_role || {
+                finish failed "client role failed"
+                return 1
+            }
             ;;
     esac
     if awk '$3 != 0 { found = 1 } END { exit !found }' "$RESULTS/status"; then
