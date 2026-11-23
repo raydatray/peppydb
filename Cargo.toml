@@ -19,6 +19,7 @@ libc = "0.2"
 openraft = { version = "=0.10.0", default-features = false, features = ["tokio-rt"] }
 openraft-rt-sim = "=0.10.0"
 openraft-rt-tokio = "=0.10.0"
+prometheus-client = "0.24"
 prost = "0.14"
 prost-types = "0.14"
 tempfile = "3.27.0"

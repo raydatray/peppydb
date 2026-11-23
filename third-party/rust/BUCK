@@ -1826,6 +1826,41 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "dtoa-1.0.11.crate",
+    sha256 = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590",
+    size_bytes = 21122,
+    strip_prefix = "dtoa-1.0.11",
+    urls = ["https://static.crates.io/crates/dtoa/1.0.11/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "dtoa-1",
+    srcs = [":dtoa-1.0.11.crate"],
+    crate = "dtoa",
+    crate_root = "dtoa-1.0.11.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "dtoa",
+        "CARGO_CRATE_NAME": "dtoa",
+        "CARGO_MANIFEST_DIR": "dtoa-1.0.11.crate",
+        "CARGO_PKG_AUTHORS": "David Tolnay <dtolnay@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Fast floating point primitive to string conversion",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "dtoa",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/dtolnay/dtoa",
+        "CARGO_PKG_RUST_VERSION": "1.68",
+        "CARGO_PKG_VERSION": "1.0.11",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "0",
+        "CARGO_PKG_VERSION_PATCH": "11",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+)
+
+http_archive(
     name = "either-1.19.0.crate",
     sha256 = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be",
     size_bytes = 22501,
@@ -3537,6 +3572,46 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "lock_api-0.4.14.crate",
+    sha256 = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965",
+    size_bytes = 29249,
+    strip_prefix = "lock_api-0.4.14",
+    urls = ["https://static.crates.io/crates/lock_api/0.4.14/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "lock_api-0.4",
+    srcs = [":lock_api-0.4.14.crate"],
+    crate = "lock_api",
+    crate_root = "lock_api-0.4.14.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "lock_api",
+        "CARGO_CRATE_NAME": "lock_api",
+        "CARGO_MANIFEST_DIR": "lock_api-0.4.14.crate",
+        "CARGO_PKG_AUTHORS": "Amanieu d'Antras <amanieu@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Wrappers to create fully-featured Mutex and RwLock types. Compatible with no_std.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "lock_api",
+        "CARGO_PKG_README": "",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Amanieu/parking_lot",
+        "CARGO_PKG_RUST_VERSION": "1.71.0",
+        "CARGO_PKG_VERSION": "0.4.14",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "4",
+        "CARGO_PKG_VERSION_PATCH": "14",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "atomic_usize",
+        "default",
+    ],
+    visibility = [],
+    deps = [":scopeguard-1"],
+)
+
+http_archive(
     name = "log-0.4.35.crate",
     sha256 = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c",
     size_bytes = 54093,
@@ -4310,6 +4385,152 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "parking_lot-0.12.5.crate",
+    sha256 = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a",
+    size_bytes = 46735,
+    strip_prefix = "parking_lot-0.12.5",
+    urls = ["https://static.crates.io/crates/parking_lot/0.12.5/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "parking_lot-0.12",
+    srcs = [":parking_lot-0.12.5.crate"],
+    crate = "parking_lot",
+    crate_root = "parking_lot-0.12.5.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "parking_lot",
+        "CARGO_CRATE_NAME": "parking_lot",
+        "CARGO_MANIFEST_DIR": "parking_lot-0.12.5.crate",
+        "CARGO_PKG_AUTHORS": "Amanieu d'Antras <amanieu@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "More compact and efficient implementations of the standard synchronization primitives.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "parking_lot",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Amanieu/parking_lot",
+        "CARGO_PKG_RUST_VERSION": "1.71",
+        "CARGO_PKG_VERSION": "0.12.5",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "12",
+        "CARGO_PKG_VERSION_PATCH": "5",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = ["default"],
+    visibility = [],
+    deps = [
+        ":lock_api-0.4",
+        ":parking_lot_core-0.9",
+    ],
+)
+
+http_archive(
+    name = "parking_lot_core-0.9.12.crate",
+    sha256 = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1",
+    size_bytes = 34110,
+    strip_prefix = "parking_lot_core-0.9.12",
+    urls = ["https://static.crates.io/crates/parking_lot_core/0.9.12/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "parking_lot_core-0.9",
+    srcs = [":parking_lot_core-0.9.12.crate"],
+    crate = "parking_lot_core",
+    crate_root = "parking_lot_core-0.9.12.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "parking_lot_core",
+        "CARGO_CRATE_NAME": "parking_lot_core",
+        "CARGO_MANIFEST_DIR": "parking_lot_core-0.9.12.crate",
+        "CARGO_PKG_AUTHORS": "Amanieu d'Antras <amanieu@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "An advanced API for creating custom synchronization primitives.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "parking_lot_core",
+        "CARGO_PKG_README": "",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Amanieu/parking_lot",
+        "CARGO_PKG_RUST_VERSION": "1.71.0",
+        "CARGO_PKG_VERSION": "0.9.12",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "9",
+        "CARGO_PKG_VERSION_PATCH": "12",
+        "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :parking_lot_core-0.9-build-script-run[out_dir])",
+    },
+    platform = {
+        "linux-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "linux-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "windows-gnu": dict(
+            deps = [":windows-link-0.2"],
+        ),
+        "windows-msvc": dict(
+            deps = [":windows-link-0.2"],
+        ),
+    },
+    rustc_flags = ["@$(location :parking_lot_core-0.9-build-script-run[rustc_flags])"],
+    visibility = [],
+    deps = [
+        ":cfg-if-1",
+        ":smallvec-1",
+    ],
+)
+
+cargo.rust_binary(
+    name = "parking_lot_core-0.9-build-script-build",
+    srcs = [":parking_lot_core-0.9.12.crate"],
+    crate = "build_script_build",
+    crate_root = "parking_lot_core-0.9.12.crate/build.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "parking_lot_core-0.9.12.crate",
+        "CARGO_PKG_AUTHORS": "Amanieu d'Antras <amanieu@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "An advanced API for creating custom synchronization primitives.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "parking_lot_core",
+        "CARGO_PKG_README": "",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Amanieu/parking_lot",
+        "CARGO_PKG_RUST_VERSION": "1.71.0",
+        "CARGO_PKG_VERSION": "0.9.12",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "9",
+        "CARGO_PKG_VERSION_PATCH": "12",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+)
+
+buildscript_run(
+    name = "parking_lot_core-0.9-build-script-run",
+    package_name = "parking_lot_core",
+    buildscript_rule = ":parking_lot_core-0.9-build-script-build",
+    env = {
+        "CARGO_PKG_AUTHORS": "Amanieu d'Antras <amanieu@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "An advanced API for creating custom synchronization primitives.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_README": "",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Amanieu/parking_lot",
+        "CARGO_PKG_RUST_VERSION": "1.71.0",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "9",
+        "CARGO_PKG_VERSION_PATCH": "12",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    version = "0.9.12",
+)
+
+http_archive(
     name = "parse-zoneinfo-0.3.1.crate",
     sha256 = "1f2a05b18d44e2957b88f96ba460715e295bc1d7510468a2f3d3b44535d26c24",
     size_bytes = 97290,
@@ -4907,6 +5128,144 @@ buildscript_run(
         "proc-macro",
     ],
     version = "1.0.107",
+)
+
+alias(
+    name = "prometheus-client",
+    actual = ":prometheus-client-0.24",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "prometheus-client-0.24.1.crate",
+    sha256 = "cca3d75b4566b9a29fe1ed623587fb058e826eb329a0be4b7c4da1ebb2d7a6ca",
+    size_bytes = 75041,
+    strip_prefix = "prometheus-client-0.24.1",
+    urls = ["https://static.crates.io/crates/prometheus-client/0.24.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "prometheus-client-0.24",
+    srcs = [":prometheus-client-0.24.1.crate"],
+    crate = "prometheus_client",
+    crate_root = "prometheus-client-0.24.1.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "prometheus_client",
+        "CARGO_CRATE_NAME": "prometheus_client",
+        "CARGO_MANIFEST_DIR": "prometheus-client-0.24.1.crate",
+        "CARGO_PKG_AUTHORS": "Max Inden <mail@max-inden.de>",
+        "CARGO_PKG_DESCRIPTION": "Open Metrics client library allowing users to natively instrument applications.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_NAME": "prometheus-client",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.24.1",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "24",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :prometheus-client-0.24-build-script-run[out_dir])",
+    },
+    features = ["default"],
+    rustc_flags = ["@$(location :prometheus-client-0.24-build-script-run[rustc_flags])"],
+    visibility = [],
+    deps = [
+        ":dtoa-1",
+        ":itoa-1",
+        ":parking_lot-0.12",
+        ":prometheus-client-derive-encode-0.5",
+    ],
+)
+
+cargo.rust_binary(
+    name = "prometheus-client-0.24-build-script-build",
+    srcs = [":prometheus-client-0.24.1.crate"],
+    crate = "build_script_build",
+    crate_root = "prometheus-client-0.24.1.crate/build.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "prometheus-client-0.24.1.crate",
+        "CARGO_PKG_AUTHORS": "Max Inden <mail@max-inden.de>",
+        "CARGO_PKG_DESCRIPTION": "Open Metrics client library allowing users to natively instrument applications.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_NAME": "prometheus-client",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.24.1",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "24",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = ["default"],
+    visibility = [],
+)
+
+buildscript_run(
+    name = "prometheus-client-0.24-build-script-run",
+    package_name = "prometheus-client",
+    buildscript_rule = ":prometheus-client-0.24-build-script-build",
+    env = {
+        "CARGO_PKG_AUTHORS": "Max Inden <mail@max-inden.de>",
+        "CARGO_PKG_DESCRIPTION": "Open Metrics client library allowing users to natively instrument applications.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "24",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = ["default"],
+    version = "0.24.1",
+)
+
+http_archive(
+    name = "prometheus-client-derive-encode-0.5.1.crate",
+    sha256 = "01e34894696ff94f64a20c2c373a6440903e9c2789a303d68ec6e6f953f890e4",
+    size_bytes = 11234,
+    strip_prefix = "prometheus-client-derive-encode-0.5.1",
+    urls = ["https://static.crates.io/crates/prometheus-client-derive-encode/0.5.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "prometheus-client-derive-encode-0.5",
+    srcs = [":prometheus-client-derive-encode-0.5.1.crate"],
+    crate = "prometheus_client_derive_encode",
+    crate_root = "prometheus-client-derive-encode-0.5.1.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "prometheus_client_derive_encode",
+        "CARGO_CRATE_NAME": "prometheus_client_derive_encode",
+        "CARGO_MANIFEST_DIR": "prometheus-client-derive-encode-0.5.1.crate",
+        "CARGO_PKG_AUTHORS": "Max Inden <mail@max-inden.de>",
+        "CARGO_PKG_DESCRIPTION": "Auxiliary crate to derive Encode trait from prometheus-client.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_NAME": "prometheus-client-derive-encode",
+        "CARGO_PKG_README": "",
+        "CARGO_PKG_REPOSITORY": "https://github.com/prometheus/client_rust",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.5.1",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "5",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    proc_macro = True,
+    visibility = [],
+    deps = [
+        ":proc-macro2-1",
+        ":quote-1",
+        ":syn-3",
+    ],
 )
 
 alias(
@@ -5886,6 +6245,41 @@ buildscript_run(
         "CARGO_PKG_VERSION_PRE": "",
     },
     version = "1.0.23",
+)
+
+http_archive(
+    name = "scopeguard-1.2.0.crate",
+    sha256 = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49",
+    size_bytes = 11619,
+    strip_prefix = "scopeguard-1.2.0",
+    urls = ["https://static.crates.io/crates/scopeguard/1.2.0/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "scopeguard-1",
+    srcs = [":scopeguard-1.2.0.crate"],
+    crate = "scopeguard",
+    crate_root = "scopeguard-1.2.0.crate/src/lib.rs",
+    edition = "2015",
+    env = {
+        "CARGO_BIN_NAME": "scopeguard",
+        "CARGO_CRATE_NAME": "scopeguard",
+        "CARGO_MANIFEST_DIR": "scopeguard-1.2.0.crate",
+        "CARGO_PKG_AUTHORS": "bluss",
+        "CARGO_PKG_DESCRIPTION": "A RAII scope guard that will run a given closure when it goes out of scope,\neven if the code between panics (assuming unwinding panic).\n\nDefines the macros `defer!`, `defer_on_unwind!`, `defer_on_success!` as\nshorthands for guards with one of the implemented strategies.\n",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "scopeguard",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/bluss/scopeguard",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "1.2.0",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "2",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
 )
 
 http_archive(

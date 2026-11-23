@@ -360,3 +360,78 @@ async fn snapshot_streams_cleanly_while_writes_run() {
     writer.await.unwrap();
     assert!(matches!(server.stop().await, Ok(Exit::Clean)));
 }
+
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let mut pending = req.as_bytes();
+    while !pending.is_empty() {
+        stream.writable().await.unwrap();
+        match stream.try_write(pending) {
+            Ok(n) => pending = &pending[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => panic!("write failed: {e}"),
+        }
+    }
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        stream.readable().await.unwrap();
+        match stream.try_read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => panic!("read failed: {e}"),
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_endpoint_reports_rpcs_snapshots_and_applied_seq() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start_with_metrics_listener(dir.path(), Config::default()).await;
+    let metrics_addr = server.metrics_addr.unwrap();
+    let (mut kv, mut admin) = (server.kv().await, server.admin().await);
+
+    // Unknown path returns 404.
+    let not_found = http_get(metrics_addr, "/other").await;
+    assert!(not_found.starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+    // Perform a few RPCs, including an invalid request and a snapshot.
+    kv.put(put(b"m1")).await.unwrap();
+    kv.put(put(b"m2")).await.unwrap();
+    kv.get(GetRequest {
+        key: b"m1".to_vec(),
+    })
+    .await
+    .unwrap();
+    let _ = kv.get(GetRequest { key: Vec::new() }).await.unwrap_err();
+    let (_, trailer, _) =
+        receive_snapshot(&mut admin, true, Config::default().snapshot_chunk_bytes).await;
+    let status = admin.status(StatusRequest {}).await.unwrap().into_inner();
+
+    let resp = http_get(metrics_addr, "/metrics").await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"));
+    let (_, body) = resp.split_once("\r\n\r\n").unwrap();
+    assert!(body.contains("peppydb_rpc_requests_total{method=\"put\",code=\"ok\"} 2"));
+    assert!(body.contains("peppydb_rpc_requests_total{method=\"get\",code=\"ok\"} 1"));
+    assert!(
+        body.contains("peppydb_rpc_requests_total{method=\"get\",code=\"invalid_argument\"} 1")
+    );
+    assert!(body.contains("peppydb_rpc_requests_total{method=\"snapshot\",code=\"ok\"} 1"));
+    assert!(body.contains("peppydb_rpc_requests_total{method=\"status\",code=\"ok\"} 1"));
+    assert!(body.contains("peppydb_rpc_duration_seconds_count{method=\"put\"} 2"));
+    assert!(body.contains(&format!(
+        "peppydb_snapshot_bytes_total {}",
+        trailer.total_bytes
+    )));
+    assert!(body.contains(&format!(
+        "peppydb_engine_applied_seq {}",
+        status.applied_seq
+    )));
+    assert!(body.contains("peppydb_inflight_requests 0"));
+    assert!(body.contains("peppydb_snapshot_active 0"));
+
+    assert!(matches!(server.stop().await, Ok(Exit::Clean)));
+}

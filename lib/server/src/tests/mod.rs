@@ -23,6 +23,7 @@ use crate::{Config, Exit, ServeError, prepare, run};
 /// A running server over a database directory.
 pub(super) struct Server {
     pub(super) addr: SocketAddr,
+    pub(super) metrics_addr: Option<SocketAddr>,
     inner: Arc<Inner>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<Exit, ServeError>>>,
@@ -39,17 +40,37 @@ impl Server {
     }
 
     pub(super) async fn start_with(db: engine::Db, config: Config) -> Self {
+        Self::start_with_metrics(db, config, false).await
+    }
+
+    pub(super) async fn start_with_metrics_listener(path: &Path, config: Config) -> Self {
+        let path = PathBuf::from(path);
+        let db = tokio::task::spawn_blocking(move || open_db(&path))
+            .await
+            .unwrap();
+        Self::start_with_metrics(db, config, true).await
+    }
+
+    async fn start_with_metrics(db: engine::Db, config: Config, enable_metrics: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (metrics_listener, metrics_addr) = if enable_metrics {
+            let ml = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ma = ml.local_addr().unwrap();
+            (Some(ml), Some(ma))
+        } else {
+            (None, None)
+        };
         let (stop, stopped) = oneshot::channel();
         // The listener is already bound, so clients can connect before
         // `serve` starts accepting.
         let inner = prepare(db, config).await.expect("prepare");
-        let task = tokio::spawn(run(Arc::clone(&inner), listener, async {
+        let task = tokio::spawn(run(Arc::clone(&inner), listener, metrics_listener, async {
             let _ = stopped.await;
         }));
         Self {
             addr,
+            metrics_addr,
             inner,
             stop: Some(stop),
             task: Some(task),
