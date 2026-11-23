@@ -422,6 +422,11 @@ async fn metrics_endpoint_reports_rpcs_snapshots_and_applied_seq() {
         "peppydb_engine_applied_seq {}",
         status.applied_seq
     )));
+    assert!(body.contains(&format!("peppydb_raft_term {}", status.term)));
+    assert!(body.contains("peppydb_raft_role{role=\"leader\"} 1"));
+    assert!(body.contains("peppydb_raft_role{role=\"follower\"} 0"));
+    assert!(body.contains("peppydb_raft_commit_index "));
+    assert!(body.contains("peppydb_raft_applied_index "));
     assert!(body.contains("peppydb_inflight_requests 0"));
     assert!(body.contains("peppydb_snapshot_active 0"));
 

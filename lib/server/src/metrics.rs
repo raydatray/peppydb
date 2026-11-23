@@ -12,11 +12,12 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
+use server_raft::{Role, Status as RaftStatus};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tonic::Code;
 
-use crate::bridge::Inner;
+use crate::bridge::{Inner, role_str};
 
 /// Latency histogram buckets in seconds: 100 µs up to 10 s.
 const LATENCY_BUCKETS: [f64; 16] = [
@@ -63,6 +64,19 @@ struct MethodLabels {
     method: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RoleLabels {
+    role: &'static str,
+}
+
+const ALL_ROLES: [Role; 5] = [
+    Role::Leader,
+    Role::Follower,
+    Role::Candidate,
+    Role::Learner,
+    Role::Stopped,
+];
+
 /// Prometheus metrics for one running server.
 pub(crate) struct Metrics {
     registry: Registry,
@@ -74,6 +88,10 @@ pub(crate) struct Metrics {
     snapshot_bytes: Counter,
     applied_seq: Gauge,
     uptime_seconds: Gauge<f64, AtomicU64>,
+    raft_term: Gauge,
+    raft_role: Family<RoleLabels, Gauge>,
+    raft_commit_index: Gauge,
+    raft_applied_index: Gauge,
 }
 
 impl Metrics {
@@ -130,6 +148,30 @@ impl Metrics {
             uptime_seconds.clone(),
         );
 
+        let raft_term = Gauge::default();
+        registry.register("raft_term", "Current Raft term", raft_term.clone());
+
+        let raft_role: Family<RoleLabels, Gauge> = Family::default();
+        registry.register(
+            "raft_role",
+            "Active Raft role (1 for current role, 0 for others)",
+            raft_role.clone(),
+        );
+
+        let raft_commit_index = Gauge::default();
+        registry.register(
+            "raft_commit_index",
+            "Latest Raft committed log index",
+            raft_commit_index.clone(),
+        );
+
+        let raft_applied_index = Gauge::default();
+        registry.register(
+            "raft_applied_index",
+            "Latest Raft applied log index",
+            raft_applied_index.clone(),
+        );
+
         Self {
             registry,
             started_at: Instant::now(),
@@ -140,6 +182,10 @@ impl Metrics {
             snapshot_bytes,
             applied_seq,
             uptime_seconds,
+            raft_term,
+            raft_role,
+            raft_commit_index,
+            raft_applied_index,
         }
     }
 
@@ -176,11 +222,31 @@ impl Metrics {
         self.snapshot_bytes.inc_by(bytes);
     }
 
-    pub(crate) fn render(&self, applied_seq: Option<u64>) -> String {
+    pub(crate) fn render(&self, applied_seq: Option<u64>, raft: Option<&RaftStatus>) -> String {
         self.uptime_seconds
             .set(self.started_at.elapsed().as_secs_f64());
         if let Some(seq) = applied_seq {
             self.applied_seq.set(i64::try_from(seq).unwrap_or(i64::MAX));
+        }
+        if let Some(status) = raft {
+            self.raft_term
+                .set(i64::try_from(status.term).unwrap_or(i64::MAX));
+            for role in ALL_ROLES {
+                let value = i64::from(status.role == role);
+                self.raft_role
+                    .get_or_create(&RoleLabels {
+                        role: role_str(role),
+                    })
+                    .set(value);
+            }
+            if let Some(committed) = status.committed {
+                self.raft_commit_index
+                    .set(i64::try_from(committed.index).unwrap_or(i64::MAX));
+            }
+            if let Some(applied) = status.applied {
+                self.raft_applied_index
+                    .set(i64::try_from(applied.index).unwrap_or(i64::MAX));
+            }
         }
         let mut out = String::new();
         encode(&mut out, &self.registry).expect("encoding metrics into String never fails");
@@ -306,7 +372,7 @@ mod tests {
         metrics.inc_inflight();
         metrics.add_snapshot_bytes(4096);
 
-        let text = metrics.render(Some(42));
+        let text = metrics.render(Some(42), None);
         assert!(text.contains("peppydb_rpc_requests_total{method=\"put\",code=\"ok\"} 1"));
         assert!(
             text.contains("peppydb_rpc_requests_total{method=\"get\",code=\"invalid_argument\"} 1")
