@@ -29,11 +29,11 @@ component, and its crates follow the internal naming rule
 
 | Crate | Directory | Visible to | Status |
 | --- | --- | --- | --- |
-| `server` (entry) | `lib/server` | `//bin/peppydb:` | Plan 0026; peer transport in S7 |
+| `server` (entry) | `lib/server` | `//bin/peppydb:` | Plan 0026; gRPC peer transport and Raft-backed `serve` in S7 (plan 0032) |
 | `server-raft` | `lib/server-raft` | `server`; the `:server-raft-sim` variant to `server`'s unit tests | This document |
 | `server-raft-log` | `lib/server-raft-log` | `server-raft`; the `:server-raft-log-sim` variant (`SimFs`) to `server-raft`'s unit tests | S5, plan 0029: the [on-disk Raft log](server-raft-log.md) |
 | `server-keys` | `lib/server-keys` | `server`, `server-raft` | S6, plan 0030: the key layout and the Raft system keys |
-| `raft-proto` | `proto/raft/v1/rust` | `server` | S7: `peppydb.raft.v1` |
+| `raft-proto` | `proto/raft/v1/rust` | `server` | S7, plan 0032: `peppydb.raft.v1` |
 
 ```mermaid
 flowchart TB

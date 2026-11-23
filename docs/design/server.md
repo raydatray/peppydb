@@ -30,18 +30,21 @@ flowchart LR
 
 | Path | Role |
 | --- | --- |
-| `proto/kv/v1/kv.proto` | The API (package `peppydb.kv.v1`), with its semantics in comments |
+| `proto/kv/v1/kv.proto` | The client API (package `peppydb.kv.v1`), with its semantics in comments |
 | `proto/kv/v1/rust` | Crate `kv-proto`: generated prost messages and tonic clients and servers |
 | `proto/kv/v1/go` | Package `kvv1`: generated Go client and server |
-| `lib/server/src/lib.rs` | `serve`, `Config`, `Exit`, `ServeError` |
-| `lib/server/src/bridge.rs` | The blocking bridge, fail-stop state, `take_db` |
-| `lib/server/src/kv.rs`, `admin.rs` | The two services (`KvService`, `AdminService` including streaming `Snapshot`) |
+| `proto/raft/v1/raft.proto` | The internal peer Raft API (package `peppydb.raft.v1`, plan 0032) |
+| `proto/raft/v1/rust` | Crate `raft-proto`: generated prost/tonic peer transport code |
+| `lib/server/src/lib.rs` | `serve`, `NodeConfig`, `Config`, `Exit`, `ServeError` |
+| `lib/server/src/bridge.rs` | The Raft and blocking-read bridge (`RaftNode`, `DbStateMachine`, leader hints, fail-stop) |
+| `lib/server/src/raft_transport.rs` | `GrpcTransport` (`server_raft::Transport`) and `RaftRpcServer` (`peppydb.raft.v1`) |
+| `lib/server/src/kv.rs`, `admin.rs` | The two client services (`KvService`, `AdminService` including streaming `Snapshot`) |
 | `lib/server/src/metrics.rs` | Prometheus metrics (`prometheus-client`) and the optional HTTP/1.1 `GET /metrics` listener |
-| `lib/server/src/keys.rs` | The format check and the tonic mapping over the key layout in `lib/server-keys` (plan 0030), which `server-raft` shares |
+| `lib/server/src/keys.rs` | The format check, pre-proposal limit checks, and tonic mapping over `lib/server-keys` |
 | `lib/server/src/status.rs` | `engine::Error` to gRPC status |
-| `lib/server/src/cli.rs` | The `peppydb` command line; `bin/peppydb` only calls it |
-| `lib/server/src/tests/` | In-process tests and the process tests |
-| `lib/server-raft` | Crate `server-raft`: openraft behind peppydb types, `DiskLog` and `DbStateMachine`, storage models, and the Raft simulator ([server Raft](server-raft.md)); not used by `serve` until roadmap S7 |
+| `lib/server/src/cli.rs` | The `peppydb` command line (`--node-id`, `--peers`, `--bootstrap`, `--metrics-listen`) |
+| `lib/server/src/tests/` | In-process, single-process, 3-node multi-process failover, and `iptables` partition tests |
+| `lib/server-raft` | Crate `server-raft`: openraft behind peppydb types, `DiskLog`, `DbStateMachine`, and the Raft simulator ([server Raft](server-raft.md)) |
 | `bin/peppydb-load`, `lib/load` | The load generator (Go) |
 | `tools/gen-proto`, `tools/protogen` | Code generation |
 
@@ -242,9 +245,22 @@ sequenceDiagram
 
 ```text
 peppydb serve --data-dir <DIR> [--listen 127.0.0.1:7420]
-              [--metrics-listen <ADDR>] [--flush-interval-us 0]
-              [--io cached|direct] [--max-inflight 1024]
+              [--metrics-listen <ADDR>] [--node-id 1]
+              [--peers 1=host:port,2=host:port,3=host:port] [--bootstrap]
+              [--snapshot-after <N>] [--keep-below-snapshot <N>]
+              [--flush-interval-us 0] [--io cached|direct]
+              [--max-inflight 1024]
 ```
+
+- Every server runs Raft (roadmap decision 10), storing `db/` (external-mode
+  `engine::Db`) and `raft-log/` (`DiskLog`) under `--data-dir`. Omitting
+  `--peers` runs a 1-node group and bootstraps automatically when empty.
+- Multi-node clusters pass `--peers` on every node and `--bootstrap` on one
+  node when creating a new cluster (idempotent on restart). `RaftService`
+  (`peppydb.raft.v1`) shares `--listen` with `KvService` and `AdminService`.
+- Non-leaders reject `KvService` calls with `UNAVAILABLE` and a serialized
+  `peppydb.kv.v1.LeaderHint` in `grpc-status-details-bin`. `peppydb-load`
+  accepts comma-separated `--addr` seeds and follows `LeaderHint` redirects.
 
 - The default address is loopback: there is no TLS or authentication.
 - Logs go to stderr through `tracing`, filtered by `RUST_LOG` (default
@@ -308,7 +324,9 @@ Test paths are relative to `lib/server/src/tests/` unless noted.
 | 16. The load generator's keys, distributions, histogram, and reports behave as documented. | `lib/load/load_test.go` |
 | 17. Accepted connections set `TCP_NODELAY`. | `transport.rs`: `accepted_connections_set_nodelay` |
 | 18. `AdminService.Snapshot` streams a CRC32C-verified store image while writes run, restores via `Db::install_snapshot`, and releases permits on cancel. | `admin.rs`: `snapshot_streams_valid_image_and_restores_exact_state`, `snapshot_cancellation_releases_permits_and_allows_shutdown`, `snapshot_streams_cleanly_while_writes_run` |
-| 19. `GET /metrics` exports accurate RPC counts, latency histograms, snapshot bytes, and `applied_seq`; other paths return 404. | `metrics.rs`: `metrics_render_prometheus_exposition`; `admin.rs`: `metrics_endpoint_reports_rpcs_snapshots_and_applied_seq` |
+| 19. `GET /metrics` exports accurate RPC counts, latency histograms, snapshot bytes, `applied_seq`, and Raft gauges (`term`, `role`, `commit_index`, `applied_index`); other paths return 404. | `metrics.rs`: `metrics_render_prometheus_exposition`; `admin.rs`: `metrics_endpoint_reports_rpcs_snapshots_and_applied_seq` |
+| 20. `GrpcTransport` and `RaftRpcServer` carry all 5 Raft RPCs (including streamed `InstallSnapshot`) between nodes. | `raft_transport.rs`: `proto_conversions_round_trip`, `three_nodes_elect_replicate_and_transfer_leader_over_grpc` |
+| 21. A 3-process cluster elects a leader, returns `LeaderHint` on followers, survives leader `SIGKILL` with zero lost acknowledged writes, catches up restarted nodes via `InstallSnapshot`, and handles `iptables` partitions. | `cluster.rs`: `three_process_cluster_elects_serves_hints_and_survives_leader_sigkill`, `iptables_partition_isolates_leader_and_heals_cleanly` (Linux) |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
 `lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
