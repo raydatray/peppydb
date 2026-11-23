@@ -378,6 +378,141 @@ rm "$CASE_DIR/metadata/instance_attributes_peppydb-bucket"
 run_remote
 grep -q "missing from metadata" "$CASE_DIR/output" || fail "missing metadata not reported"
 
+# client_server_case NAME [PROFILE]: a client-server suite with a fake
+# server that stops cleanly on SIGTERM, and a fake client. PROFILE goes to
+# the server VM's metadata; the client VM runs unprofiled.
+client_server_case() {
+    new_case "$1"
+    cat >"$CASE_DIR/stage/bin/srv" <<'EOF'
+#!/bin/sh
+trap 'echo "caught SIGTERM"; exit 0' TERM
+echo "srv pid $$ args: $*"
+while :; do sleep 1; done
+EOF
+    cat >"$CASE_DIR/stage/bin/cli" <<'EOF'
+#!/bin/sh
+echo "cli args: $*"
+EOF
+    chmod +x "$CASE_DIR/stage/bin/srv" "$CASE_DIR/stage/bin/cli"
+    cat >"$CASE_DIR/stage/suite.txt" <<'EOF'
+server srv serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090
+load-put cli --addr $SERVER_ADDR --metrics $METRICS_ADDR
+EOF
+    cp "$ROOT/tools/gcp/offcpu.bt" "$ROOT/tools/gcp/fold-stacks.py" "$CASE_DIR/stage/"
+    publish
+    mkdir -p "$CASE_DIR/meta-server" "$CASE_DIR/meta-client"
+    cp -R "$CASE_DIR/metadata/"* "$CASE_DIR/meta-server/"
+    cp -R "$CASE_DIR/metadata/"* "$CASE_DIR/meta-client/"
+    echo server >"$CASE_DIR/meta-server/instance_attributes_peppydb-role"
+    echo 10.0.0.5 >"$CASE_DIR/meta-server/instance_network-interfaces_0_ip"
+    echo client >"$CASE_DIR/meta-client/instance_attributes_peppydb-role"
+    [ -z "${2:-}" ] || echo "$2" >"$CASE_DIR/meta-server/instance_attributes_peppydb-profile"
+}
+
+# run_roles: run the server and client roles at the same time and wait for
+# both.
+run_roles() {
+    env PATH="$ROOT/tools/gcp/testing/bin:$PATH" \
+        PEPPYDB_FAKE_GCS="$CASE_DIR/gcs" \
+        PEPPYDB_FAKE_LOG="$CASE_DIR/fake.log" \
+        PEPPYDB_REMOTE_STATE="$CASE_DIR/state-server" \
+        PEPPYDB_REMOTE_METADATA="$CASE_DIR/meta-server" \
+        PEPPYDB_REMOTE_NO_MKFS=1 \
+        PEPPYDB_REMOTE_POLL=1 \
+        PEPPYDB_REMOTE_SKIP_TCP_WAIT=1 \
+        PEPPYDB_BENCH_DIR="$CASE_DIR/bench-server" \
+        sh "$SCRIPT" >"$CASE_DIR/server.out" 2>&1 &
+    srv_pid=$!
+    env PATH="$ROOT/tools/gcp/testing/bin:$PATH" \
+        PEPPYDB_FAKE_GCS="$CASE_DIR/gcs" \
+        PEPPYDB_FAKE_LOG="$CASE_DIR/fake.log" \
+        PEPPYDB_REMOTE_STATE="$CASE_DIR/state-client" \
+        PEPPYDB_REMOTE_METADATA="$CASE_DIR/meta-client" \
+        PEPPYDB_REMOTE_NO_MKFS=1 \
+        PEPPYDB_REMOTE_POLL=1 \
+        PEPPYDB_BENCH_DIR="$CASE_DIR/bench-client" \
+        sh "$SCRIPT" >"$CASE_DIR/client.out" 2>&1 &
+    cli_pid=$!
+    wait "$cli_pid"
+    wait "$srv_pid"
+}
+
+# expect_server_stopped LOG: the server process got SIGTERM, and no fake
+# server of this case still runs.
+expect_server_stopped() {
+    grep -q "caught SIGTERM" "$(results)/server/$1" ||
+        fail "server did not receive SIGTERM: $(cat "$(results)/server/$1" 2>/dev/null)"
+    if pgrep -f "$CASE_DIR/state-server/artifacts/bin/srv" >/dev/null; then
+        fail "the server survived the run"
+    fi
+}
+
+# --- Client-server roles coordinate through GCS ready and DONE.
+client_server_case client-server-roles
+run_roles
+grep -qx "status=ok" "$(results)/server/DONE" || fail "server DONE: $(cat "$(results)/server/DONE" 2>/dev/null)"
+grep -qx "status=ok" "$(results)/client/DONE" || fail "client DONE: $(cat "$(results)/client/DONE" 2>/dev/null)"
+grep -q "cli args: --addr 10.0.0.5:7420 --metrics 10.0.0.5:9090" "$(results)/client/load-put.log" ||
+    fail "client args not expanded: $(cat "$(results)/client/load-put.log" 2>/dev/null)"
+expect_server_stopped server.log
+grep -q "^server none 0 .* ok$" "$(results)/server/status" ||
+    fail "server status: $(cat "$(results)/server/status")"
+
+# --- Each profiler wraps the server for the whole run. The launcher keeps
+# the PID that the profiler started, and SIGTERM reaches the server, not
+# the profiler, so the profiler writes its outputs.
+for profiler in stat record record-dwarf offcpu sched; do
+    client_server_case "client-server-$profiler" "$profiler"
+    run_roles
+    grep -qx "status=ok" "$(results)/server/DONE" ||
+        fail "server DONE: $(cat "$(results)/server/DONE" 2>/dev/null)"
+    grep -qx "status=ok" "$(results)/client/DONE" ||
+        fail "client DONE: $(cat "$(results)/client/DONE" 2>/dev/null)"
+    grep -q "^server $profiler 0 .* ok$" "$(results)/server/status" ||
+        fail "server status: $(cat "$(results)/server/status")"
+    grep -q "^load-put none 0 " "$(results)/client/status" ||
+        fail "client status: $(cat "$(results)/client/status")"
+    expect_server_stopped "server.$profiler.log"
+    launcher=$CASE_DIR/state-server/server-launch
+    pid=$(cat "$CASE_DIR/state-server/server.pid" 2>/dev/null)
+    grep -q "srv pid $pid args: serve --data-dir $CASE_DIR/bench-server/db" \
+        "$(results)/server/server.$profiler.log" ||
+        fail "the server did not keep the launcher's PID ($pid)"
+    case $profiler in
+        stat)
+            expect_log "perf stat -x, -o .* -- $launcher serve --data-dir"
+            expect_file server/server.stat.csv
+            ;;
+        record | record-dwarf)
+            expect_log "perf record .* -- $launcher serve --data-dir"
+            expect_file "server/server.$profiler.report.txt"
+            expect_file "server/server.$profiler.perf.data.zst"
+            expect_file "server/server.$profiler.perf-script.txt.zst"
+            ;;
+        offcpu)
+            expect_log "bpftrace -q -o .* -c $launcher serve --data-dir"
+            expect_file server/server.offcpu.folded
+            expect_file server/server.offcpu.bpftrace.txt.zst
+            ;;
+        sched)
+            expect_log "perf sched record -q -o .* -- $launcher serve --data-dir"
+            expect_file server/server.sched.txt
+            ;;
+    esac
+    grep -q "perf\|bpftrace" "$(results)/client/load-put.log" &&
+        fail "the client ran under a profiler"
+done
+
+# --- A client-server run takes one profiler; the client sees the server
+# finish without becoming ready.
+client_server_case client-server-two-profilers "stat,record"
+run_roles
+grep -qx "status=failed" "$(results)/server/DONE" || fail "server DONE: $(cat "$(results)/server/DONE" 2>/dev/null)"
+grep -q "^server - 2 0 one-profiler-only$" "$(results)/server/status" ||
+    fail "server status: $(cat "$(results)/server/status")"
+grep -qx "status=failed" "$(results)/client/DONE" || fail "client DONE: $(cat "$(results)/client/DONE" 2>/dev/null)"
+ls "$(results)/server/" | grep -q "^server\\." && fail "the server ran"
+
 if [ "$failures" -ne 0 ]; then
     echo "test-remote: $failures failure(s)" >&2
     exit 1
