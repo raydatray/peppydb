@@ -39,6 +39,7 @@ use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
 use openraft::type_config::OneshotSender;
 use openraft::type_config::TypeConfigExt;
+use openraft_rt_tokio::TokioRuntime;
 use server_keys::APPLIED_KEY;
 use server_keys::MEMBERSHIP_KEY;
 
@@ -246,7 +247,7 @@ impl<RT: AsyncRuntime> Drop for Shared<RT> {
 
 /// openraft's state machine over an external-mode `Db`. Clones share one
 /// state machine.
-pub struct DbStateMachine<RT: AsyncRuntime> {
+pub struct DbStateMachine<RT: AsyncRuntime = TokioRuntime> {
     pub(crate) shared: Arc<Shared<RT>>,
     _rt: PhantomData<fn() -> RT>,
 }
@@ -265,6 +266,28 @@ impl<RT: AsyncRuntime> fmt::Debug for DbStateMachine<RT> {
         f.debug_struct("DbStateMachine")
             .field("applier", &self.shared.applier)
             .finish_non_exhaustive()
+    }
+}
+
+impl DbStateMachine<TokioRuntime> {
+    /// Open an external-mode `engine::Db` at `dir` and wrap it in a
+    /// production `DbStateMachine` with its dedicated applier thread.
+    pub fn open_dir(
+        dir: &std::path::Path,
+        direct_io: bool,
+        sync: SyncHook,
+    ) -> Result<Self, io::Error> {
+        let options = engine::Options {
+            mode: engine::Mode::External,
+            io: if direct_io {
+                engine::Io::Direct
+            } else {
+                engine::Io::Cached
+            },
+            ..engine::Options::default()
+        };
+        let db = Db::open(dir, options).map_err(io::Error::other)?;
+        Self::open(db, sync, Applier::Thread)
     }
 }
 

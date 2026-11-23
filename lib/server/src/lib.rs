@@ -34,6 +34,7 @@ pub mod cli;
 mod keys;
 mod kv;
 mod metrics;
+mod raft_transport;
 mod status;
 
 #[cfg(test)]
