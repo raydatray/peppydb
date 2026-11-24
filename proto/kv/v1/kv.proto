@@ -53,6 +53,12 @@ service AdminService {
   // Stream the last committed checkpoint (or a fresh one if requested) as an
   // openable engine store image, followed by a checksummed trailer.
   rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
+  // Add a non-voting learner to the Raft group. Leader-only; non-blocking.
+  rpc AddLearner(AddLearnerRequest) returns (AddLearnerResponse);
+  // Change the Raft voting set via joint consensus. Leader-only.
+  rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
+  // Hand leadership to target_node_id. Leader-only.
+  rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
 }
 
 message GetRequest {
@@ -115,6 +121,13 @@ message LeaderHint {
   string leader_addr = 2;
 }
 
+message MemberInfo {
+  uint64 node_id = 1;
+  string addr = 2;
+  // Last Raft log index matched on this peer; populated on the leader only.
+  optional uint64 match_index = 3;
+}
+
 message StatusResponse {
   // Every write with a sequence at or below this is applied.
   uint64 applied_seq = 1;
@@ -130,7 +143,33 @@ message StatusResponse {
   optional uint64 leader_id = 6;
   // Known leader address, if any.
   optional string leader_addr = 7;
+  // Current voting members of the Raft group.
+  repeated MemberInfo voters = 8;
+  // Current non-voting learners of the Raft group.
+  repeated MemberInfo learners = 9;
 }
+
+message AddLearnerRequest {
+  uint64 node_id = 1;
+  string addr = 2;
+}
+
+message AddLearnerResponse {}
+
+message ChangeMembershipRequest {
+  // Complete target voting set (every id must be a known voter or learner).
+  repeated uint64 voter_ids = 1;
+  // Keep removed voters as learners when true; remove them otherwise.
+  bool retain_learners = 2;
+}
+
+message ChangeMembershipResponse {}
+
+message TransferLeaderRequest {
+  uint64 target_node_id = 1;
+}
+
+message TransferLeaderResponse {}
 
 message CheckpointRequest {}
 

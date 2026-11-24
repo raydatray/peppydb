@@ -74,6 +74,16 @@ pub struct LeaderHint {
     pub leader_addr: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MemberInfo {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(string, tag = "2")]
+    pub addr: ::prost::alloc::string::String,
+    /// Last Raft log index matched on this peer; populated on the leader only.
+    #[prost(uint64, optional, tag = "3")]
+    pub match_index: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StatusResponse {
     /// Every write with a sequence at or below this is applied.
     #[prost(uint64, tag = "1")]
@@ -96,7 +106,40 @@ pub struct StatusResponse {
     /// Known leader address, if any.
     #[prost(string, optional, tag = "7")]
     pub leader_addr: ::core::option::Option<::prost::alloc::string::String>,
+    /// Current voting members of the Raft group.
+    #[prost(message, repeated, tag = "8")]
+    pub voters: ::prost::alloc::vec::Vec<MemberInfo>,
+    /// Current non-voting learners of the Raft group.
+    #[prost(message, repeated, tag = "9")]
+    pub learners: ::prost::alloc::vec::Vec<MemberInfo>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddLearnerRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(string, tag = "2")]
+    pub addr: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddLearnerResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ChangeMembershipRequest {
+    /// Complete target voting set (every id must be a known voter or learner).
+    #[prost(uint64, repeated, tag = "1")]
+    pub voter_ids: ::prost::alloc::vec::Vec<u64>,
+    /// Keep removed voters as learners when true; remove them otherwise.
+    #[prost(bool, tag = "2")]
+    pub retain_learners: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ChangeMembershipResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TransferLeaderRequest {
+    #[prost(uint64, tag = "1")]
+    pub target_node_id: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TransferLeaderResponse {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckpointRequest {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -837,6 +880,83 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("peppydb.kv.v1.AdminService", "Snapshot"));
             self.inner.server_streaming(req, path, codec).await
         }
+        /// Add a non-voting learner to the Raft group. Leader-only; non-blocking.
+        pub async fn add_learner(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AddLearnerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddLearnerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/peppydb.kv.v1.AdminService/AddLearner",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("peppydb.kv.v1.AdminService", "AddLearner"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Change the Raft voting set via joint consensus. Leader-only.
+        pub async fn change_membership(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ChangeMembershipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ChangeMembershipResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/peppydb.kv.v1.AdminService/ChangeMembership",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("peppydb.kv.v1.AdminService", "ChangeMembership"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Hand leadership to target_node_id. Leader-only.
+        pub async fn transfer_leader(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TransferLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferLeaderResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/peppydb.kv.v1.AdminService/TransferLeader",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("peppydb.kv.v1.AdminService", "TransferLeader"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -877,6 +997,30 @@ pub mod admin_service_server {
             &self,
             request: tonic::Request<super::SnapshotRequest>,
         ) -> std::result::Result<tonic::Response<Self::SnapshotStream>, tonic::Status>;
+        /// Add a non-voting learner to the Raft group. Leader-only; non-blocking.
+        async fn add_learner(
+            &self,
+            request: tonic::Request<super::AddLearnerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddLearnerResponse>,
+            tonic::Status,
+        >;
+        /// Change the Raft voting set via joint consensus. Leader-only.
+        async fn change_membership(
+            &self,
+            request: tonic::Request<super::ChangeMembershipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ChangeMembershipResponse>,
+            tonic::Status,
+        >;
+        /// Hand leadership to target_node_id. Leader-only.
+        async fn transfer_leader(
+            &self,
+            request: tonic::Request<super::TransferLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferLeaderResponse>,
+            tonic::Status,
+        >;
     }
     /// Operations on the server itself.
     #[derive(Debug)]
@@ -1087,6 +1231,142 @@ pub mod admin_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/peppydb.kv.v1.AdminService/AddLearner" => {
+                    #[allow(non_camel_case_types)]
+                    struct AddLearnerSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::AddLearnerRequest>
+                    for AddLearnerSvc<T> {
+                        type Response = super::AddLearnerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AddLearnerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::add_learner(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AddLearnerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/peppydb.kv.v1.AdminService/ChangeMembership" => {
+                    #[allow(non_camel_case_types)]
+                    struct ChangeMembershipSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::ChangeMembershipRequest>
+                    for ChangeMembershipSvc<T> {
+                        type Response = super::ChangeMembershipResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ChangeMembershipRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::change_membership(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ChangeMembershipSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/peppydb.kv.v1.AdminService/TransferLeader" => {
+                    #[allow(non_camel_case_types)]
+                    struct TransferLeaderSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::TransferLeaderRequest>
+                    for TransferLeaderSvc<T> {
+                        type Response = super::TransferLeaderResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TransferLeaderRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::transfer_leader(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TransferLeaderSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
