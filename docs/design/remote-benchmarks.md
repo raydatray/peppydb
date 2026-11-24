@@ -228,6 +228,7 @@ PEPPYDB_BENCH_MILLIS=5000 tools/gcp-bench run --step bf-tree-bench
 tools/gcp-bench run --suite raft-perf               # the Raft benchmarks (plans 0029, 0030)
 tools/gcp-bench run --suite server-perf             # separate server and client VMs (plan 0031)
 tools/gcp-bench run --suite cluster-perf            # 3-node Raft cluster + client VM (plan 0032)
+tools/gcp-bench run --suite gateway-perf            # 3-node Raft cluster + gateway VM + client VM (plan 0033)
 tools/gcp-bench cleanup                             # delete leftovers
 ```
 
@@ -239,6 +240,7 @@ tools/gcp-bench cleanup                             # delete leftovers
 | `raft-perf` | The Raft log alone, three nodes over the real log and the real engine (shared runtime and one runtime per node), and `Db::apply` beside a syncing file |
 | `server-perf` | Multi-VM (`# mode: client-server`): `peppydb serve` on a `c4d-standard-8-lssd` server VM and `peppydb-load` (`put` sweep, uniform `get`, `mixed:90` zipf, and `/metrics` scrapes) on a separate `n4-standard-8` client VM in the same zone. Results: [server measurements](server.md#linux-reference-separate-server-and-client-vms) |
 | `cluster-perf` | 4-VM (`# mode: cluster`, `# nodes: 3`): three `c4d-standard-8-lssd` Raft server VMs (`server-1..3`, `--bootstrap` on `server-1`) and one `n4-standard-8` `peppydb-load` client VM (`--addr $CLUSTER_ADDRS`, following `LeaderHint` redirects and scraping `/metrics` from all 3 nodes) in one `us-east1` zone |
+| `gateway-perf` | 5-VM (`# mode: cluster`, `# nodes: 3`, `# gateway: true`): three `c4d-standard-8-lssd` Raft server VMs (`server-1..3`), one `n4-standard-8` `peppydb-gateway` VM (`--backends $CLUSTER_ADDRS`, publishing `gateway/ready`), and one `n4-standard-8` `peppydb-load` client VM (`--addr $GATEWAY_ADDR`, scraping `/metrics` from `gateway` and all 3 servers per step) |
 
 **Multi-VM runs (`# mode: client-server`).** A suite with `# mode: client-server`
 creates a `-server` VM (`--machine-type`, default `c4d-standard-8-lssd`) and a
