@@ -6,7 +6,9 @@ go_library(
     deps = [
         "//proto/kv/v1/go:kvv1",
         "//third-party/go:github.com/anishathalye/porcupine",
+        "//third-party/go:google.golang.org/grpc",
         "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/credentials/insecure",
         "//third-party/go:google.golang.org/grpc/status",
     ],
     visibility = ["PUBLIC"],
@@ -16,11 +18,18 @@ go_test(
     name = "lincheck-test",
     srcs = glob(["*_test.go"]),
     cgo_enabled = False,
+    env = {
+        "PEPPYDB_BIN": "$(location //bin/peppydb:peppydb)",
+        "PEPPYDB_GATEWAY_BIN": "$(location //bin/peppydb-gateway:peppydb-gateway)",
+    },
     target_under_test = ":lincheck",
     deps = [
         "//proto/kv/v1/go:kvv1",
         "//third-party/go:github.com/anishathalye/porcupine",
         "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
         "//third-party/go:google.golang.org/grpc/credentials/insecure",
+        "//third-party/go:google.golang.org/grpc/health/grpc_health_v1",
+        "//third-party/go:google.golang.org/grpc/status",
     ],
 )
