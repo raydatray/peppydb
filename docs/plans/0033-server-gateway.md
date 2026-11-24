@@ -1,6 +1,6 @@
 # 0033: Go gateway skeleton and linearizability harness
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S3
 (decisions 4, 5, 11, 15).
@@ -500,16 +500,54 @@ None. Resolved in discussion:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] 1/7 Plan commit.
-- [ ] 2/7 `lib/gateway-kvclient` leader-tracking client.
-- [ ] 3/7 `lib/gateway` `Router` + `Server` and `bin/peppydb-gateway`.
-- [ ] 4/7 `lib/lincheck` Porcupine KV model and workload runner.
-- [ ] 5/7 Go-to-Rust Buck2 integration and 3-node failover linearizability tests.
-- [ ] 6/7 5-VM `gateway-perf` GCP suite in `tools/gcp-bench`.
-- [ ] 7/7 Design docs and stack-wide verification.
+- [x] 2/7 `lib/gateway-kvclient` leader-tracking client.
+- [x] 3/7 `lib/gateway` `Router` + `Server` and `bin/peppydb-gateway`.
+- [x] 4/7 `lib/lincheck` Porcupine KV model and workload runner.
+- [x] 5/7 Go-to-Rust Buck2 integration and 3-node failover linearizability tests.
+- [x] 6/7 5-VM `gateway-perf` GCP suite in `tools/gcp-bench`.
+- [x] 7/7 Design docs and stack-wide verification.
+
+## Verification outcomes (2026-11-23)
+
+On macOS (Apple Silicon, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass |
+| `tools/buck2 test -j 4 //bin/... //lib/... //proto/...` | Pass; 46 targets, 0 failures (`lincheck-test` ran 1-node CRUD/scan/health/metrics + 3-node leader `SIGKILL` failover: 971 gets, 820 puts, 324 deletes, 20 unknown writes, 0 failed gets, Porcupine `Ok`) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test -race ./...` | Pass (`bin/peppydb-gateway`, `bin/peppydb-load`, `lib/gateway`, `lib/gateway-kvclient`, `lib/lincheck`, `lib/load`) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date (20 Cargo files, 14 Go modules / 133 packages) |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (30 passed, no new `unsafe`) |
+| 5-VM `gateway-perf` GCP suite | `sh tools/gcp/testing/test-driver.sh` (including `gateway-ok` and `gateway-dry-run`) and `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench run --suite gateway-perf --bucket dry-run-bucket --dry-run` pass |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`LeaderHint` wire format (`google.rpc.Status`):** Testing `lib/gateway-kvclient`
+  against real `grpc-go` revealed that `lib/server/src/bridge.rs` (plan 0032)
+  placed raw `kv.v1.LeaderHint` bytes into `grpc-status-details-bin`, which
+  `grpc-go` rejects as `codes.Internal: grpc-status-details-bin mismatch`
+  because the gRPC spec requires a `google.rpc.Status` envelope. Amended the
+  unmerged `server-multi-node` stack (`bridge.rs`, `cluster.rs`,
+  `bin/peppydb-load`, plan 0032) to wrap `LeaderHint` in `google.rpc.Status`
+  + `google.protobuf.Any`, so Go clients decode `*kvv1.LeaderHint` via
+  standard `status.FromError(err).Details()`. Verified directly across the wire
+  against a real Rust follower in `TestE2EThreeNodeGatewayLeaderFailoverLinearizable`.
+- **`cgo_enabled = False` for `prometheus/client_golang` in Buck2:** On macOS,
+  `prometheus`'s `process_collector_mem_cgo_darwin.go` references a `.c` file
+  that `tools/gobuckify-remote` intentionally omits (`CGO_ENABLED=0`). Setting
+  `cgo_enabled = False` on Go `go_binary` and `go_test` targets that link
+  `prometheus/client_golang` aligns Buck2 with `gobuckify-remote` and selects
+  the pure-Go nocgo collector cleanly.
+- **Live `gateway-perf` run (2026-11-24):** run `20261124-202338-0f632d90`
+  at revision `0f632d90`: the top of the `server-membership` stack before it was rebased onto `main`, with the same tree as after the rebase, all steps passed with no errors. Results are in
+  [gateway measurements](../design/gateway.md#measurements). Against a
+  direct `cluster-perf` run of the same revision, the gateway adds about
+  260 µs with one writer and limits throughput to about 45,000 requests a
+  second (put 0.58x to 0.69x, get 0.40x). The gateway's CPU is the limit:
+  about 90 to 130 µs and about 150 allocations per request, about 230 GC
+  cycles a second, and a `kvclient` write lock on every successful request.
+  Fixes are deferred to the post-phase-2 cleanup stack.
 
 ## Agent notes
 
