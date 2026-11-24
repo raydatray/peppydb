@@ -31,6 +31,7 @@ mod node;
 pub mod rng;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
+mod snapshot_file;
 #[cfg(test)]
 mod tests;
 pub mod transport;
@@ -58,6 +59,8 @@ pub use node::ReadPoint;
 pub use node::Role;
 pub use node::Status;
 pub use server_raft_log::LogOptions;
+pub use snapshot_file::SnapshotData;
+pub use snapshot_file::SnapshotFile;
 pub use transport::MembershipConfig;
 pub use transport::Transport;
 pub use types::LeaderId;

@@ -304,8 +304,9 @@ mod snapshots {
                 Applier::Inline,
             )
             .unwrap();
+            let snap_bytes = snapshot.snapshot.to_bytes().unwrap();
             follower
-                .install_snapshot(&snapshot.meta, snapshot.snapshot.clone())
+                .install_snapshot(&snapshot.meta, crate::SnapshotData::from_bytes(snap_bytes))
                 .await
                 .unwrap();
             assert_eq!(follower.get(b"\x01k"), Some(b"v".to_vec()));
@@ -362,10 +363,48 @@ mod snapshots {
             assert!(sm.build_snapshot().await.is_err());
             assert!(
                 sm.get_current_snapshot().await.unwrap().is_none(),
-                "nothing committed"
+                "a failed checkpoint left no snapshot"
             );
             let snapshot = sm.build_snapshot().await;
             assert!(snapshot.is_err());
+        });
+    }
+
+    #[test]
+    fn open_dir_builds_and_installs_file_backed_snapshots() {
+        openraft_rt_tokio::TokioRuntime::new(1).block_on(async {
+            let leader_dir = tempfile::tempdir().unwrap();
+            let follower_dir = tempfile::tempdir().unwrap();
+
+            let mut leader = DbStateMachine::open_dir(leader_dir.path(), false, no_sync()).unwrap();
+            let membership = OrEntry::new(log_id(1, 1), OrPayload::Membership(members(&[1, 2])));
+            apply(
+                &mut leader,
+                vec![membership, put(1, 2, b"\x01disk", b"val")],
+            )
+            .await;
+
+            let snapshot = leader.build_snapshot().await.unwrap();
+            let snap_path = match &snapshot.snapshot {
+                crate::SnapshotData::File(f) => {
+                    assert!(!f.is_empty());
+                    assert!(f.path().exists());
+                    f.path().to_path_buf()
+                }
+                crate::SnapshotData::Bytes(_) => panic!("expected file-backed snapshot"),
+            };
+
+            let mut follower =
+                DbStateMachine::open_dir(follower_dir.path(), false, no_sync()).unwrap();
+            follower
+                .install_snapshot(&snapshot.meta, snapshot.snapshot)
+                .await
+                .unwrap();
+            assert!(
+                !snap_path.exists(),
+                "temp snapshot file unlinked after install"
+            );
+            assert_eq!(follower.get(b"\x01disk"), Some(b"val".to_vec()));
         });
     }
 }
