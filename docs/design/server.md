@@ -65,6 +65,9 @@ service AdminService {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
   rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
+  rpc AddLearner(AddLearnerRequest) returns (AddLearnerResponse);
+  rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
+  rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
 }
 ```
 
@@ -253,14 +256,24 @@ peppydb serve --data-dir <DIR> [--listen 127.0.0.1:7420]
 ```
 
 - Every server runs Raft (roadmap decision 10), storing `db/` (external-mode
-  `engine::Db`) and `raft-log/` (`DiskLog`) under `--data-dir`. Omitting
-  `--peers` runs a 1-node group and bootstraps automatically when empty.
-- Multi-node clusters pass `--peers` on every node and `--bootstrap` on one
-  node when creating a new cluster (idempotent on restart). `RaftService`
-  (`peppydb.raft.v1`) shares `--listen` with `KvService` and `AdminService`.
-- Non-leaders reject `KvService` calls with `UNAVAILABLE` and a serialized
-  `peppydb.kv.v1.LeaderHint` in `grpc-status-details-bin`. `peppydb-load`
-  accepts comma-separated `--addr` seeds and follows `LeaderHint` redirects.
+  `engine::Db`, plus `db/snapshots/` for temp/resumable snapshot staging) and
+  `raft-log/` (`DiskLog`) under `--data-dir`.
+- `--bootstrap` is explicit (plan 0034): starting an empty node without
+  `--bootstrap` leaves it uninitialized and waiting to join an existing cluster
+  via `AdminService.AddLearner`; passing `--bootstrap` initializes a new 1-node
+  or multi-node cluster (`--peers`) and is a no-op on restart once `--data-dir`
+  holds persisted state. `RaftService` (`peppydb.raft.v1`) shares `--listen`
+  with `KvService` and `AdminService`.
+- Dynamic membership (`AdminService.{AddLearner,ChangeMembership,TransferLeader}`,
+  plan 0034): `AddLearner` is non-blocking; `StatusResponse` reports live
+  `voters` and `learners` (with `match_index` on the leader); `ChangeMembership`
+  runs openraft joint consensus; `GrpcTransport` learns dynamic peer addresses
+  through `Transport::register_peer` and `RaftBridge` resolves `LeaderHint`
+  from live Raft membership.
+- Non-leaders reject `KvService` and leader-only `AdminService` calls with
+  `UNAVAILABLE` and a `peppydb.kv.v1.LeaderHint` wrapped in a standard
+  `google.rpc.Status` envelope in `grpc-status-details-bin`. `peppydb-load`
+  and `peppydb-gateway` decode `*kvv1.LeaderHint` via `status.FromError(err).Details()`.
 
 - The default address is loopback: there is no TLS or authentication.
 - Logs go to stderr through `tracing`, filtered by `RUST_LOG` (default
@@ -325,8 +338,9 @@ Test paths are relative to `lib/server/src/tests/` unless noted.
 | 17. Accepted connections set `TCP_NODELAY`. | `transport.rs`: `accepted_connections_set_nodelay` |
 | 18. `AdminService.Snapshot` streams a CRC32C-verified store image while writes run, restores via `Db::install_snapshot`, and releases permits on cancel. | `admin.rs`: `snapshot_streams_valid_image_and_restores_exact_state`, `snapshot_cancellation_releases_permits_and_allows_shutdown`, `snapshot_streams_cleanly_while_writes_run` |
 | 19. `GET /metrics` exports accurate RPC counts, latency histograms, snapshot bytes, `applied_seq`, and Raft gauges (`term`, `role`, `commit_index`, `applied_index`); other paths return 404. | `metrics.rs`: `metrics_render_prometheus_exposition`; `admin.rs`: `metrics_endpoint_reports_rpcs_snapshots_and_applied_seq` |
-| 20. `GrpcTransport` and `RaftRpcServer` carry all 5 Raft RPCs (including streamed `InstallSnapshot`) between nodes. | `raft_transport.rs`: `proto_conversions_round_trip`, `three_nodes_elect_replicate_and_transfer_leader_over_grpc` |
+| 20. `GrpcTransport` and `RaftRpcServer` carry all Raft RPCs, including file-backed offset-resumable `InstallSnapshot` (`SnapshotProgress` + CRC32C verification + `.part` staging). | `raft_transport.rs`: `proto_conversions_round_trip`, `three_nodes_elect_replicate_and_transfer_leader_over_grpc`, `resumable_snapshot_resumes_from_offset_and_rejects_corruption`, `newer_snapshot_supersedes_older_partial_staging` |
 | 21. A 3-process cluster elects a leader, returns `LeaderHint` on followers, survives leader `SIGKILL` with zero lost acknowledged writes, catches up restarted nodes via `InstallSnapshot`, and handles `iptables` partitions. | `cluster.rs`: `three_process_cluster_elects_serves_hints_and_survives_leader_sigkill`, `iptables_partition_isolates_leader_and_heals_cleanly` (Linux) |
+| 22. A running 3-process cluster dynamically adds an unbootstrapped node 4 via non-blocking `AddLearner`, swaps voters via joint consensus `ChangeMembership`, transfers leadership to node 4, and serves dynamic `LeaderHint` addresses. | `cluster.rs`: `four_process_dynamic_membership_add_learner_swap_and_transfer_leader` |
 
 The fault-injection hook (`Db::fail_next_wal_sync`) is tested in
 `lib/engine/src/tests/fault.rs` with `cargo test -p engine --features
