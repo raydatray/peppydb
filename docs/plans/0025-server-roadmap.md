@@ -121,7 +121,7 @@ commits or reserved plan numbers.
 | --- | --- | --- |
 | S1. Single-node server | Engine | `peppydb serve`: one standalone `Db` behind the `Kv` and `Admin` gRPC services, health, graceful shutdown, fail-stop, `SIGKILL` durability; the buf-based proto toolchain for Rust and Go; `peppydb-load` (renamed from `peppy-load` in plan 0027), an external Go load generator. [Plan 0026](0026-server-grpc-kv.md). |
 | S2. Operability | S1 | A streaming `Admin.Snapshot` RPC over `write_snapshot` (backups now, the Raft snapshot transport later); metrics; `peppydb-load` runs on separate client and server machines through `tools/gcp-bench`, with reference measurements ([remote benchmarks](../design/remote-benchmarks.md)). [Plan 0031](0031-server-operability.md). |
-| S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a linearizability checker harness for later milestones. |
+| S3. Gateway skeleton | S1 | A Go gateway that routes to the server over the generated Go client; a Buck2 test in which Go code talks to the Rust server; a Porcupine linearizability checker harness for later milestones. [Plan 0033](0033-server-gateway.md). |
 | S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. [Plan 0028](0028-server-raft-core.md). |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix purge, torn-tail repair; a power-loss crash model, stricter than the engine's; the simulator runs over it. [Plan 0029](0029-server-raft-log.md). |
 | S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. [Plan 0030](0030-server-raft-state-machine.md). |
@@ -534,9 +534,13 @@ next to the engine's numbers.
   ([plan 0032](0032-server-multi-node.md), recorded in
   [server](../design/server.md) and [server Raft](../design/server-raft.md)).
 
-The next step, in the default order, is S3 (Go gateway skeleton and
-linearizability checker harness) followed by S8 (dynamic membership changes,
-file-backed/resumable snapshots, and randomized fault testing).
+- [x] Draft and agree on [the Go gateway skeleton and linearizability harness](0033-server-gateway.md) (S3).
+- [x] Implement and verify the Go gateway and Porcupine harness stack, completing
+  S3 ([plan 0033](0033-server-gateway.md), recorded in
+  [gateway](../design/gateway.md)).
+
+The next step is S8 (dynamic membership changes, file-backed/resumable
+snapshots, and randomized fault testing using `lib/lincheck`).
 
 ## Sources
 

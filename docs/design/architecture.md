@@ -56,10 +56,12 @@ API with its generated code, whatever the language.
 | WAL segments | `lib/wal-segments` | checksummed frames in numbered segment files, shared by the engine's write-ahead log and the Raft log ([server Raft log](server-raft-log.md#wal-segments)); its own component, so neither log owns the other's format |
 | Server | `lib/server` (entry), `lib/server-raft`, `lib/server-raft-log`, `lib/server-keys` (internal), `bin/peppydb` | the [gRPC server](server.md): the `peppydb.kv.v1` services over one `engine::Db`, the stored key layout, the blocking bridge, shutdown, fail-stop, and the `peppydb` command line; `bin/peppydb` only calls `server::cli`. [Server Raft](server-raft.md): openraft behind peppydb types, with storage models and a deterministic simulator; the [on-disk Raft log](server-raft-log.md) and its openraft adapter; `DbStateMachine` over an external-mode `Db`; `server-keys`, the stored key layout shared by `server` and `server-raft` |
 | KV API | `proto/kv/v1` (`kv.proto`, `rust/` crate `kv-proto`, `go/` package `kvv1`) | the `peppydb.kv.v1` gRPC API and its generated code |
+| Raft peer API | `proto/raft/v1` (`raft.proto`, `rust/` crate `raft-proto`) | the internal `peppydb.raft.v1` peer transport API |
+| Gateway | `lib/gateway` (entry), `lib/gateway-kvclient` (internal), `bin/peppydb-gateway` (Go) | the stateless [gRPC gateway](gateway.md): `KvService`, `grpc.health.v1`, Prometheus `/metrics`, `Router`, and leader-tracking client |
+| Linearizability harness | `lib/lincheck` (Go) | Porcupine single-key KV model, concurrent workload runner, and Go-to-Rust multi-process cluster harness ([gateway](gateway.md#linearizability-harness-liblincheck)) |
 | Load generator | `bin/peppydb-load`, `lib/load` (Go) | drives a running server and reports throughput and latency |
 
-Later: `proto/raft/v1`, `bin/peppydb-gateway` and
-`bin/peppydb-placement` (Go).
+Later: `bin/peppydb-placement` (Go).
 
 Each component exposes one entry crate. Buck2 visibility rules stop other
 components from depending on internal crates, such as `bf-tree-page`.
