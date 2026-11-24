@@ -45,7 +45,7 @@ pub(super) struct ServerProcess {
 }
 
 impl ServerProcess {
-    /// Start `peppydb serve --data-dir <dir>` on a free loopback port.
+    /// Start `peppydb serve --data-dir <dir> --bootstrap` on a free loopback port.
     fn spawn(dir: &Path) -> (Self, mpsc::Receiver<SocketAddr>) {
         Self::spawn_args(&[
             "serve".to_owned(),
@@ -53,6 +53,7 @@ impl ServerProcess {
             dir.display().to_string(),
             "--listen".to_owned(),
             "127.0.0.1:0".to_owned(),
+            "--bootstrap".to_owned(),
         ])
     }
 

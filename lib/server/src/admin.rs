@@ -1,5 +1,6 @@
 //! The `AdminService` service: status, checkpoints, and snapshots.
 
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use kv_proto::kv::v1::admin_service_server::AdminService;
 use kv_proto::kv::v1::snapshot_response::Payload;
 use kv_proto::kv::v1::{
     AddLearnerRequest, AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse,
-    CheckpointRequest, CheckpointResponse, SnapshotRequest, SnapshotResponse, SnapshotTrailer,
-    StatusRequest, StatusResponse, TransferLeaderRequest, TransferLeaderResponse,
+    CheckpointRequest, CheckpointResponse, MemberInfo, SnapshotRequest, SnapshotResponse,
+    SnapshotTrailer, StatusRequest, StatusResponse, TransferLeaderRequest, TransferLeaderResponse,
 };
 use tokio::sync::mpsc;
 use tonic::{Code, Request, Response, Status};
@@ -139,6 +140,30 @@ impl AdminService for Admin {
             let applied_seq = self.inner.blocking(|db| Ok(db.applied_seq())).await?;
             let raft = self.inner.raft_status();
             let leader_addr = raft.leader.and_then(|id| self.inner.leader_addr(id));
+            let voter_ids: BTreeSet<u64> = raft
+                .membership
+                .configs
+                .iter()
+                .flat_map(|cfg| cfg.iter().copied())
+                .collect();
+            let mut voters = Vec::new();
+            let mut learners = Vec::new();
+            for (node_id, peer) in &raft.membership.nodes {
+                let match_index = raft
+                    .replication
+                    .get(node_id)
+                    .and_then(|opt| opt.map(|id| id.index));
+                let info = MemberInfo {
+                    node_id: *node_id,
+                    addr: peer.addr.clone(),
+                    match_index,
+                };
+                if voter_ids.contains(node_id) {
+                    voters.push(info);
+                } else {
+                    learners.push(info);
+                }
+            }
             Ok(Response::new(StatusResponse {
                 applied_seq,
                 version: VERSION.to_owned(),
@@ -147,8 +172,8 @@ impl AdminService for Admin {
                 term: raft.term,
                 leader_id: raft.leader,
                 leader_addr,
-                voters: Vec::new(),
-                learners: Vec::new(),
+                voters,
+                learners,
             }))
         }
         .await;
@@ -245,22 +270,72 @@ impl AdminService for Admin {
 
     async fn add_learner(
         &self,
-        _request: Request<AddLearnerRequest>,
+        request: Request<AddLearnerRequest>,
     ) -> Result<Response<AddLearnerResponse>, Status> {
-        Err(Status::unimplemented("AddLearner not yet wired"))
+        let started = Instant::now();
+        let req = request.into_inner();
+        let result = async {
+            if req.node_id == 0 {
+                return Err(Status::invalid_argument("node_id must be non-zero"));
+            }
+            let addr = req.addr.trim().to_owned();
+            if addr.is_empty() {
+                return Err(Status::invalid_argument("addr must not be empty"));
+            }
+            self.inner.add_learner(req.node_id, addr).await?;
+            Ok(Response::new(AddLearnerResponse {}))
+        }
+        .await;
+        self.inner
+            .metrics
+            .record_rpc(Method::AddLearner, result_code(&result), started.elapsed());
+        result
     }
 
     async fn change_membership(
         &self,
-        _request: Request<ChangeMembershipRequest>,
+        request: Request<ChangeMembershipRequest>,
     ) -> Result<Response<ChangeMembershipResponse>, Status> {
-        Err(Status::unimplemented("ChangeMembership not yet wired"))
+        let started = Instant::now();
+        let req = request.into_inner();
+        let result = async {
+            if req.voter_ids.is_empty() {
+                return Err(Status::invalid_argument("voter_ids must not be empty"));
+            }
+            let voters: BTreeSet<u64> = req.voter_ids.into_iter().collect();
+            self.inner
+                .change_membership(voters, req.retain_learners)
+                .await?;
+            Ok(Response::new(ChangeMembershipResponse {}))
+        }
+        .await;
+        self.inner.metrics.record_rpc(
+            Method::ChangeMembership,
+            result_code(&result),
+            started.elapsed(),
+        );
+        result
     }
 
     async fn transfer_leader(
         &self,
-        _request: Request<TransferLeaderRequest>,
+        request: Request<TransferLeaderRequest>,
     ) -> Result<Response<TransferLeaderResponse>, Status> {
-        Err(Status::unimplemented("TransferLeader not yet wired"))
+        let started = Instant::now();
+        let req = request.into_inner();
+        let result = async {
+            if req.target_node_id == 0 {
+                return Err(Status::invalid_argument("target_node_id must be non-zero"));
+            }
+            self.inner.transfer_leader(req.target_node_id).await?;
+            Ok(Response::new(TransferLeaderResponse {}))
+        }
+        .await;
+        self.inner.metrics.record_rpc(
+            Method::TransferLeader,
+            result_code(&result),
+            started.elapsed(),
+        );
+        result
     }
 }
