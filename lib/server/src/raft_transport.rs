@@ -6,6 +6,7 @@
 //! `raft-proto`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::sync::{Arc, RwLock};
 
 use futures_util::StreamExt;
@@ -23,7 +24,8 @@ use server_raft::transport::{
     AppendEntries, AppendReply, Entry, EntryPayload, LogId, MembershipConfig, SnapshotMeta,
     TransferLeader, TransferReply, Transport, Unreachable, Vote, VoteReply, VoteRequest,
 };
-use server_raft::{DbStateMachine, HandleError, NodeId, PeerInfo, RaftNode};
+use server_raft::{DbStateMachine, HandleError, NodeId, PeerInfo, RaftNode, SnapshotData};
+use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status, Streaming};
 
@@ -76,7 +78,7 @@ fn lazy_channel(addr: &str) -> Result<Channel, String> {
 }
 
 impl Transport for GrpcTransport {
-    type SnapshotData = Vec<u8>;
+    type SnapshotData = SnapshotData;
 
     fn register_peer(&self, id: NodeId, peer: &PeerInfo) {
         if peer.addr.is_empty() {
@@ -176,6 +178,8 @@ impl Transport for GrpcTransport {
     ) -> Result<Vote, Unreachable> {
         let ch = self.channel(to)?;
         let mut client = RaftServiceClient::new(ch);
+        let total_bytes = data.len();
+        let crc32c = data.crc32c();
         let header = InstallSnapshotRequest {
             payload: Some(install_snapshot_request::Payload::Header(
                 InstallSnapshotHeader {
@@ -183,24 +187,46 @@ impl Transport for GrpcTransport {
                     vote: Some(pb_vote(vote)),
                     meta: Some(pb_snapshot_meta(meta)),
                     offset: 0,
-                    total_bytes: data.len() as u64,
-                    crc32c: 0,
+                    total_bytes,
+                    crc32c,
                 },
             )),
         };
         let chunk_size = self.chunk_bytes.max(1);
-        let mut messages = Vec::with_capacity(1 + data.len().div_ceil(chunk_size));
-        messages.push(header);
-        for chunk in data.chunks(chunk_size) {
-            messages.push(InstallSnapshotRequest {
-                payload: Some(install_snapshot_request::Payload::Chunk(chunk.to_vec())),
-            });
-        }
+        let (tx, rx) = mpsc::channel(4);
+        let producer = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if tx.blocking_send(header).is_err() {
+                return Ok(());
+            }
+            let mut reader = data.open_reader_at(0).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; chunk_size];
+            loop {
+                let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                let msg = InstallSnapshotRequest {
+                    payload: Some(install_snapshot_request::Payload::Chunk(buf[..n].to_vec())),
+                };
+                if tx.blocking_send(msg).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
         let resp = client
-            .install_snapshot(futures_util::stream::iter(messages))
+            .install_snapshot(stream)
             .await
             .map_err(|s| Unreachable(s.to_string()))?
             .into_inner();
+        match producer.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(Unreachable(err)),
+            Err(err) => return Err(Unreachable(err.to_string())),
+        }
         resp.vote
             .map(from_pb_vote)
             .ok_or_else(|| Unreachable("missing vote in InstallSnapshotResponse".to_owned()))
@@ -325,7 +351,7 @@ impl RaftService for RaftRpcServer {
         }
         let reply_vote = self
             .node
-            .handle_snapshot(vote, meta, data)
+            .handle_snapshot(vote, meta, SnapshotData::from_bytes(data))
             .await
             .map_err(handle_status)?;
         Ok(Response::new(InstallSnapshotResponse {
