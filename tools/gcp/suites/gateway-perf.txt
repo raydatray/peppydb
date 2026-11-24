@@ -1,0 +1,21 @@
+# mode: cluster
+# nodes: 3
+# gateway: true
+# 3-node Raft cluster behind peppydb-gateway on GCP (plan 0033, milestone S3).
+# Creates three c4d-standard-8-lssd server VMs (server-1, server-2, server-3),
+# one n4-standard-8 gateway VM (gateway), and one n4-standard-8 client VM
+# (client) in the same us-east1 zone.
+#
+# Each server VM announces its internal VPC IP to GCS, forms the 3-node Raft
+# cluster, and publishes ready. The gateway VM waits for all three servers,
+# starts peppydb-gateway with `--backends $CLUSTER_ADDRS`, and publishes ready.
+# The client VM runs peppydb-load against `$GATEWAY_ADDR` and scrapes `/metrics`
+# from the gateway and all three servers per step.
+server       peppydb         serve --data-dir $BENCH_DIR/db --listen 0.0.0.0:7420 --metrics-listen 0.0.0.0:9090 --node-id $NODE_ID --peers $PEERS $BOOTSTRAP
+gateway      peppydb-gateway --listen 0.0.0.0:7430 --backends $CLUSTER_ADDRS --metrics-listen 0.0.0.0:9090
+put-c1       peppydb-load    --addr $GATEWAY_ADDR --workload put --concurrency 1 --conns 1 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c16      peppydb-load    --addr $GATEWAY_ADDR --workload put --concurrency 16 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c64      peppydb-load    --addr $GATEWAY_ADDR --workload put --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+put-c256     peppydb-load    --addr $GATEWAY_ADDR --workload put --concurrency 256 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json
+get-c64      peppydb-load    --addr $GATEWAY_ADDR --workload get --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --preload --json
+mixed90-zipf peppydb-load    --addr $GATEWAY_ADDR --workload mixed:90 --distribution zipf:1.1 --concurrency 64 --conns 4 --warmup 2s --duration 10s --keys 100000 --key-size 8 --value-size 16 --json

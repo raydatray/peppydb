@@ -208,6 +208,7 @@ esac
 
 SUITE_MODE=single
 CLUSTER_NODES=1
+HAS_GATEWAY=false
 if grep -Eq '^#[[:space:]]*mode:[[:space:]]*client-server[[:space:]]*$' "$SUITE_FILE"; then
     SUITE_MODE=client-server
 elif grep -Eq '^#[[:space:]]*mode:[[:space:]]*cluster[[:space:]]*$' "$SUITE_FILE"; then
@@ -215,15 +216,22 @@ elif grep -Eq '^#[[:space:]]*mode:[[:space:]]*cluster[[:space:]]*$' "$SUITE_FILE
     CLUSTER_NODES=$(sed -n 's/^#[[:space:]]*nodes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$SUITE_FILE" | head -n 1)
     CLUSTER_NODES=${CLUSTER_NODES:-3}
 fi
+if grep -Eq '^#[[:space:]]*gateway:[[:space:]]*true[[:space:]]*$' "$SUITE_FILE"; then
+    [ "$SUITE_MODE" != single ] || die "suite $SUITE enables gateway in single mode"
+    HAS_GATEWAY=true
+fi
 
 # suite_lines: the suite without comments and blank lines, reduced to the
-# chosen steps, every preflight step, and (in client-server/cluster mode) the
-# server definition line.
+# chosen steps, every preflight step, and (in multi-VM mode) the server and
+# optional gateway definition lines.
 suite_lines() {
     grep -v '^[[:space:]]*#' "$SUITE_FILE" | grep -v '^[[:space:]]*$' | while read -r name rest; do
         keep=false
         case $name in preflight-*) keep=true ;; esac
         if [ "$SUITE_MODE" != single ] && [ "$name" = server ]; then
+            keep=true
+        fi
+        if $HAS_GATEWAY && [ "$name" = gateway ]; then
             keep=true
         fi
         [ -z "$STEPS" ] && keep=true
@@ -309,6 +317,7 @@ stage() {
         echo "suite=$SUITE"
         echo "suite_mode=$SUITE_MODE"
         [ "$SUITE_MODE" = cluster ] && echo "cluster_nodes=$CLUSTER_NODES"
+        $HAS_GATEWAY && echo "gateway=true"
         echo "profile=$PROFILE"
         echo "machine_type=$MACHINE_TYPE"
         [ "$SUITE_MODE" != single ] && echo "client_machine_type=$CLIENT_MACHINE_TYPE"
@@ -343,10 +352,10 @@ check_profile() {
         seen="$seen $profiler"
     done
     [ -n "$seen" ] || die "empty --profile"
-    # The server runs once for the whole client suite, under one profiler.
-    if [ "$SUITE_MODE" = client-server ]; then
+    # Multi-VM servers (and optional gateway) run once for the whole suite, under one profiler.
+    if [ "$SUITE_MODE" != single ]; then
         case "$PROFILE" in
-            *,*) die "a client-server suite takes one profiler, not $PROFILE" ;;
+            *,*) die "a $SUITE_MODE suite takes one profiler, not $PROFILE" ;;
         esac
     fi
     case "$PROFILE" in
@@ -447,18 +456,19 @@ create_failure_is_capacity() {
 
 # suite_roles: space-separated role names for multi-VM modes.
 suite_roles() {
+    roles=
     case $SUITE_MODE in
-        client-server) echo "server client" ;;
+        client-server) roles="server" ;;
         cluster)
             i=1
-            roles=
             while [ "$i" -le "$CLUSTER_NODES" ]; do
                 roles="$roles server-$i"
                 i=$((i + 1))
             done
-            echo "$roles client"
             ;;
     esac
+    $HAS_GATEWAY && roles="$roles gateway"
+    echo "$roles client"
 }
 
 # create_one_vm NAME MACHINE_TYPE ROLE PROFILE_FILE
@@ -470,6 +480,7 @@ create_one_vm() {
     meta="peppydb-bucket=$BUCKET,peppydb-run-id=$RUN_ID"
     [ -n "$vm_role" ] && meta="$meta,peppydb-role=$vm_role"
     [ "$SUITE_MODE" = cluster ] && meta="$meta,peppydb-cluster-size=$CLUSTER_NODES"
+    $HAS_GATEWAY && meta="$meta,peppydb-has-gateway=1"
     say "creating $vm_name in $ZONE ($vm_machine, $PROVISIONING)"
     # shellcheck disable=SC2086 # image_args is two arguments
     if gc compute instances create "$vm_name" \
@@ -520,13 +531,20 @@ create_instance() {
             ok=true
             for role in $(suite_roles); do
                 vm_name=$LABEL-$RUN_ID-$role
-                if [ "$role" = client ]; then
-                    vm_machine=$CLIENT_MACHINE_TYPE
-                    vm_prof=$LOCAL/profile-none
-                else
-                    vm_machine=$MACHINE_TYPE
-                    vm_prof=$LOCAL/profile
-                fi
+                case $role in
+                    client)
+                        vm_machine=$CLIENT_MACHINE_TYPE
+                        vm_prof=$LOCAL/profile-none
+                        ;;
+                    gateway)
+                        vm_machine=$CLIENT_MACHINE_TYPE
+                        vm_prof=$LOCAL/profile
+                        ;;
+                    *)
+                        vm_machine=$MACHINE_TYPE
+                        vm_prof=$LOCAL/profile
+                        ;;
+                esac
                 if ! create_one_vm "$vm_name" "$vm_machine" "$role" "$vm_prof"; then
                     ok=false
                     break
