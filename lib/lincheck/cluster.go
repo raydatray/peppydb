@@ -69,6 +69,10 @@ type ClusterConfig struct {
 	BaseDir           string
 	SnapshotAfter     uint64
 	KeepBelowSnapshot uint64
+	// BindIPs optionally assigns a distinct loopback IP per initial node
+	// (e.g. "127.0.0.21", "127.0.0.22", "127.0.0.23") for Linux iptables
+	// partition tests. Defaults to "127.0.0.1".
+	BindIPs []string
 }
 
 type nodeProc struct {
@@ -128,7 +132,7 @@ func StartCluster(ctx context.Context, cfg ClusterConfig) (*Cluster, error) {
 	if cfg.BaseDir == "" {
 		return nil, errors.New("lincheck: BaseDir is required")
 	}
-	addrs, err := freeLoopbackAddrs(cfg.Nodes)
+	addrs, err := freeLoopbackAddrs(cfg.Nodes, cfg.BindIPs)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +237,7 @@ func (c *Cluster) startNode(ctx context.Context, np *nodeProc, bootstrap bool) e
 // AddNode allocates a free loopback port and data directory and starts a fresh
 // unbootstrapped peppydb node ready to join the cluster via AddLearner.
 func (c *Cluster) AddNode(ctx context.Context) (uint64, string, error) {
-	addrs, err := freeLoopbackAddrs(1)
+	addrs, err := freeLoopbackAddrs(1, nil)
 	if err != nil {
 		return 0, "", err
 	}
@@ -674,11 +678,15 @@ func (c *Cluster) Close() {
 	}
 }
 
-func freeLoopbackAddrs(n int) ([]string, error) {
+func freeLoopbackAddrs(n int, bindIPs []string) ([]string, error) {
 	listeners := make([]net.Listener, 0, n)
 	addrs := make([]string, 0, n)
-	for range n {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+	for i := range n {
+		ip := "127.0.0.1"
+		if i < len(bindIPs) && bindIPs[i] != "" {
+			ip = bindIPs[i]
+		}
+		l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 		if err != nil {
 			for _, prev := range listeners {
 				_ = prev.Close()
