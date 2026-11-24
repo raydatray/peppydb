@@ -144,7 +144,13 @@ impl RaftSnapshotBuilder<Types<Rt>> for SimSm {
     async fn build_snapshot(&mut self) -> Result<OrSnapshot, io::Error> {
         match self {
             SimSm::Model(sm) => sm.build_snapshot().await,
-            SimSm::Db(sm) => sm.build_snapshot().await,
+            SimSm::Db(sm) => {
+                let snap = sm.build_snapshot().await?;
+                Ok(OrSnapshot {
+                    meta: snap.meta,
+                    snapshot: snap.snapshot.into_bytes()?,
+                })
+            }
         }
     }
 }
@@ -181,14 +187,23 @@ impl RaftStateMachine<Types<Rt>> for SimSm {
     ) -> Result<(), io::Error> {
         match self {
             SimSm::Model(sm) => sm.install_snapshot(meta, snapshot).await,
-            SimSm::Db(sm) => sm.install_snapshot(meta, snapshot).await,
+            SimSm::Db(sm) => {
+                sm.install_snapshot(meta, crate::SnapshotData::from_bytes(snapshot))
+                    .await
+            }
         }
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<OrSnapshot>, io::Error> {
         match self {
             SimSm::Model(sm) => sm.get_current_snapshot().await,
-            SimSm::Db(sm) => sm.get_current_snapshot().await,
+            SimSm::Db(sm) => match sm.get_current_snapshot().await? {
+                Some(snap) => Ok(Some(OrSnapshot {
+                    meta: snap.meta,
+                    snapshot: snap.snapshot.into_bytes()?,
+                })),
+                None => Ok(None),
+            },
         }
     }
 }

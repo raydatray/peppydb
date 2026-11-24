@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use kv_proto::kv::v1::admin_service_client::AdminServiceClient;
 use kv_proto::kv::v1::kv_service_client::KvServiceClient;
-use kv_proto::kv::v1::{GetRequest, PutRequest, StatusRequest, StatusResponse};
+use kv_proto::kv::v1::{
+    AddLearnerRequest, ChangeMembershipRequest, GetRequest, PutRequest, StatusRequest,
+    StatusResponse, TransferLeaderRequest,
+};
 use tonic::Code;
 
 use super::process::ServerProcess;
@@ -386,6 +389,227 @@ async fn iptables_partition_isolates_leader_and_heals_cleanly() {
     })
     .await
     .expect("healed node rejoined and caught up");
+
+    for proc in procs.values() {
+        proc.sigterm();
+    }
+    for mut proc in procs.into_values() {
+        let status = proc.wait();
+        assert_eq!(status.code(), Some(0), "stderr:\n{}", proc.stderr());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn four_process_dynamic_membership_add_learner_swap_and_transfer_leader() {
+    let ports = free_addrs(4);
+    let mut addrs: BTreeMap<u64, SocketAddr> = (1..=3u64).zip(ports[..3].iter().copied()).collect();
+    let addr4 = ports[3];
+    let peers_spec = addrs
+        .iter()
+        .map(|(id, addr)| format!("{id}={addr}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let dirs: BTreeMap<u64, tempfile::TempDir> = (1..=4u64)
+        .map(|id| (id, tempfile::tempdir().unwrap()))
+        .collect();
+
+    let mut procs: BTreeMap<u64, ServerProcess> = BTreeMap::new();
+    for id in 1..=3u64 {
+        let args = node_args(id, dirs[&id].path(), addrs[&id], &peers_spec, id == 1);
+        let (proc, bound) = ServerProcess::start_args(&args);
+        assert_eq!(bound, addrs[&id]);
+        procs.insert(id, proc);
+    }
+
+    let (leader_id, _) = wait_for_leader(&addrs, None).await;
+    let follower_ids: Vec<u64> = (1..=3u64).filter(|&id| id != leader_id).collect();
+    let drop_id = follower_ids[0];
+    let keep_id = follower_ids[1];
+
+    // Wait for followers to recognize the leader before writing.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(st) = status_of(addrs[&drop_id]).await
+                && st.leader_id == Some(leader_id)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("follower knows leader");
+
+    // Write enough keys to trigger snapshot compaction so node 4 catches up via snapshot.
+    let mut leader_kv = KvServiceClient::connect(format!("http://{}", addrs[&leader_id]))
+        .await
+        .unwrap();
+    for i in 0..40u32 {
+        leader_kv
+            .put(PutRequest {
+                key: format!("dyn-{i:03}").into_bytes(),
+                value: format!("val-{i:03}").into_bytes(),
+            })
+            .await
+            .unwrap();
+    }
+    let leader_seq = status_of(addrs[&leader_id]).await.unwrap().applied_seq;
+
+    // Start empty node 4 with NO --peers and NO --bootstrap: stays uninitialized.
+    let node4_args = vec![
+        "serve".to_owned(),
+        "--data-dir".to_owned(),
+        dirs[&4].path().display().to_string(),
+        "--listen".to_owned(),
+        addr4.to_string(),
+        "--node-id".to_owned(),
+        "4".to_owned(),
+    ];
+    let (proc4, bound4) = ServerProcess::start_args(&node4_args);
+    assert_eq!(bound4, addr4);
+    procs.insert(4, proc4);
+    addrs.insert(4, addr4);
+
+    // Confirm follower rejects AddLearner with UNAVAILABLE + LeaderHint.
+    let mut follower_admin = AdminServiceClient::connect(format!("http://{}", addrs[&drop_id]))
+        .await
+        .unwrap();
+    let err = follower_admin
+        .add_learner(AddLearnerRequest {
+            node_id: 4,
+            addr: addr4.to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    let hint = decode_leader_hint(&err).expect("LeaderHint on AddLearner");
+    assert_eq!(hint.leader_id, leader_id);
+
+    // Add node 4 as a non-blocking learner on the leader.
+    let mut leader_admin = AdminServiceClient::connect(format!("http://{}", addrs[&leader_id]))
+        .await
+        .unwrap();
+    leader_admin
+        .add_learner(AddLearnerRequest {
+            node_id: 4,
+            addr: addr4.to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Wait until leader's Status reports learner 4 caught up via match_index and node 4 applied all data.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let st_leader = status_of(addrs[&leader_id]).await;
+            let st_4 = status_of(addr4).await;
+            if let (Some(sl), Some(s4)) = (st_leader, st_4) {
+                let learner_matched = sl
+                    .learners
+                    .iter()
+                    .find(|m| m.node_id == 4)
+                    .and_then(|m| m.match_index)
+                    .unwrap_or(0);
+                if learner_matched > 0 && s4.applied_seq >= leader_seq {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("learner 4 caught up");
+
+    // Joint-consensus swap: replace `drop_id` with node 4 in one call.
+    leader_admin
+        .change_membership(ChangeMembershipRequest {
+            voter_ids: vec![leader_id, keep_id, 4],
+            retain_learners: false,
+        })
+        .await
+        .unwrap();
+
+    let st_after = status_of(addrs[&leader_id]).await.unwrap();
+    let voter_ids: Vec<u64> = st_after.voters.iter().map(|m| m.node_id).collect();
+    assert_eq!(voter_ids.len(), 3);
+    assert!(voter_ids.contains(&4) && !voter_ids.contains(&drop_id));
+    assert!(st_after.learners.is_empty());
+
+    // Transfer leadership to the newly promoted node 4 (re-triggering if node 4
+    // is still flushing on a busy disk).
+    let (new_leader, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(st) = status_of(addr4).await
+                && st.role == "leader"
+            {
+                return (4u64, st);
+            }
+            let _ = leader_admin
+                .transfer_leader(TransferLeaderRequest { target_node_id: 4 })
+                .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("node 4 became leader");
+    assert_eq!(new_leader, 4);
+
+    // Wait until node 4 completes a linearizable Get (proving its committed
+    // vote is flushed to disk and a quorum acknowledges its leadership) and
+    // surviving follower `keep_id` knows leader 4.
+    let mut kv4 = KvServiceClient::connect(format!("http://{addr4}"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let ready = kv4
+                .get(GetRequest {
+                    key: b"dyn-039".to_vec(),
+                })
+                .await
+                .is_ok();
+            let follower_ready = status_of(addrs[&keep_id])
+                .await
+                .is_some_and(|st| st.leader_id == Some(4));
+            if ready && follower_ready {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("node 4 ready as leader and keep_id observed it");
+
+    // Node 4 serves writes and reads; surviving follower returns LeaderHint with node 4's dynamic addr.
+    kv4.put(PutRequest {
+        key: b"from-node-4".to_vec(),
+        value: b"promoted".to_vec(),
+    })
+    .await
+    .unwrap();
+    let got = kv4
+        .get(GetRequest {
+            key: b"dyn-039".to_vec(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.value.as_deref(), Some(b"val-039".as_slice()));
+
+    let mut keep_kv = KvServiceClient::connect(format!("http://{}", addrs[&keep_id]))
+        .await
+        .unwrap();
+    let err = keep_kv
+        .put(PutRequest {
+            key: b"hint-4".to_vec(),
+            value: b"v".to_vec(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    let hint = decode_leader_hint(&err).expect("LeaderHint for dynamically added leader 4");
+    assert_eq!(hint.leader_id, 4);
+    assert_eq!(hint.leader_addr, addr4.to_string());
 
     for proc in procs.values() {
         proc.sigterm();

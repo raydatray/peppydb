@@ -549,13 +549,19 @@ The log's own benchmarks are in
 - **S6 (done, plan 0030):** `DbStateMachine` over `engine::Db` in
   `Mode::External` replaces `ModelSm`, with the applier thread and the
   system keys in `server-keys`; the simulator runs it over `SimStore`.
-- **Soon:** snapshot data in a temporary file instead of a `Vec<u8>`.
-- **S7:** `server` implements `Transport` over gRPC with `raft.v1`, and
-  `serve` builds a `RaftNode` over `DiskLog` and `DbStateMachine`; the
-  format marker moves under Raft; `server` checks key and value limits
-  before it proposes.
-- **Later:** leader leases for reads, membership changes, chunked
-  snapshots, metrics. None of these changes `RaftNode`'s signature.
+- **S7 (done, plan 0032):** `server` implements `Transport` over gRPC with
+  `raft.v1`, and `serve` builds a `RaftNode` over `DiskLog` and
+  `DbStateMachine`; the format marker moves under Raft; `server` checks key
+  and value limits before proposing.
+- **S8 (done, plan 0034):** `SnapshotData` (`Bytes` for simulator,
+  `SnapshotFile` temp files under `<db_dir>/snapshots/` on real disk with
+  Castagnoli CRC32C), dynamic membership (`RaftNode::add_learner` non-blocking,
+  `RaftNode::change_membership` joint consensus, `Status::membership` and
+  `Status::replication`, `Transport::register_peer`), and offset-resumable
+  `InstallSnapshot` (`SnapshotProgress`).
+- **Later:** leader leases for reads (optional), phase 3 migration fences and
+  placement-driven leadership transfer. None of these changes `RaftNode`'s
+  core write/read signature.
 
 ## Relationship to sources
 

@@ -22,6 +22,7 @@
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -46,9 +47,11 @@ use server_keys::MEMBERSHIP_KEY;
 use crate::command::Op;
 use crate::encoding::decode_stored_membership;
 use crate::encoding::encode_stored_membership;
+use crate::snapshot_file::SnapshotData;
+use crate::snapshot_file::SnapshotFile;
+use crate::types::OrDbSnapshot;
 use crate::types::OrEntry;
 use crate::types::OrLogId;
-use crate::types::OrSnapshot;
 use crate::types::OrSnapshotMeta;
 use crate::types::OrStoredMembership;
 use crate::types::Types;
@@ -149,6 +152,8 @@ pub(crate) struct Shared<RT: AsyncRuntime> {
     db: Mutex<Option<Arc<Db>>>,
     pub(crate) sync: SyncHook,
     pub(crate) applier: Applier,
+    /// Directory for temporary snapshot files (`None` for in-memory/sim).
+    pub(crate) snapshot_dir: Option<PathBuf>,
     /// Held for each entry's apply, and by a snapshot build or read for
     /// its whole length, so they see entry boundaries only.
     pub(crate) gate: Mutex<()>,
@@ -273,7 +278,8 @@ impl<RT: AsyncRuntime> fmt::Debug for DbStateMachine<RT> {
 
 impl DbStateMachine<TokioRuntime> {
     /// Open an external-mode `engine::Db` at `dir` and wrap it in a
-    /// production `DbStateMachine` with its dedicated applier thread.
+    /// production `DbStateMachine` with its dedicated applier thread and
+    /// file-backed snapshot storage under `<dir>/snapshots/`.
     pub fn open_dir(
         dir: &std::path::Path,
         direct_io: bool,
@@ -289,7 +295,9 @@ impl DbStateMachine<TokioRuntime> {
             ..engine::Options::default()
         };
         let db = Db::open(dir, options).map_err(io::Error::other)?;
-        Self::open(db, sync, Applier::Thread)
+        let snapshot_dir = dir.join("snapshots");
+        SnapshotFile::clean_stale(&snapshot_dir)?;
+        Self::open_with_snapshot_dir(db, sync, Applier::Thread, Some(snapshot_dir))
     }
 }
 
@@ -298,6 +306,15 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
     /// `sync` makes the node's Raft log durable; checkpoints call it before
     /// they commit.
     pub fn open(db: Db, sync: SyncHook, applier: Applier) -> Result<Self, io::Error> {
+        Self::open_with_snapshot_dir(db, sync, applier, None)
+    }
+
+    fn open_with_snapshot_dir(
+        db: Db,
+        sync: SyncHook,
+        applier: Applier,
+        snapshot_dir: Option<PathBuf>,
+    ) -> Result<Self, io::Error> {
         // Right after open, the database is at its committed checkpoint, so
         // its system keys describe the current snapshot.
         let (applied, membership) = applied_state_of(&db)?;
@@ -309,6 +326,7 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
             db: Mutex::new(Some(Arc::new(db))),
             sync,
             applier,
+            snapshot_dir,
             gate: Mutex::new(()),
             committed: Mutex::new(committed),
             last_checkpoint: Mutex::new(None),
@@ -446,7 +464,7 @@ impl<RT: AsyncRuntime> DbStateMachine<RT> {
 }
 
 impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for DbStateMachine<RT> {
-    type SnapshotData = Vec<u8>;
+    type SnapshotData = SnapshotData;
     type SnapshotBuilder = Self;
 
     async fn applied_state(&mut self) -> Result<(Option<OrLogId>, OrStoredMembership), io::Error> {
@@ -489,20 +507,20 @@ impl<RT: AsyncRuntime> RaftStateMachine<Types<RT>> for DbStateMachine<RT> {
     async fn install_snapshot(
         &mut self,
         meta: &OrSnapshotMeta,
-        snapshot: Vec<u8>,
+        snapshot: SnapshotData,
     ) -> Result<(), io::Error> {
         crate::db_snapshot::install(&self.shared, meta.clone(), snapshot).await
     }
 
-    async fn get_current_snapshot(&mut self) -> Result<Option<OrSnapshot>, io::Error> {
+    async fn get_current_snapshot(&mut self) -> Result<Option<OrDbSnapshot>, io::Error> {
         crate::db_snapshot::current(&self.shared).await
     }
 }
 
 impl<RT: AsyncRuntime> RaftSnapshotBuilder<Types<RT>> for DbStateMachine<RT> {
-    type SnapshotData = Vec<u8>;
+    type SnapshotData = SnapshotData;
 
-    async fn build_snapshot(&mut self) -> Result<OrSnapshot, io::Error> {
+    async fn build_snapshot(&mut self) -> Result<OrDbSnapshot, io::Error> {
         crate::db_snapshot::build(&self.shared).await
     }
 }

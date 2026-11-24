@@ -5,6 +5,7 @@
 //! this module and [`crate::error`] call openraft's `Raft` handle.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,15 +22,18 @@ use openraft::storage::RaftStateMachine;
 use openraft::storage::Snapshot;
 
 use crate::command::Command;
+use crate::error::MembershipError;
 use crate::error::ProposeError;
 use crate::error::ReadError;
 use crate::error::StartError;
 use crate::error::StopError;
 use crate::error::leader_hint;
+use crate::error::membership_error;
 use crate::network::Factory;
 use crate::transport::AppendEntries;
 use crate::transport::AppendReply;
 use crate::transport::LogId;
+use crate::transport::MembershipConfig;
 use crate::transport::MessageError;
 use crate::transport::SnapshotMeta;
 use crate::transport::TransferLeader;
@@ -130,6 +134,10 @@ pub struct Status {
     pub applied: Option<LogId>,
     pub snapshot: Option<LogId>,
     pub purged: Option<LogId>,
+    /// Current effective Raft membership (voters, learners, and peer addresses).
+    pub membership: MembershipConfig,
+    /// Per-peer matched log id; populated only when this node is the leader.
+    pub replication: BTreeMap<NodeId, Option<LogId>>,
     /// Set when the node stopped because of an error.
     pub failure: Option<String>,
 }
@@ -242,6 +250,40 @@ where
         }
     }
 
+    /// Add `id` at `peer` as a non-voting learner. Non-blocking: returns once
+    /// the learner membership entry commits; log/snapshot replication runs
+    /// asynchronously in the background.
+    pub async fn add_learner(
+        &self,
+        id: NodeId,
+        peer: PeerInfo,
+    ) -> Result<Proposed, MembershipError> {
+        self.raft
+            .add_learner(id, peer, false)
+            .await
+            .map(|response| Proposed {
+                log_id: response.log_id.into(),
+            })
+            .map_err(membership_error)
+    }
+
+    /// Change the Raft voting set to `voters` via openraft joint consensus.
+    /// When `retain_learners` is true, removed voters remain as learners;
+    /// otherwise they are removed from the cluster.
+    pub async fn change_membership(
+        &self,
+        voters: BTreeSet<NodeId>,
+        retain_learners: bool,
+    ) -> Result<Proposed, MembershipError> {
+        self.raft
+            .change_membership(voters, retain_learners)
+            .await
+            .map(|response| Proposed {
+                log_id: response.log_id.into(),
+            })
+            .map_err(membership_error)
+    }
+
     /// Ask the leader to hand leadership to `to`. Returns at once; Raft
     /// runs the handover.
     pub async fn transfer_leader(&self, to: NodeId) -> Result<(), StopError> {
@@ -271,6 +313,15 @@ where
             ServerState::Learner => Role::Learner,
             ServerState::Shutdown => Role::Stopped,
         };
+        let membership = MembershipConfig::from(metrics.membership_config.membership());
+        let replication = metrics
+            .replication
+            .map(|map| {
+                map.into_iter()
+                    .map(|(id, matched)| (id, matched.map(Into::into)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Status {
             id: self.id,
             role,
@@ -282,6 +333,8 @@ where
             applied: opt(metrics.last_applied),
             snapshot: opt(metrics.snapshot),
             purged: opt(metrics.purged),
+            membership,
+            replication,
             failure: metrics.running_state.err().map(|fatal| fatal.to_string()),
         }
     }

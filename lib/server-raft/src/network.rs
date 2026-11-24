@@ -59,7 +59,8 @@ pub(crate) struct Peer<T, RT> {
 impl<RT: AsyncRuntime, T: Transport> RaftNetworkFactory<Types<RT>> for Factory<T> {
     type Network = Peer<T, RT>;
 
-    async fn new_client(&mut self, target: NodeId, _node: &PeerInfo) -> Self::Network {
+    async fn new_client(&mut self, target: NodeId, node: &PeerInfo) -> Self::Network {
+        self.transport.register_peer(target, node);
         Peer {
             from: self.id,
             to: target,

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +18,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	kvv1 "peppydb/proto/kv/v1/go"
 )
@@ -66,12 +69,17 @@ type ClusterConfig struct {
 	BaseDir           string
 	SnapshotAfter     uint64
 	KeepBelowSnapshot uint64
+	// BindIPs optionally assigns a distinct loopback IP per initial node
+	// (e.g. "127.0.0.21", "127.0.0.22", "127.0.0.23") for Linux iptables
+	// partition tests. Defaults to "127.0.0.1".
+	BindIPs []string
 }
 
 type nodeProc struct {
 	id      uint64
 	addr    string
 	dataDir string
+	dynamic bool
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -102,9 +110,10 @@ type Cluster struct {
 	cfg       ClusterConfig
 	peersSpec string
 
-	mu       sync.Mutex
-	nodes    map[uint64]*nodeProc
-	gateways []*GatewayProcess
+	mu         sync.Mutex
+	nextNodeID uint64
+	nodes      map[uint64]*nodeProc
+	gateways   []*GatewayProcess
 }
 
 // StartCluster allocates free loopback ports and spawns cfg.Nodes peppydb
@@ -123,7 +132,7 @@ func StartCluster(ctx context.Context, cfg ClusterConfig) (*Cluster, error) {
 	if cfg.BaseDir == "" {
 		return nil, errors.New("lincheck: BaseDir is required")
 	}
-	addrs, err := freeLoopbackAddrs(cfg.Nodes)
+	addrs, err := freeLoopbackAddrs(cfg.Nodes, cfg.BindIPs)
 	if err != nil {
 		return nil, err
 	}
@@ -132,9 +141,10 @@ func StartCluster(ctx context.Context, cfg ClusterConfig) (*Cluster, error) {
 		peerParts = append(peerParts, fmt.Sprintf("%d=%s", i+1, addr))
 	}
 	c := &Cluster{
-		cfg:       cfg,
-		peersSpec: strings.Join(peerParts, ","),
-		nodes:     make(map[uint64]*nodeProc, cfg.Nodes),
+		cfg:        cfg,
+		peersSpec:  strings.Join(peerParts, ","),
+		nextNodeID: uint64(cfg.Nodes) + 1,
+		nodes:      make(map[uint64]*nodeProc, cfg.Nodes),
 	}
 	for i, addr := range addrs {
 		id := uint64(i + 1)
@@ -145,7 +155,7 @@ func StartCluster(ctx context.Context, cfg ClusterConfig) (*Cluster, error) {
 		}
 		np := &nodeProc{id: id, addr: addr, dataDir: dir}
 		c.nodes[id] = np
-		bootstrap := cfg.Nodes > 1 && id == 1
+		bootstrap := id == 1
 		if err := c.startNode(ctx, np, bootstrap); err != nil {
 			c.Close()
 			return nil, err
@@ -161,11 +171,11 @@ func (c *Cluster) startNode(ctx context.Context, np *nodeProc, bootstrap bool) e
 		"--listen", np.addr,
 		"--node-id", strconv.FormatUint(np.id, 10),
 	}
-	if c.cfg.Nodes > 1 {
+	if c.cfg.Nodes > 1 && !np.dynamic {
 		args = append(args, "--peers", c.peersSpec)
-		if bootstrap {
-			args = append(args, "--bootstrap")
-		}
+	}
+	if bootstrap {
+		args = append(args, "--bootstrap")
 	}
 	if c.cfg.SnapshotAfter > 0 {
 		args = append(args, "--snapshot-after", strconv.FormatUint(c.cfg.SnapshotAfter, 10))
@@ -224,10 +234,51 @@ func (c *Cluster) startNode(ctx context.Context, np *nodeProc, bootstrap bool) e
 	}
 }
 
-// Addrs returns the sorted list of node addresses (node 1..N).
+// AddNode allocates a free loopback port and data directory and starts a fresh
+// unbootstrapped peppydb node ready to join the cluster via AddLearner.
+func (c *Cluster) AddNode(ctx context.Context) (uint64, string, error) {
+	addrs, err := freeLoopbackAddrs(1, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	c.mu.Lock()
+	id := c.nextNodeID
+	c.nextNodeID++
+	c.mu.Unlock()
+
+	dir := filepath.Join(c.cfg.BaseDir, fmt.Sprintf("node-%d", id))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return 0, "", err
+	}
+	np := &nodeProc{id: id, addr: addrs[0], dataDir: dir, dynamic: true}
+	if err := c.startNode(ctx, np, false); err != nil {
+		return 0, "", err
+	}
+	c.mu.Lock()
+	c.nodes[id] = np
+	c.mu.Unlock()
+	return id, np.addr, nil
+}
+
+// NodeIDs returns the sorted list of all node IDs currently tracked by Cluster.
+func (c *Cluster) NodeIDs() []uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]uint64, 0, len(c.nodes))
+	for id := range c.nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// Addrs returns the sorted list of node addresses.
 func (c *Cluster) Addrs() []string {
-	out := make([]string, 0, c.cfg.Nodes)
-	for id := uint64(1); id <= uint64(c.cfg.Nodes); id++ {
+	ids := c.NodeIDs()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
 		out = append(out, c.nodes[id].addr)
 	}
 	return out
@@ -235,12 +286,19 @@ func (c *Cluster) Addrs() []string {
 
 // Addr returns node id's client gRPC address.
 func (c *Cluster) Addr(id uint64) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.nodes[id].addr
 }
 
 // NodeStderr returns the captured stderr of node id.
 func (c *Cluster) NodeStderr(id uint64) string {
+	c.mu.Lock()
 	np := c.nodes[id]
+	c.mu.Unlock()
+	if np == nil {
+		return ""
+	}
 	np.mu.Lock()
 	buf := np.stderr
 	np.mu.Unlock()
@@ -250,17 +308,17 @@ func (c *Cluster) NodeStderr(id uint64) string {
 	return buf.String()
 }
 
-// WaitLeader polls AdminService.Status across nodes until a node (other than
-// excludeID, if non-zero) reports role == "leader".
+// WaitLeader polls AdminService.Status across tracked nodes until a node
+// (other than excludeID, if non-zero) reports role == "leader".
 func (c *Cluster) WaitLeader(ctx context.Context, excludeID uint64) (uint64, string, error) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		for id := uint64(1); id <= uint64(c.cfg.Nodes); id++ {
+		for _, id := range c.NodeIDs() {
 			if id == excludeID {
 				continue
 			}
-			addr := c.nodes[id].addr
+			addr := c.Addr(id)
 			st, err := queryStatus(ctx, addr)
 			if err == nil && st.GetRole() == "leader" {
 				return id, addr, nil
@@ -271,6 +329,124 @@ func (c *Cluster) WaitLeader(ctx context.Context, excludeID uint64) (uint64, str
 			return 0, "", fmt.Errorf("wait leader (exclude=%d): %w", excludeID, ctx.Err())
 		case <-ticker.C:
 		}
+	}
+}
+
+// Status queries AdminService.Status on node id.
+func (c *Cluster) Status(ctx context.Context, id uint64) (*kvv1.StatusResponse, error) {
+	return queryStatus(ctx, c.Addr(id))
+}
+
+// AddLearner invokes AdminService.AddLearner on the current leader (retrying
+// transient leader changes). Non-blocking: returns once the learner commits.
+func (c *Cluster) AddLearner(ctx context.Context, nodeID uint64, addr string) error {
+	return c.callAdminOnLeader(ctx, func(callCtx context.Context, admin kvv1.AdminServiceClient) error {
+		_, err := admin.AddLearner(callCtx, &kvv1.AddLearnerRequest{
+			NodeId: nodeID,
+			Addr:   addr,
+		})
+		return err
+	})
+}
+
+// WaitLearnerCaughtUp polls the leader's Status until learnerID has matched
+// at least the leader's current applied index (or committed snapshot).
+func (c *Cluster) WaitLearnerCaughtUp(ctx context.Context, learnerID uint64) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		leaderID, _, err := c.WaitLeader(ctx, 0)
+		if err == nil {
+			sl, errL := c.Status(ctx, leaderID)
+			sn, errN := c.Status(ctx, learnerID)
+			if errL == nil && errN == nil {
+				var matched uint64
+				for _, m := range sl.GetLearners() {
+					if m.GetNodeId() == learnerID && m.MatchIndex != nil {
+						matched = m.GetMatchIndex()
+					}
+				}
+				if matched > 0 && sn.GetAppliedSeq() >= sl.GetAppliedSeq() {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait learner %d caught up: %w", learnerID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// ChangeMembership invokes AdminService.ChangeMembership on the current leader,
+// retrying transient Unavailable/Aborted errors.
+func (c *Cluster) ChangeMembership(ctx context.Context, voters []uint64, retainLearners bool) error {
+	return c.callAdminOnLeader(ctx, func(callCtx context.Context, admin kvv1.AdminServiceClient) error {
+		_, err := admin.ChangeMembership(callCtx, &kvv1.ChangeMembershipRequest{
+			VoterIds:       voters,
+			RetainLearners: retainLearners,
+		})
+		return err
+	})
+}
+
+// TransferLeader asks the current leader to transfer leadership to targetID
+// and waits until targetID becomes leader.
+func (c *Cluster) TransferLeader(ctx context.Context, targetID uint64) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if st, err := c.Status(ctx, targetID); err == nil && st.GetRole() == "leader" {
+			return nil
+		}
+		_ = c.callAdminOnLeader(ctx, func(callCtx context.Context, admin kvv1.AdminServiceClient) error {
+			_, err := admin.TransferLeader(callCtx, &kvv1.TransferLeaderRequest{
+				TargetNodeId: targetID,
+			})
+			return err
+		})
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("transfer leader to %d: %w", targetID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Cluster) callAdminOnLeader(
+	ctx context.Context,
+	fn func(context.Context, kvv1.AdminServiceClient) error,
+) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_, addr, err := c.WaitLeader(ctx, 0)
+		if err != nil {
+			return err
+		}
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err = fn(callCtx, kvv1.NewAdminServiceClient(conn))
+		cancel()
+		_ = conn.Close()
+		if err == nil {
+			return nil
+		}
+		code := status.Code(err)
+		if code == codes.Unavailable || code == codes.Aborted || code == codes.DeadlineExceeded {
+			select {
+			case <-time.After(100 * time.Millisecond):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return err
 	}
 }
 
@@ -305,7 +481,9 @@ func queryStatus(ctx context.Context, addr string) (*kvv1.StatusResponse, error)
 
 // Kill terminates node id immediately with SIGKILL and waits for exit.
 func (c *Cluster) Kill(id uint64) error {
+	c.mu.Lock()
 	np, ok := c.nodes[id]
+	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown node %d", id)
 	}
@@ -324,7 +502,9 @@ func (c *Cluster) Kill(id uint64) error {
 
 // Stop sends SIGTERM to node id and waits for graceful exit.
 func (c *Cluster) Stop(id uint64) error {
+	c.mu.Lock()
 	np, ok := c.nodes[id]
+	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown node %d", id)
 	}
@@ -348,7 +528,9 @@ func (c *Cluster) Stop(id uint64) error {
 
 // Restart starts a previously stopped or killed node with its existing data dir.
 func (c *Cluster) Restart(ctx context.Context, id uint64) error {
+	c.mu.Lock()
 	np, ok := c.nodes[id]
+	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown node %d", id)
 	}
@@ -483,22 +665,28 @@ func (c *Cluster) Close() {
 	c.mu.Lock()
 	gws := c.gateways
 	c.gateways = nil
+	ids := make([]uint64, 0, len(c.nodes))
+	for id := range c.nodes {
+		ids = append(ids, id)
+	}
 	c.mu.Unlock()
 	for _, gw := range gws {
 		gw.Stop()
 	}
-	for id := uint64(1); id <= uint64(c.cfg.Nodes); id++ {
-		if np := c.nodes[id]; np != nil {
-			_ = c.Kill(id)
-		}
+	for _, id := range ids {
+		_ = c.Kill(id)
 	}
 }
 
-func freeLoopbackAddrs(n int) ([]string, error) {
+func freeLoopbackAddrs(n int, bindIPs []string) ([]string, error) {
 	listeners := make([]net.Listener, 0, n)
 	addrs := make([]string, 0, n)
-	for range n {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+	for i := range n {
+		ip := "127.0.0.1"
+		if i < len(bindIPs) && bindIPs[i] != "" {
+			ip = bindIPs[i]
+		}
+		l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 		if err != nil {
 			for _, prev := range listeners {
 				_ = prev.Close()

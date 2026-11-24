@@ -156,6 +156,36 @@ pub struct InstallSnapshotHeader {
     pub vote: ::core::option::Option<Vote>,
     #[prost(message, optional, tag = "3")]
     pub meta: ::core::option::Option<SnapshotMeta>,
+    /// Byte offset within the snapshot file where the following chunks begin.
+    #[prost(uint64, tag = "4")]
+    pub offset: u64,
+    /// Total byte length of the complete snapshot file (0 if omitted by legacy sender).
+    #[prost(uint64, tag = "5")]
+    pub total_bytes: u64,
+    /// Castagnoli CRC32C over the complete snapshot file.
+    #[prost(uint32, tag = "6")]
+    pub crc32c: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SnapshotProgressRequest {
+    #[prost(uint64, tag = "1")]
+    pub from: u64,
+    #[prost(message, optional, tag = "2")]
+    pub vote: ::core::option::Option<Vote>,
+    #[prost(message, optional, tag = "3")]
+    pub last: ::core::option::Option<LogId>,
+    #[prost(uint64, tag = "4")]
+    pub total_bytes: u64,
+    #[prost(uint32, tag = "5")]
+    pub crc32c: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SnapshotProgressResponse {
+    #[prost(message, optional, tag = "1")]
+    pub vote: ::core::option::Option<Vote>,
+    /// Contiguous byte offset already staged on the receiver for this snapshot.
+    #[prost(uint64, tag = "2")]
+    pub accepted_offset: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InstallSnapshotRequest {
@@ -385,7 +415,7 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("peppydb.raft.v1.RaftService", "PreVote"));
             self.inner.unary(req, path, codec).await
         }
-        /// Stream a complete engine snapshot to a lagging follower.
+        /// Stream a complete (or resumed) engine snapshot to a lagging follower.
         pub async fn install_snapshot(
             &mut self,
             request: impl tonic::IntoStreamingRequest<
@@ -413,6 +443,34 @@ pub mod raft_service_client {
                     GrpcMethod::new("peppydb.raft.v1.RaftService", "InstallSnapshot"),
                 );
             self.inner.client_streaming(req, path, codec).await
+        }
+        /// Query how many contiguous verified bytes the receiver already staged for
+        /// a snapshot so InstallSnapshot can resume after a disconnect.
+        pub async fn snapshot_progress(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SnapshotProgressRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SnapshotProgressResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/peppydb.raft.v1.RaftService/SnapshotProgress",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("peppydb.raft.v1.RaftService", "SnapshotProgress"),
+                );
+            self.inner.unary(req, path, codec).await
         }
         /// Ask the target follower to take over leadership.
         pub async fn transfer_leader(
@@ -474,12 +532,21 @@ pub mod raft_service_server {
             &self,
             request: tonic::Request<super::PreVoteRequest>,
         ) -> std::result::Result<tonic::Response<super::PreVoteResponse>, tonic::Status>;
-        /// Stream a complete engine snapshot to a lagging follower.
+        /// Stream a complete (or resumed) engine snapshot to a lagging follower.
         async fn install_snapshot(
             &self,
             request: tonic::Request<tonic::Streaming<super::InstallSnapshotRequest>>,
         ) -> std::result::Result<
             tonic::Response<super::InstallSnapshotResponse>,
+            tonic::Status,
+        >;
+        /// Query how many contiguous verified bytes the receiver already staged for
+        /// a snapshot so InstallSnapshot can resume after a disconnect.
+        async fn snapshot_progress(
+            &self,
+            request: tonic::Request<super::SnapshotProgressRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SnapshotProgressResponse>,
             tonic::Status,
         >;
         /// Ask the target follower to take over leadership.
@@ -745,6 +812,51 @@ pub mod raft_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.client_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/peppydb.raft.v1.RaftService/SnapshotProgress" => {
+                    #[allow(non_camel_case_types)]
+                    struct SnapshotProgressSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::SnapshotProgressRequest>
+                    for SnapshotProgressSvc<T> {
+                        type Response = super::SnapshotProgressResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SnapshotProgressRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::snapshot_progress(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SnapshotProgressSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

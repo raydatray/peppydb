@@ -79,9 +79,7 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 }
 
 /// How a node's state machine is built over its log.
-trait Machine:
-    RaftStateMachine<Types<Rt>, SnapshotData = Vec<u8>> + Clone + Send + Sync + 'static
-{
+trait Machine: RaftStateMachine<Types<Rt>> + Clone + Send + Sync + 'static {
     fn build(dir: &std::path::Path, log: &DiskLog<Rt>) -> Self;
 }
 

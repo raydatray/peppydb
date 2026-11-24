@@ -431,3 +431,33 @@ func TestCloseRejectsSubsequentCalls(t *testing.T) {
 		t.Fatalf("Get after Close err = %v, want Unavailable", err)
 	}
 }
+
+func TestStatusDiscoveryLearnsDynamicVoters(t *testing.T) {
+	seed := startFakeNode(t, "follower")
+	dynamicLeader := startFakeNode(t, "leader")
+	// Seed does not know leader_addr directly, but advertises dynamicLeader in Voters.
+	seed.setRole("follower", 0, "")
+
+	// Override Status via a small wrapper or pre-populate leaderAddr after probe;
+	// verify that a second probe reaches dynamicLeader once learned.
+	seed.setRole("follower", 2, dynamicLeader.addr)
+	c, err := New(Options{Seeds: []string{seed.addr}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, err := c.Put(context.Background(), &kvv1.PutRequest{Key: []byte("k"), Value: []byte("v")}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if got := c.Leader(); got != dynamicLeader.addr {
+		t.Fatalf("leader = %q, want %q", got, dynamicLeader.addr)
+	}
+	// Stop the original seed; client must still reach dynamicLeader.
+	seed.srv.Stop()
+	c.invalidateLeader(dynamicLeader.addr)
+	resp, err := c.Get(context.Background(), &kvv1.GetRequest{Key: []byte("k")})
+	if err != nil || string(resp.Value) != "v" {
+		t.Fatalf("Get after seed stopped = (%q, %v), want (\"v\", nil)", resp.Value, err)
+	}
+}

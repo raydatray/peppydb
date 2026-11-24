@@ -117,7 +117,8 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub peers: BTreeMap<NodeId, PeerInfo>,
     /// Initialize a brand-new cluster when this node starts empty. Ignored on
-    /// restart. Always enabled for 1-node clusters.
+    /// restart. When false and empty, the node waits uninitialized to join an
+    /// existing cluster via `AdminService.AddLearner`.
     pub bootstrap: bool,
     pub direct_io: bool,
     pub log: LogOptions,
@@ -215,10 +216,12 @@ pub(crate) async fn prepare(
         )
         .await?,
     );
-    let should_bootstrap = node_config.bootstrap || node_config.peers.len() == 1;
+    let should_bootstrap = node_config.bootstrap;
+    let snapshot_dir = node_config.data_dir.join("db").join("snapshots");
     let inner = Arc::new(bridge::Inner::new(
         node,
         sm,
+        snapshot_dir,
         node_config.peers,
         limits,
         node_config.server,
@@ -252,9 +255,10 @@ pub(crate) async fn run(
         inner: Arc::clone(&inner),
     })
     .max_decoding_message_size(config.max_request_bytes);
-    let raft_svc = RaftServiceServer::new(raft_transport::RaftRpcServer {
-        node: Arc::clone(&inner.node),
-    });
+    let raft_svc = RaftServiceServer::new(raft_transport::RaftRpcServer::new(
+        Arc::clone(&inner.node),
+        inner.snapshot_dir.clone(),
+    ));
 
     let (health, health_service) = tonic_health::server::health_reporter();
     let names = [

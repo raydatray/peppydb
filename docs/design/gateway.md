@@ -121,9 +121,12 @@ overhead and Go runtime behavior against direct `cluster-perf` runs
 
 ## Extension points
 
-- **S8 (membership and fault testing):** Imports `lib/lincheck` (`Cluster`,
-  `RunWorkload`, `Check`, `WriteVisualization`) to drive randomized `SIGKILL`,
-  restart, membership change, and `iptables` partition runs under Porcupine.
+- **S8 (done, plan 0034):** `lib/gateway-kvclient` learns dynamic voter
+  addresses from `StatusResponse.voters`; `lib/lincheck` drives seeded
+  multi-fault schedules (`SIGKILL`, restarts, snapshot catch-up, dynamic
+  membership rotations, and Linux `iptables` partitions via `LINCHECK_IPTABLES=1`
+  under `tools/linux-run`) through `peppydb-gateway` and verifies strict
+  linearizability with Porcupine.
 - **Phase 3 (sharding):** Replaces `StaticRouter` with a placement-backed
   `Router` (e.g. `lib/gateway-placement`) that maps keys via μshard to p-shard
   and wires each p-shard's `kvclient.Client` to an etcd/placement-driver

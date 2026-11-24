@@ -5,15 +5,16 @@
 //! the latest `engine::Db` from [`DbStateMachine`] on tokio's blocking pool
 //! under the `max_inflight` semaphore.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use engine::Db;
 use kv_proto::kv::v1::LeaderHint as PbLeaderHint;
 use prost::Message;
 use server_raft::{
-    Command, DbStateMachine, LeaderHint, NodeId, Op, PeerInfo, ProposeError, RaftNode, ReadError,
-    Role, Status as RaftStatus,
+    Command, DbStateMachine, LeaderHint, MembershipError, NodeId, Op, PeerInfo, ProposeError,
+    RaftNode, ReadError, Role, Status as RaftStatus,
 };
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tonic::{Code, Status};
@@ -25,6 +26,7 @@ use crate::metrics::Metrics;
 pub(crate) struct Inner {
     pub(crate) node: Arc<RaftNode<DbStateMachine>>,
     pub(crate) sm: DbStateMachine,
+    pub(crate) snapshot_dir: PathBuf,
     peers: BTreeMap<NodeId, PeerInfo>,
     pub(crate) max_key_len: usize,
     pub(crate) max_value_len: usize,
@@ -42,6 +44,7 @@ impl Inner {
     pub(crate) fn new(
         node: Arc<RaftNode<DbStateMachine>>,
         sm: DbStateMachine,
+        snapshot_dir: PathBuf,
         peers: BTreeMap<NodeId, PeerInfo>,
         limits: (usize, usize),
         config: Config,
@@ -49,6 +52,7 @@ impl Inner {
         Self {
             node,
             sm,
+            snapshot_dir,
             peers,
             max_key_len: limits.0,
             max_value_len: limits.1,
@@ -74,11 +78,68 @@ impl Inner {
     }
 
     pub(crate) fn leader_addr(&self, id: NodeId) -> Option<String> {
-        self.peers.get(&id).map(|p| p.addr.clone())
+        let status = self.node.status();
+        status
+            .membership
+            .nodes
+            .get(&id)
+            .filter(|p| !p.addr.is_empty())
+            .map(|p| p.addr.clone())
+            .or_else(|| self.peers.get(&id).map(|p| p.addr.clone()))
     }
 
     pub(crate) fn peers_map(&self) -> BTreeMap<NodeId, PeerInfo> {
         self.peers.clone()
+    }
+
+    /// Add a non-voting learner to the Raft group (non-blocking).
+    pub(crate) async fn add_learner(&self, id: NodeId, addr: String) -> Result<(), Status> {
+        self.node
+            .add_learner(id, PeerInfo { addr })
+            .await
+            .map(|_| ())
+            .map_err(|err| self.membership_status(err))
+    }
+
+    /// Change the voting set via openraft joint consensus.
+    pub(crate) async fn change_membership(
+        &self,
+        voters: BTreeSet<NodeId>,
+        retain_learners: bool,
+    ) -> Result<(), Status> {
+        self.node
+            .change_membership(voters, retain_learners)
+            .await
+            .map(|_| ())
+            .map_err(|err| self.membership_status(err))
+    }
+
+    /// Ask the leader to transfer leadership to `target`.
+    pub(crate) async fn transfer_leader(&self, target: NodeId) -> Result<(), Status> {
+        let status = self.node.status();
+        if status.role != Role::Leader {
+            let hint = LeaderHint {
+                id: status.leader,
+                node: status
+                    .leader
+                    .and_then(|id| status.membership.nodes.get(&id).cloned()),
+            };
+            return Err(self.not_leader_status(hint));
+        }
+        let is_voter = status
+            .membership
+            .configs
+            .iter()
+            .any(|cfg| cfg.contains(&target));
+        if !is_voter {
+            return Err(Status::invalid_argument(format!(
+                "target node {target} is not a current voter"
+            )));
+        }
+        self.node.transfer_leader(target).await.map_err(|err| {
+            self.record_fatal(err.to_string());
+            Status::unavailable(err.to_string())
+        })
     }
 
     /// Propose a replicated write through Raft.
@@ -185,6 +246,24 @@ impl Inner {
             ReadError::NotLeader(hint) => self.not_leader_status(hint),
             ReadError::NoQuorum => Status::unavailable("no quorum for linearizable read"),
             ReadError::Stopped(msg) => {
+                self.record_fatal(msg.clone());
+                Status::unavailable(msg)
+            }
+        }
+    }
+
+    fn membership_status(&self, error: MembershipError) -> Status {
+        match error {
+            MembershipError::NotLeader(hint) => self.not_leader_status(hint),
+            MembershipError::InProgress => Status::aborted("membership change already in progress"),
+            MembershipError::NotReady => Status::unavailable(
+                "leader has not yet committed an entry in its current term; retry",
+            ),
+            MembershipError::Invalid(msg) => Status::invalid_argument(msg),
+            MembershipError::OutcomeUnknown => {
+                Status::unavailable("membership change outcome unknown; retry")
+            }
+            MembershipError::Stopped(msg) => {
                 self.record_fatal(msg.clone());
                 Status::unavailable(msg)
             }

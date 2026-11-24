@@ -180,7 +180,7 @@ async fn compaction_script(node: &mut Node, outcome: &mut Outcome) -> Result<(),
 }
 
 /// The leader's snapshot at log id 2.10, for the install script.
-async fn leader_snapshot() -> crate::types::OrSnapshot {
+async fn leader_snapshot() -> crate::types::OrDbSnapshot {
     let mut leader = Node::new(real_hook);
     let mut entries: Vec<_> = (0..=5).map(|i| entry(1, i)).collect();
     entries.extend((6..=10).map(|i| entry(2, i)));

@@ -2,6 +2,7 @@
 //! hints, and leader transfer (plan 0028, diff 8).
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use openraft_rt_sim::SimRuntime;
 
 use crate::command::Command;
 use crate::command::Op;
+use crate::error::MembershipError;
 use crate::error::ProposeError;
 use crate::error::ReadError;
 use crate::node::RaftConfig;
@@ -26,6 +28,7 @@ type Sm = ModelSm<SimRuntime>;
 type Node = RaftNode<Sm, SimRuntime>;
 
 struct Cluster {
+    router: Arc<Router<Sm, SimRuntime>>,
     nodes: BTreeMap<NodeId, (Node, Sm)>,
 }
 
@@ -49,9 +52,36 @@ impl Cluster {
             router.register(node.clone());
             nodes.insert(id, (node, sm));
         }
-        let voters = ids.iter().map(|id| (*id, PeerInfo::default())).collect();
+        let voters = ids
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    PeerInfo {
+                        addr: format!("node-{id}"),
+                    },
+                )
+            })
+            .collect();
         nodes[&ids[0]].0.initialize(voters).await.unwrap();
-        Self { nodes }
+        Self { router, nodes }
+    }
+
+    async fn add_unbootstrapped(&mut self, id: NodeId) {
+        let log = MemLog::<SimRuntime>::new(LogConfig::default());
+        let hook = log.clone();
+        let sm = Sm::new(Arc::new(move || hook.sync()));
+        let node = Node::start(
+            id,
+            &RaftConfig::default(),
+            log,
+            sm.clone(),
+            Arc::clone(&self.router),
+        )
+        .await
+        .unwrap();
+        self.router.register(node.clone());
+        self.nodes.insert(id, (node, sm));
     }
 
     fn node(&self, id: NodeId) -> &Node {
@@ -214,6 +244,104 @@ fn leadership_moves_on_request() {
             .propose(put(b"\x01k", b"v"))
             .await
             .unwrap();
+        cluster.shutdown().await;
+    });
+}
+
+#[test]
+fn dynamic_membership_adds_learner_swaps_voter_and_reports_progress() {
+    SimRuntime::with_seed(5).block_on(async {
+        let mut cluster = Cluster::start(&[1, 2, 3]).await;
+        let leader = cluster.leader().await;
+        let follower = *cluster.nodes.keys().find(|id| **id != leader).unwrap();
+
+        // Write initial keys so node 4 must catch up.
+        let mut last = 0;
+        for i in 0..10u8 {
+            last = cluster
+                .node(leader)
+                .propose(put(&[1, i], &[i + 1]))
+                .await
+                .unwrap()
+                .log_id
+                .index;
+        }
+
+        // Followers reject membership changes with NotLeader + hint.
+        let peer4 = PeerInfo {
+            addr: "node-4".to_owned(),
+        };
+        match cluster.node(follower).add_learner(4, peer4.clone()).await {
+            Err(MembershipError::NotLeader(hint)) => assert_eq!(hint.id, Some(leader)),
+            other => panic!("expected NotLeader, got {other:?}"),
+        }
+
+        // Start unbootstrapped node 4 and add it as a non-blocking learner.
+        cluster.add_unbootstrapped(4).await;
+        let added = cluster
+            .node(leader)
+            .add_learner(4, peer4.clone())
+            .await
+            .unwrap();
+        assert!(added.log_id.index > last);
+
+        // Wait until leader's Status::replication reports node 4 caught up.
+        for _ in 0..1000 {
+            let st = cluster.node(leader).status();
+            let matched = st
+                .replication
+                .get(&4)
+                .and_then(|opt| opt.map(|id| id.index))
+                .unwrap_or(0);
+            if matched >= added.log_id.index {
+                break;
+            }
+            SimRuntime::sleep(Duration::from_millis(10)).await;
+        }
+        let st = cluster.node(leader).status();
+        assert_eq!(st.membership.nodes.get(&4), Some(&peer4));
+        assert!(
+            st.replication
+                .get(&4)
+                .and_then(|opt| opt.map(|id| id.index))
+                .is_some_and(|idx| idx >= added.log_id.index),
+            "leader tracks learner match_index"
+        );
+        assert_eq!(cluster.nodes[&4].1.get(&[1, 9]), Some(vec![10]));
+
+        // Joint-consensus swap: replace `follower` with node 4 in one call.
+        let new_voters: BTreeSet<NodeId> = [1, 2, 3, 4]
+            .into_iter()
+            .filter(|id| *id != follower)
+            .collect();
+        cluster
+            .node(leader)
+            .change_membership(new_voters.clone(), false)
+            .await
+            .unwrap();
+        let st = cluster.node(leader).status();
+        assert_eq!(st.membership.configs, vec![new_voters.clone()]);
+        assert!(!st.membership.nodes.contains_key(&follower));
+
+        // Transfer leadership to the newly promoted node 4 and keep writing.
+        cluster.node(leader).transfer_leader(4).await.unwrap();
+        for _ in 0..1000 {
+            if cluster.node(4).status().role == Role::Leader {
+                break;
+            }
+            SimRuntime::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(cluster.node(4).status().role, Role::Leader);
+        cluster
+            .node(4)
+            .propose(put(b"\x01after-swap", b"ok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            cluster.nodes[&4].1.get(b"\x01after-swap"),
+            Some(b"ok".to_vec())
+        );
+
         cluster.shutdown().await;
     });
 }
