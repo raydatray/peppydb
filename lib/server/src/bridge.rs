@@ -6,6 +6,7 @@
 //! under the `max_inflight` semaphore.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use engine::Db;
@@ -25,6 +26,7 @@ use crate::metrics::Metrics;
 pub(crate) struct Inner {
     pub(crate) node: Arc<RaftNode<DbStateMachine>>,
     pub(crate) sm: DbStateMachine,
+    pub(crate) snapshot_dir: PathBuf,
     peers: BTreeMap<NodeId, PeerInfo>,
     pub(crate) max_key_len: usize,
     pub(crate) max_value_len: usize,
@@ -42,6 +44,7 @@ impl Inner {
     pub(crate) fn new(
         node: Arc<RaftNode<DbStateMachine>>,
         sm: DbStateMachine,
+        snapshot_dir: PathBuf,
         peers: BTreeMap<NodeId, PeerInfo>,
         limits: (usize, usize),
         config: Config,
@@ -49,6 +52,7 @@ impl Inner {
         Self {
             node,
             sm,
+            snapshot_dir,
             peers,
             max_key_len: limits.0,
             max_value_len: limits.1,
