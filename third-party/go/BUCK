@@ -2,6 +2,17 @@
 # Run tools/gobuckify-remote after changing go.mod.
 
 http_archive(
+    name = "github.com/anishathalye/porcupine__srcs",
+    urls = ["https://proxy.golang.org/github.com/anishathalye/porcupine/@v/v1.3.1.zip"],
+    sha256 = "ed7d64fdef1df58ed8a3c6aa31e185c9f5649bf6607bb6708144c91253073ecc",
+    strip_prefix = "github.com/anishathalye/porcupine@v1.3.1",
+    sub_targets = {
+        ".": ["bitset.go", "checker.go", "model.go", "porcupine.go", "visualization.go"],
+        ".__embed": ["visualization/index.css", "visualization/index.html", "visualization/index.js", "visualization/xo.config.js"],
+    },
+)
+
+http_archive(
     name = "github.com/beorn7/perks__srcs",
     urls = ["https://proxy.golang.org/github.com/beorn7/perks/@v/v1.0.1.zip"],
     sha256 = "25bd9e2d94aca770e6dbc1f53725f84f6af4432f631d35dd2c46f96ef0512f1a",
@@ -249,6 +260,14 @@ http_archive(
         "types/known/durationpb": ["types/known/durationpb/duration.pb.go"],
         "types/known/timestamppb": ["types/known/timestamppb/timestamp.pb.go"],
     },
+)
+
+go_library(
+    name = "github.com/anishathalye/porcupine",
+    package_name = "github.com/anishathalye/porcupine",
+    srcs = [":github.com/anishathalye/porcupine__srcs[.]"],
+    embed_srcs = [":github.com/anishathalye/porcupine__srcs[.__embed]"],
+    visibility = ["PUBLIC"],
 )
 
 go_library(

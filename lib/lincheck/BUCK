@@ -1,0 +1,26 @@
+# Reusable Porcupine linearizability checker and workload harness (plan 0033).
+go_library(
+    name = "lincheck",
+    package_name = "peppydb/lib/lincheck",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    deps = [
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:github.com/anishathalye/porcupine",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+go_test(
+    name = "lincheck-test",
+    srcs = glob(["*_test.go"]),
+    cgo_enabled = False,
+    target_under_test = ":lincheck",
+    deps = [
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:github.com/anishathalye/porcupine",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/credentials/insecure",
+    ],
+)
