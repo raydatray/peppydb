@@ -51,12 +51,12 @@ struct ServeArgs {
     /// This server's Raft node id.
     #[arg(long, default_value_t = 1)]
     node_id: u64,
-    /// Comma-separated static cluster peers (`id=host:port,...`). When omitted,
-    /// the server runs as a 1-node cluster at `--listen`.
+    /// Comma-separated initial cluster peers (`id=host:port,...`). When omitted,
+    /// only this node is registered locally (`--bootstrap` initializes a 1-node
+    /// cluster; omitting `--bootstrap` starts empty awaiting `AddLearner`).
     #[arg(long)]
     peers: Option<String>,
-    /// Initialize a new multi-node cluster when starting empty. Ignored on
-    /// restart; automatic in 1-node mode.
+    /// Initialize a brand-new cluster when starting empty. Ignored on restart.
     #[arg(long, default_value_t = false)]
     bootstrap: bool,
     /// Trigger an automatic snapshot after this many log entries.
@@ -130,18 +130,16 @@ fn run(args: ServeArgs) -> Result<Exit, Box<dyn std::error::Error>> {
             }
             None => None,
         };
-        let (peers, bootstrap) = match args.peers.as_deref() {
-            Some(spec) => (parse_peers(spec)?, args.bootstrap),
-            None => (
-                BTreeMap::from([(
-                    args.node_id,
-                    PeerInfo {
-                        addr: bound_addr.to_string(),
-                    },
-                )]),
-                true,
-            ),
+        let peers = match args.peers.as_deref() {
+            Some(spec) => parse_peers(spec)?,
+            None => BTreeMap::from([(
+                args.node_id,
+                PeerInfo {
+                    addr: bound_addr.to_string(),
+                },
+            )]),
         };
+        let bootstrap = args.bootstrap;
         let mut raft = RaftConfig::default();
         if let Some(after) = args.snapshot_after {
             raft.snapshot_after = Some(after);

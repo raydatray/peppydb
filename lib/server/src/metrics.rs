@@ -37,6 +37,9 @@ pub(crate) enum Method {
     Status,
     Checkpoint,
     Snapshot,
+    AddLearner,
+    ChangeMembership,
+    TransferLeader,
 }
 
 impl Method {
@@ -49,6 +52,9 @@ impl Method {
             Self::Status => "status",
             Self::Checkpoint => "checkpoint",
             Self::Snapshot => "snapshot",
+            Self::AddLearner => "add_learner",
+            Self::ChangeMembership => "change_membership",
+            Self::TransferLeader => "transfer_leader",
         }
     }
 }

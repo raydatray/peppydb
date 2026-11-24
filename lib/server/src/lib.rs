@@ -117,7 +117,8 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub peers: BTreeMap<NodeId, PeerInfo>,
     /// Initialize a brand-new cluster when this node starts empty. Ignored on
-    /// restart. Always enabled for 1-node clusters.
+    /// restart. When false and empty, the node waits uninitialized to join an
+    /// existing cluster via `AdminService.AddLearner`.
     pub bootstrap: bool,
     pub direct_io: bool,
     pub log: LogOptions,
@@ -215,7 +216,7 @@ pub(crate) async fn prepare(
         )
         .await?,
     );
-    let should_bootstrap = node_config.bootstrap || node_config.peers.len() == 1;
+    let should_bootstrap = node_config.bootstrap;
     let inner = Arc::new(bridge::Inner::new(
         node,
         sm,

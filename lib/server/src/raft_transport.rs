@@ -78,6 +78,27 @@ fn lazy_channel(addr: &str) -> Result<Channel, String> {
 impl Transport for GrpcTransport {
     type SnapshotData = Vec<u8>;
 
+    fn register_peer(&self, id: NodeId, peer: &PeerInfo) {
+        if peer.addr.is_empty() {
+            return;
+        }
+        {
+            let guard = self.peers.read().unwrap_or_else(|e| e.into_inner());
+            if guard.get(&id).is_some_and(|(addr, _)| addr == &peer.addr) {
+                return;
+            }
+        }
+        match lazy_channel(&peer.addr) {
+            Ok(ch) => {
+                let mut guard = self.peers.write().unwrap_or_else(|e| e.into_inner());
+                guard.insert(id, (peer.addr.clone(), ch));
+            }
+            Err(err) => {
+                tracing::warn!(node_id = id, addr = %peer.addr, %err, "ignoring invalid peer addr");
+            }
+        }
+    }
+
     async fn append_entries(
         &self,
         from: NodeId,
