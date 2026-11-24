@@ -363,6 +363,16 @@ func (c *Client) knownPeers() []string {
 	return out
 }
 
+func (c *Client) recordKnown(addr string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	c.mu.Lock()
+	c.recordKnownLocked(addr)
+	c.mu.Unlock()
+}
+
 func (c *Client) recordKnownLocked(addr string) {
 	if _, ok := c.knownM[addr]; !ok {
 		c.knownM[addr] = struct{}{}
@@ -500,6 +510,11 @@ func (d statusDiscovery) Discover(ctx context.Context) (string, error) {
 		if err != nil {
 			lastErr = err
 			continue
+		}
+		// Learn dynamically added voters so probes keep working even if
+		// original seed nodes are later removed from the cluster.
+		for _, voter := range resp.GetVoters() {
+			d.client.recordKnown(voter.GetAddr())
 		}
 		if resp.GetRole() == "leader" {
 			if resp.GetLeaderAddr() != "" {
