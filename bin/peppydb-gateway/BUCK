@@ -3,6 +3,7 @@ go_binary(
     name = "peppydb-gateway",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
     cgo_enabled = False,
+    visibility = ["//lib/lincheck:"],
     deps = [
         "//lib/gateway:gateway",
     ],
