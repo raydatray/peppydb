@@ -145,7 +145,7 @@ func StartCluster(ctx context.Context, cfg ClusterConfig) (*Cluster, error) {
 		}
 		np := &nodeProc{id: id, addr: addr, dataDir: dir}
 		c.nodes[id] = np
-		bootstrap := cfg.Nodes > 1 && id == 1
+		bootstrap := id == 1
 		if err := c.startNode(ctx, np, bootstrap); err != nil {
 			c.Close()
 			return nil, err
@@ -163,9 +163,9 @@ func (c *Cluster) startNode(ctx context.Context, np *nodeProc, bootstrap bool) e
 	}
 	if c.cfg.Nodes > 1 {
 		args = append(args, "--peers", c.peersSpec)
-		if bootstrap {
-			args = append(args, "--bootstrap")
-		}
+	}
+	if bootstrap {
+		args = append(args, "--bootstrap")
 	}
 	if c.cfg.SnapshotAfter > 0 {
 		args = append(args, "--snapshot-after", strconv.FormatUint(c.cfg.SnapshotAfter, 10))
