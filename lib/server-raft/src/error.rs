@@ -2,6 +2,8 @@
 //! outside the facade's own calls.
 
 use openraft::AsyncRuntime;
+use openraft::error::ChangeMembershipError;
+use openraft::error::ClientWriteError;
 use openraft::error::ForwardToLeader;
 use openraft::error::LinearizableReadError;
 use openraft::error::RaftError;
@@ -66,6 +68,47 @@ pub(crate) fn read_error<RT: AsyncRuntime>(
         }
         RaftError::APIError(LinearizableReadError::QuorumNotEnough(_)) => ReadError::NoQuorum,
         RaftError::Fatal(fatal) => ReadError::Stopped(fatal.to_string()),
+    }
+}
+
+/// Why a membership change RPC did not commit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MembershipError {
+    /// This node is not the leader.
+    #[error("not the leader (leader: {:?})", .0.id)]
+    NotLeader(LeaderHint),
+    /// Another membership change is already in progress; retry later.
+    #[error("membership change already in progress")]
+    InProgress,
+    /// Invalid request (empty voters, unknown learner, or leader not ready).
+    #[error("invalid membership change: {0}")]
+    Invalid(String),
+    /// Leadership changed after the membership entry was proposed.
+    #[error("leadership changed after membership change was proposed; outcome unknown")]
+    OutcomeUnknown,
+    /// The node stopped.
+    #[error("the node stopped: {0}")]
+    Stopped(String),
+}
+
+pub(crate) fn membership_error<RT: AsyncRuntime>(
+    error: RaftError<Types<RT>, ClientWriteError<Types<RT>>>,
+) -> MembershipError {
+    match error {
+        RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => {
+            MembershipError::NotLeader(leader_hint(&forward))
+        }
+        RaftError::APIError(ClientWriteError::LogEntryDiscarded(_)) => {
+            MembershipError::OutcomeUnknown
+        }
+        RaftError::APIError(ClientWriteError::ChangeMembershipError(err)) => match err {
+            ChangeMembershipError::InProgress(_) => MembershipError::InProgress,
+            other => MembershipError::Invalid(other.to_string()),
+        },
+        RaftError::APIError(ClientWriteError::PreconditionFailed(err)) => {
+            MembershipError::Invalid(err.to_string())
+        }
+        RaftError::Fatal(fatal) => MembershipError::Stopped(fatal.to_string()),
     }
 }
 

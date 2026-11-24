@@ -170,6 +170,11 @@ pub trait Transport: Send + Sync + 'static {
     /// The snapshot data that this transport carries; the state machine's.
     type SnapshotData: Send + 'static;
 
+    /// Called when openraft creates a replication/RPC client for `id` with its
+    /// latest membership metadata (`PeerInfo`). Transports that maintain peer
+    /// channels use this to learn dynamically added nodes.
+    fn register_peer(&self, _id: NodeId, _peer: &PeerInfo) {}
+
     fn append_entries(
         &self,
         from: NodeId,
