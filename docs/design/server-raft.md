@@ -29,11 +29,11 @@ component, and its crates follow the internal naming rule
 
 | Crate | Directory | Visible to | Status |
 | --- | --- | --- | --- |
-| `server` (entry) | `lib/server` | `//bin/peppydb:` | Plan 0026; peer transport in S7 |
+| `server` (entry) | `lib/server` | `//bin/peppydb:` | Plan 0026; gRPC peer transport and Raft-backed `serve` in S7 (plan 0032) |
 | `server-raft` | `lib/server-raft` | `server`; the `:server-raft-sim` variant to `server`'s unit tests | This document |
 | `server-raft-log` | `lib/server-raft-log` | `server-raft`; the `:server-raft-log-sim` variant (`SimFs`) to `server-raft`'s unit tests | S5, plan 0029: the [on-disk Raft log](server-raft-log.md) |
 | `server-keys` | `lib/server-keys` | `server`, `server-raft` | S6, plan 0030: the key layout and the Raft system keys |
-| `raft-proto` | `proto/raft/v1/rust` | `server` | S7: `peppydb.raft.v1` |
+| `raft-proto` | `proto/raft/v1/rust` | `server` | S7, plan 0032: `peppydb.raft.v1` |
 
 ```mermaid
 flowchart TB
@@ -522,9 +522,9 @@ and `sched`) passed every step and explains the numbers:
   throughput grows by about two thirds while p50 doubles and p99 rises,
   so writes queue behind a per-node stage of the engine path. The CPU
   is not the limit: the cores were about 75% idle over the run. The
-  suspected stage is the engine checkpoint that `snapshot_after` (5,000
+  suspected stage was the engine checkpoint that `snapshot_after` (5,000
   entries) triggers about 20 times a second per node at this rate,
-  pausing the applier each time. This is not measured yet.
+  pausing the applier each time. The cluster runs below measure it.
 - **Timer lateness comes from `ModelSm`, not from CPU load.** Only
   `ModelSm` runs go past 2 ms at the 99th percentile: up to 24.7 ms in
   the table, and up to 33 ms (43 ms at worst) in the profiled run.
@@ -542,6 +542,87 @@ and `sched`) passed every step and explains the numbers:
 The log's own benchmarks are in
 [server Raft log](server-raft-log.md#measurements).
 
+### Three server VMs (`cluster-perf`)
+
+The first runs of `peppydb serve` as a 3-node cluster, one node per VM
+(2026-11-23, revision `7829ef75`, `@build/mode/release`,
+`tools/gcp-bench run --suite cluster-perf`). That revision is an earlier
+version of plan 0032's stack. The later version changes how a follower
+encodes `LeaderHint` in its `UNAVAILABLE` status; the benchmark meets
+that path only on its first redirect, so the numbers still apply.
+
+- **Servers:** three `c4d-standard-8-lssd` VMs (ext4 on Local SSD, Raft
+  log and store on the same disk), default settings, `server-1`
+  bootstrapped and leader for the whole run.
+- **Client:** `peppydb-load` on an `n4-standard-8` VM in the same zone,
+  following `LeaderHint`, so every request goes to the leader.
+- **Workload:** 8-byte keys, 16-byte values, 100,000 keys, 2 s warmup,
+  10 s per step, 4 connections. Compare with the single-node
+  [server measurements](server.md#linux-reference-separate-server-and-client-vms),
+  which use the same workload and machine types.
+
+Run `20261123-051011-7829ef75` uses the default snapshot policy (every
+5,000 entries). Run `20261123-051844-7829ef75` adds
+`--snapshot-after 1000000`, so each node builds one snapshot in the whole
+run.
+
+| Workload | Concurrency | Single node, ops/s | 3 nodes, ops/s | p50 | p99 | p99.9 | 3 nodes, `--snapshot-after 1000000`: ops/s, p50, p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| put | 1 | 4,297 | 2,797 | 360 µs | 459 µs | 655 µs | 2,627, 377 µs, 508 µs |
+| put | 16 | 51,637 | 26,515 | 524 µs | 852 µs | 31.5 ms | 15,753, 983 µs, 1.6 ms |
+| put | 64 | 116,371 | 54,919 | 721 µs | 32.5 ms | 33.6 ms | 21,085, 3.1 ms, 4.5 ms |
+| put | 256 | 194,833 | 81,909 | 1.4 ms | 35.7 ms | 35.7 ms | 52,416, 5.8 ms, 8.4 ms |
+| get (uniform) | 64 | 144,117 | 113,662 | 475 µs | 1.4 ms | 1.7 ms | 114,620, 475 µs, 1.4 ms |
+| mixed 90% get, zipf 1.1: put | 64 | 13,840 | 10,499 | 655 µs | 1.6 ms | 12.1 ms | 6,131, 2.0 ms, 3.1 ms |
+| mixed 90% get, zipf 1.1: get | 64 | 124,362 | 94,413 | 492 µs | 1.5 ms | 11.5 ms | 54,936, 885 µs, 1.8 ms |
+
+Both runs passed every step with no RPC errors. The term stayed the
+same on every node, so no election occurred, and the followers'
+`applied_index` matched `commit_index` at every scrape.
+
+- **A replicated put costs about 130 µs more than a local one.** With one
+  writer, p50 is 360 µs against 229 µs on one node: one round trip to a
+  follower and its log sync. The p99 of 459 µs shows none of the 5.7 ms
+  log-sync tail of the in-process runs above.
+- **Read-index reads are cheap.** `get` at concurrency 64 keeps the
+  single-node p99 and about 80% of its throughput: the quorum check of
+  `read_barrier` adds about 130 µs at p50.
+- **Each snapshot stops writes for about 32 ms.** `build` holds the
+  applier's gate while it commits an engine checkpoint and copies the
+  whole committed image into a `Vec` with `write_snapshot`
+  ([`DbStateMachine`](#dbstatemachine)). A put returns only after the
+  leader applies it, so every write in flight waits for the build. The
+  leader built 442 snapshots, up to 17 a second: p50 32.3 ms, p99
+  33.6 ms. The followers' builds are as long but do not delay commits.
+  At concurrency N, about N of every 5,000 puts wait for a build, which
+  matches where the tail appears: p99.9 at 16, p99 at 64 and 256. At
+  256, the applier is paused about half of each second, which also caps
+  throughput.
+- **Build time grows with the data.** The first build (about 5,000 keys)
+  took 2.7 ms, the build at about 60,000 entries 15 ms, and every build
+  after the 100,000-key space filled about 32 ms. In the zipf phase,
+  where writes touch few leaves, builds took about 11.5 ms. So the cost
+  includes the checkpoint's dirty pages and the copy of the whole image;
+  how much is each is not measured.
+- **Without snapshots, writes get slower as the run goes on.** With
+  `--snapshot-after 1000000` the 32 ms tail is gone, but the leader's put
+  handler time rises from about 10% above the default run at
+  concurrency 1 to 2.9 times at 64 (2.4 ms against 826 µs) and 4.4 times
+  in the mixed step. Reads alone do not change; reads in the mixed step
+  slow down because `read_barrier` waits for apply. The cause is not
+  measured. A likely one: the checkpoint's free step is the only thing
+  that frees superseded pages
+  ([shadow paging](bf-tree-persistence.md#shadow-paging)), so without
+  checkpoints every leaf write-through extends the store file, and the
+  file's growing metadata may also slow the Raft log's `fdatasync` on the
+  same ext4 file system. An off-CPU profile of this configuration would
+  confirm or refute it.
+- **Checkpoints must be cheap, not rare.** Frequent checkpoints recycle
+  pages but stop writes; rare ones avoid the stops but slow every write.
+  The stop also grows with the store: at gigabytes, a build that copies
+  the whole image would stop writes for seconds. The fixes are in
+  [Extension points](#extension-points).
+
 ## Extension points
 
 - **S5 (done, plan 0029):** `DiskLog` over `server-raft-log` replaces
@@ -550,6 +631,12 @@ The log's own benchmarks are in
   `Mode::External` replaces `ModelSm`, with the applier thread and the
   system keys in `server-keys`; the simulator runs it over `SimStore`.
 - **Soon:** snapshot data in a temporary file instead of a `Vec<u8>`.
+- **Next: cheap snapshots** (from the [cluster runs](#three-server-vms-cluster-perf)).
+  `build` should not copy the image, because `get_current_snapshot`
+  already writes the committed checkpoint on demand; the applier's gate
+  should cover only what pins the snapshot's log id, not the whole
+  checkpoint; and the policy should follow log size or time rather than
+  a count of 5,000 entries.
 - **S7:** `server` implements `Transport` over gRPC with `raft.v1`, and
   `serve` builds a `RaftNode` over `DiskLog` and `DbStateMachine`; the
   format marker moves under Raft; `server` checks key and value limits
