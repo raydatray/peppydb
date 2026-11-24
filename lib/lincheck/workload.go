@@ -27,6 +27,10 @@ type WorkloadConfig struct {
 	DeletePercent int
 	// OpTimeout bounds each individual RPC. Defaults to 2s.
 	OpTimeout time.Duration
+	// ErrorBackoff pauses a worker briefly after a failed RPC so transient
+	// failover windows do not flood a key with hundreds of overlapping
+	// unknown-outcome intervals in Porcupine. Defaults to 25ms.
+	ErrorBackoff time.Duration
 	// Seed seeds per-worker PRNGs deterministically. Defaults to 1.
 	Seed uint64
 	// Fault is an optional callback executed concurrently with the workload
@@ -50,6 +54,9 @@ func (c WorkloadConfig) withDefaults() WorkloadConfig {
 	}
 	if c.OpTimeout <= 0 {
 		c.OpTimeout = 2 * time.Second
+	}
+	if c.ErrorBackoff <= 0 {
+		c.ErrorBackoff = 25 * time.Millisecond
 	}
 	if c.Seed == 0 {
 		c.Seed = 1
@@ -86,10 +93,12 @@ func RunWorkload(ctx context.Context, client kvv1.KvServiceClient, cfg WorkloadC
 				opCtx, opCancel := context.WithTimeout(ctx, cfg.OpTimeout)
 				call := rec.Now()
 
+				var opErr error
 				switch {
 				case roll < cfg.ReadPercent:
 					resp, err := client.Get(opCtx, &kvv1.GetRequest{Key: []byte(key)})
 					ret := rec.Now()
+					opErr = err
 					if err == nil {
 						rec.RecordGet(w, key, call, ret, resp.Value != nil, string(resp.Value))
 					} else {
@@ -98,6 +107,7 @@ func RunWorkload(ctx context.Context, client kvv1.KvServiceClient, cfg WorkloadC
 				case roll < cfg.ReadPercent+cfg.DeletePercent:
 					_, err := client.Delete(opCtx, &kvv1.DeleteRequest{Key: []byte(key)})
 					ret := rec.Now()
+					opErr = err
 					if err == nil {
 						rec.RecordDelete(w, key, call, ret, false)
 					} else if status.Code(err) != codes.InvalidArgument {
@@ -111,6 +121,7 @@ func RunWorkload(ctx context.Context, client kvv1.KvServiceClient, cfg WorkloadC
 						Value: []byte(val),
 					})
 					ret := rec.Now()
+					opErr = err
 					if err == nil {
 						rec.RecordPut(w, key, val, call, ret, false)
 					} else if status.Code(err) != codes.InvalidArgument {
@@ -118,6 +129,9 @@ func RunWorkload(ctx context.Context, client kvv1.KvServiceClient, cfg WorkloadC
 					}
 				}
 				opCancel()
+				if opErr != nil {
+					sleepCtx(runCtx, cfg.ErrorBackoff)
+				}
 			}
 		})
 	}
