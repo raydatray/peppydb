@@ -256,6 +256,9 @@ impl Inner {
         match error {
             MembershipError::NotLeader(hint) => self.not_leader_status(hint),
             MembershipError::InProgress => Status::aborted("membership change already in progress"),
+            MembershipError::NotReady => Status::unavailable(
+                "leader has not yet committed an entry in its current term; retry",
+            ),
             MembershipError::Invalid(msg) => Status::invalid_argument(msg),
             MembershipError::OutcomeUnknown => {
                 Status::unavailable("membership change outcome unknown; retry")
