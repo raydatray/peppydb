@@ -16,5 +16,6 @@ go_library(
         "//bin/peppydb-load:",
         "//lib/gateway:",
         "//lib/gateway-kvclient:",
+        "//lib/lincheck:",
     ],
 )
