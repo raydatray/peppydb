@@ -10,8 +10,9 @@ use futures_util::Stream;
 use kv_proto::kv::v1::admin_service_server::AdminService;
 use kv_proto::kv::v1::snapshot_response::Payload;
 use kv_proto::kv::v1::{
+    AddLearnerRequest, AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse,
     CheckpointRequest, CheckpointResponse, SnapshotRequest, SnapshotResponse, SnapshotTrailer,
-    StatusRequest, StatusResponse,
+    StatusRequest, StatusResponse, TransferLeaderRequest, TransferLeaderResponse,
 };
 use tokio::sync::mpsc;
 use tonic::{Code, Request, Response, Status};
@@ -146,6 +147,8 @@ impl AdminService for Admin {
                 term: raft.term,
                 leader_id: raft.leader,
                 leader_addr,
+                voters: Vec::new(),
+                learners: Vec::new(),
             }))
         }
         .await;
@@ -238,5 +241,26 @@ impl AdminService for Admin {
             return Err(status);
         }
         Ok(Response::new(SnapshotStream { rx }))
+    }
+
+    async fn add_learner(
+        &self,
+        _request: Request<AddLearnerRequest>,
+    ) -> Result<Response<AddLearnerResponse>, Status> {
+        Err(Status::unimplemented("AddLearner not yet wired"))
+    }
+
+    async fn change_membership(
+        &self,
+        _request: Request<ChangeMembershipRequest>,
+    ) -> Result<Response<ChangeMembershipResponse>, Status> {
+        Err(Status::unimplemented("ChangeMembership not yet wired"))
+    }
+
+    async fn transfer_leader(
+        &self,
+        _request: Request<TransferLeaderRequest>,
+    ) -> Result<Response<TransferLeaderResponse>, Status> {
+        Err(Status::unimplemented("TransferLeader not yet wired"))
     }
 }
