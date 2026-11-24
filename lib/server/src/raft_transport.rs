@@ -14,9 +14,10 @@ use raft_proto::raft::v1::raft_service_server::RaftService;
 use raft_proto::raft::v1::{
     self as pb, AcceptedReply, AppendEntriesRequest, AppendEntriesResponse, BlankPayload,
     ConflictReply, InstallSnapshotHeader, InstallSnapshotRequest, InstallSnapshotResponse,
-    LogNotFlushed, PreVoteRequest, PreVoteResponse, TransferAccepted, TransferLeaderRequest,
-    TransferLeaderResponse, VoteChanged, VoteRequest as PbVoteRequest, VoteResponse, VoterSet,
-    append_entries_response, entry, install_snapshot_request, transfer_leader_response,
+    LogNotFlushed, PreVoteRequest, PreVoteResponse, SnapshotProgressRequest,
+    SnapshotProgressResponse, TransferAccepted, TransferLeaderRequest, TransferLeaderResponse,
+    VoteChanged, VoteRequest as PbVoteRequest, VoteResponse, VoterSet, append_entries_response,
+    entry, install_snapshot_request, transfer_leader_response,
 };
 use server_raft::transport::{
     AppendEntries, AppendReply, Entry, EntryPayload, LogId, MembershipConfig, SnapshotMeta,
@@ -160,6 +161,9 @@ impl Transport for GrpcTransport {
                     from,
                     vote: Some(pb_vote(vote)),
                     meta: Some(pb_snapshot_meta(meta)),
+                    offset: 0,
+                    total_bytes: data.len() as u64,
+                    crc32c: 0,
                 },
             )),
         };
@@ -305,6 +309,16 @@ impl RaftService for RaftRpcServer {
             .map_err(handle_status)?;
         Ok(Response::new(InstallSnapshotResponse {
             vote: Some(pb_vote(reply_vote)),
+        }))
+    }
+
+    async fn snapshot_progress(
+        &self,
+        _request: Request<SnapshotProgressRequest>,
+    ) -> Result<Response<SnapshotProgressResponse>, Status> {
+        Ok(Response::new(SnapshotProgressResponse {
+            vote: Some(pb_vote(self.node.status().vote)),
+            accepted_offset: 0,
         }))
     }
 
