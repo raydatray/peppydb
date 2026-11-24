@@ -285,9 +285,12 @@ var KvService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	AdminService_Status_FullMethodName     = "/peppydb.kv.v1.AdminService/Status"
-	AdminService_Checkpoint_FullMethodName = "/peppydb.kv.v1.AdminService/Checkpoint"
-	AdminService_Snapshot_FullMethodName   = "/peppydb.kv.v1.AdminService/Snapshot"
+	AdminService_Status_FullMethodName           = "/peppydb.kv.v1.AdminService/Status"
+	AdminService_Checkpoint_FullMethodName       = "/peppydb.kv.v1.AdminService/Checkpoint"
+	AdminService_Snapshot_FullMethodName         = "/peppydb.kv.v1.AdminService/Snapshot"
+	AdminService_AddLearner_FullMethodName       = "/peppydb.kv.v1.AdminService/AddLearner"
+	AdminService_ChangeMembership_FullMethodName = "/peppydb.kv.v1.AdminService/ChangeMembership"
+	AdminService_TransferLeader_FullMethodName   = "/peppydb.kv.v1.AdminService/TransferLeader"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -303,6 +306,12 @@ type AdminServiceClient interface {
 	// Stream the last committed checkpoint (or a fresh one if requested) as an
 	// openable engine store image, followed by a checksummed trailer.
 	Snapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotResponse], error)
+	// Add a non-voting learner to the Raft group. Leader-only; non-blocking.
+	AddLearner(ctx context.Context, in *AddLearnerRequest, opts ...grpc.CallOption) (*AddLearnerResponse, error)
+	// Change the Raft voting set via joint consensus. Leader-only.
+	ChangeMembership(ctx context.Context, in *ChangeMembershipRequest, opts ...grpc.CallOption) (*ChangeMembershipResponse, error)
+	// Hand leadership to target_node_id. Leader-only.
+	TransferLeader(ctx context.Context, in *TransferLeaderRequest, opts ...grpc.CallOption) (*TransferLeaderResponse, error)
 }
 
 type adminServiceClient struct {
@@ -352,6 +361,36 @@ func (c *adminServiceClient) Snapshot(ctx context.Context, in *SnapshotRequest, 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AdminService_SnapshotClient = grpc.ServerStreamingClient[SnapshotResponse]
 
+func (c *adminServiceClient) AddLearner(ctx context.Context, in *AddLearnerRequest, opts ...grpc.CallOption) (*AddLearnerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddLearnerResponse)
+	err := c.cc.Invoke(ctx, AdminService_AddLearner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) ChangeMembership(ctx context.Context, in *ChangeMembershipRequest, opts ...grpc.CallOption) (*ChangeMembershipResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ChangeMembershipResponse)
+	err := c.cc.Invoke(ctx, AdminService_ChangeMembership_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) TransferLeader(ctx context.Context, in *TransferLeaderRequest, opts ...grpc.CallOption) (*TransferLeaderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransferLeaderResponse)
+	err := c.cc.Invoke(ctx, AdminService_TransferLeader_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -365,6 +404,12 @@ type AdminServiceServer interface {
 	// Stream the last committed checkpoint (or a fresh one if requested) as an
 	// openable engine store image, followed by a checksummed trailer.
 	Snapshot(*SnapshotRequest, grpc.ServerStreamingServer[SnapshotResponse]) error
+	// Add a non-voting learner to the Raft group. Leader-only; non-blocking.
+	AddLearner(context.Context, *AddLearnerRequest) (*AddLearnerResponse, error)
+	// Change the Raft voting set via joint consensus. Leader-only.
+	ChangeMembership(context.Context, *ChangeMembershipRequest) (*ChangeMembershipResponse, error)
+	// Hand leadership to target_node_id. Leader-only.
+	TransferLeader(context.Context, *TransferLeaderRequest) (*TransferLeaderResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -383,6 +428,15 @@ func (UnimplementedAdminServiceServer) Checkpoint(context.Context, *CheckpointRe
 }
 func (UnimplementedAdminServiceServer) Snapshot(*SnapshotRequest, grpc.ServerStreamingServer[SnapshotResponse]) error {
 	return status.Error(codes.Unimplemented, "method Snapshot not implemented")
+}
+func (UnimplementedAdminServiceServer) AddLearner(context.Context, *AddLearnerRequest) (*AddLearnerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddLearner not implemented")
+}
+func (UnimplementedAdminServiceServer) ChangeMembership(context.Context, *ChangeMembershipRequest) (*ChangeMembershipResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChangeMembership not implemented")
+}
+func (UnimplementedAdminServiceServer) TransferLeader(context.Context, *TransferLeaderRequest) (*TransferLeaderResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TransferLeader not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -452,6 +506,60 @@ func _AdminService_Snapshot_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AdminService_SnapshotServer = grpc.ServerStreamingServer[SnapshotResponse]
 
+func _AdminService_AddLearner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddLearnerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).AddLearner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_AddLearner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).AddLearner(ctx, req.(*AddLearnerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_ChangeMembership_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ChangeMembershipRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).ChangeMembership(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_ChangeMembership_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).ChangeMembership(ctx, req.(*ChangeMembershipRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_TransferLeader_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransferLeaderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).TransferLeader(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_TransferLeader_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).TransferLeader(ctx, req.(*TransferLeaderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -466,6 +574,18 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Checkpoint",
 			Handler:    _AdminService_Checkpoint_Handler,
+		},
+		{
+			MethodName: "AddLearner",
+			Handler:    _AdminService_AddLearner_Handler,
+		},
+		{
+			MethodName: "ChangeMembership",
+			Handler:    _AdminService_ChangeMembership_Handler,
+		},
+		{
+			MethodName: "TransferLeader",
+			Handler:    _AdminService_TransferLeader_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

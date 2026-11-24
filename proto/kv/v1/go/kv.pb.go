@@ -565,6 +565,67 @@ func (x *LeaderHint) GetLeaderAddr() string {
 	return ""
 }
 
+type MemberInfo struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Addr   string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"`
+	// Last Raft log index matched on this peer; populated on the leader only.
+	MatchIndex    *uint64 `protobuf:"varint,3,opt,name=match_index,json=matchIndex,proto3,oneof" json:"match_index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemberInfo) Reset() {
+	*x = MemberInfo{}
+	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemberInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemberInfo) ProtoMessage() {}
+
+func (x *MemberInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemberInfo.ProtoReflect.Descriptor instead.
+func (*MemberInfo) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *MemberInfo) GetNodeId() uint64 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *MemberInfo) GetAddr() string {
+	if x != nil {
+		return x.Addr
+	}
+	return ""
+}
+
+func (x *MemberInfo) GetMatchIndex() uint64 {
+	if x != nil && x.MatchIndex != nil {
+		return *x.MatchIndex
+	}
+	return 0
+}
+
 type StatusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Every write with a sequence at or below this is applied.
@@ -580,14 +641,18 @@ type StatusResponse struct {
 	// Known leader id, if any.
 	LeaderId *uint64 `protobuf:"varint,6,opt,name=leader_id,json=leaderId,proto3,oneof" json:"leader_id,omitempty"`
 	// Known leader address, if any.
-	LeaderAddr    *string `protobuf:"bytes,7,opt,name=leader_addr,json=leaderAddr,proto3,oneof" json:"leader_addr,omitempty"`
+	LeaderAddr *string `protobuf:"bytes,7,opt,name=leader_addr,json=leaderAddr,proto3,oneof" json:"leader_addr,omitempty"`
+	// Current voting members of the Raft group.
+	Voters []*MemberInfo `protobuf:"bytes,8,rep,name=voters,proto3" json:"voters,omitempty"`
+	// Current non-voting learners of the Raft group.
+	Learners      []*MemberInfo `protobuf:"bytes,9,rep,name=learners,proto3" json:"learners,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	mi := &file_kv_v1_kv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -599,7 +664,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[11]
+	mi := &file_kv_v1_kv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -612,7 +677,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{11}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StatusResponse) GetAppliedSeq() uint64 {
@@ -664,6 +729,278 @@ func (x *StatusResponse) GetLeaderAddr() string {
 	return ""
 }
 
+func (x *StatusResponse) GetVoters() []*MemberInfo {
+	if x != nil {
+		return x.Voters
+	}
+	return nil
+}
+
+func (x *StatusResponse) GetLearners() []*MemberInfo {
+	if x != nil {
+		return x.Learners
+	}
+	return nil
+}
+
+type AddLearnerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Addr          string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddLearnerRequest) Reset() {
+	*x = AddLearnerRequest{}
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddLearnerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddLearnerRequest) ProtoMessage() {}
+
+func (x *AddLearnerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddLearnerRequest.ProtoReflect.Descriptor instead.
+func (*AddLearnerRequest) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *AddLearnerRequest) GetNodeId() uint64 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *AddLearnerRequest) GetAddr() string {
+	if x != nil {
+		return x.Addr
+	}
+	return ""
+}
+
+type AddLearnerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddLearnerResponse) Reset() {
+	*x = AddLearnerResponse{}
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddLearnerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddLearnerResponse) ProtoMessage() {}
+
+func (x *AddLearnerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddLearnerResponse.ProtoReflect.Descriptor instead.
+func (*AddLearnerResponse) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{14}
+}
+
+type ChangeMembershipRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Complete target voting set (every id must be a known voter or learner).
+	VoterIds []uint64 `protobuf:"varint,1,rep,packed,name=voter_ids,json=voterIds,proto3" json:"voter_ids,omitempty"`
+	// Keep removed voters as learners when true; remove them otherwise.
+	RetainLearners bool `protobuf:"varint,2,opt,name=retain_learners,json=retainLearners,proto3" json:"retain_learners,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ChangeMembershipRequest) Reset() {
+	*x = ChangeMembershipRequest{}
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeMembershipRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeMembershipRequest) ProtoMessage() {}
+
+func (x *ChangeMembershipRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeMembershipRequest.ProtoReflect.Descriptor instead.
+func (*ChangeMembershipRequest) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ChangeMembershipRequest) GetVoterIds() []uint64 {
+	if x != nil {
+		return x.VoterIds
+	}
+	return nil
+}
+
+func (x *ChangeMembershipRequest) GetRetainLearners() bool {
+	if x != nil {
+		return x.RetainLearners
+	}
+	return false
+}
+
+type ChangeMembershipResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeMembershipResponse) Reset() {
+	*x = ChangeMembershipResponse{}
+	mi := &file_kv_v1_kv_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeMembershipResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeMembershipResponse) ProtoMessage() {}
+
+func (x *ChangeMembershipResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeMembershipResponse.ProtoReflect.Descriptor instead.
+func (*ChangeMembershipResponse) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{16}
+}
+
+type TransferLeaderRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TargetNodeId  uint64                 `protobuf:"varint,1,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransferLeaderRequest) Reset() {
+	*x = TransferLeaderRequest{}
+	mi := &file_kv_v1_kv_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferLeaderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferLeaderRequest) ProtoMessage() {}
+
+func (x *TransferLeaderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferLeaderRequest.ProtoReflect.Descriptor instead.
+func (*TransferLeaderRequest) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *TransferLeaderRequest) GetTargetNodeId() uint64 {
+	if x != nil {
+		return x.TargetNodeId
+	}
+	return 0
+}
+
+type TransferLeaderResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransferLeaderResponse) Reset() {
+	*x = TransferLeaderResponse{}
+	mi := &file_kv_v1_kv_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferLeaderResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferLeaderResponse) ProtoMessage() {}
+
+func (x *TransferLeaderResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kv_v1_kv_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferLeaderResponse.ProtoReflect.Descriptor instead.
+func (*TransferLeaderResponse) Descriptor() ([]byte, []int) {
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{18}
+}
+
 type CheckpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -672,7 +1009,7 @@ type CheckpointRequest struct {
 
 func (x *CheckpointRequest) Reset() {
 	*x = CheckpointRequest{}
-	mi := &file_kv_v1_kv_proto_msgTypes[12]
+	mi := &file_kv_v1_kv_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -684,7 +1021,7 @@ func (x *CheckpointRequest) String() string {
 func (*CheckpointRequest) ProtoMessage() {}
 
 func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[12]
+	mi := &file_kv_v1_kv_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -697,7 +1034,7 @@ func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointRequest.ProtoReflect.Descriptor instead.
 func (*CheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{12}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{19}
 }
 
 type CheckpointResponse struct {
@@ -712,7 +1049,7 @@ type CheckpointResponse struct {
 
 func (x *CheckpointResponse) Reset() {
 	*x = CheckpointResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	mi := &file_kv_v1_kv_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +1061,7 @@ func (x *CheckpointResponse) String() string {
 func (*CheckpointResponse) ProtoMessage() {}
 
 func (x *CheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[13]
+	mi := &file_kv_v1_kv_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +1074,7 @@ func (x *CheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointResponse.ProtoReflect.Descriptor instead.
 func (*CheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{13}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CheckpointResponse) GetAppliedSeq() uint64 {
@@ -766,7 +1103,7 @@ type SnapshotRequest struct {
 
 func (x *SnapshotRequest) Reset() {
 	*x = SnapshotRequest{}
-	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	mi := &file_kv_v1_kv_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -778,7 +1115,7 @@ func (x *SnapshotRequest) String() string {
 func (*SnapshotRequest) ProtoMessage() {}
 
 func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[14]
+	mi := &file_kv_v1_kv_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -791,7 +1128,7 @@ func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{14}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SnapshotRequest) GetCheckpoint() bool {
@@ -814,7 +1151,7 @@ type SnapshotResponse struct {
 
 func (x *SnapshotResponse) Reset() {
 	*x = SnapshotResponse{}
-	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	mi := &file_kv_v1_kv_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -826,7 +1163,7 @@ func (x *SnapshotResponse) String() string {
 func (*SnapshotResponse) ProtoMessage() {}
 
 func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[15]
+	mi := &file_kv_v1_kv_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -839,7 +1176,7 @@ func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{15}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SnapshotResponse) GetPayload() isSnapshotResponse_Payload {
@@ -902,7 +1239,7 @@ type SnapshotTrailer struct {
 
 func (x *SnapshotTrailer) Reset() {
 	*x = SnapshotTrailer{}
-	mi := &file_kv_v1_kv_proto_msgTypes[16]
+	mi := &file_kv_v1_kv_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -914,7 +1251,7 @@ func (x *SnapshotTrailer) String() string {
 func (*SnapshotTrailer) ProtoMessage() {}
 
 func (x *SnapshotTrailer) ProtoReflect() protoreflect.Message {
-	mi := &file_kv_v1_kv_proto_msgTypes[16]
+	mi := &file_kv_v1_kv_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -927,7 +1264,7 @@ func (x *SnapshotTrailer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotTrailer.ProtoReflect.Descriptor instead.
 func (*SnapshotTrailer) Descriptor() ([]byte, []int) {
-	return file_kv_v1_kv_proto_rawDescGZIP(), []int{16}
+	return file_kv_v1_kv_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SnapshotTrailer) GetAppliedSeq() uint64 {
@@ -996,7 +1333,14 @@ const file_kv_v1_kv_proto_rawDesc = "" +
 	"LeaderHint\x12\x1b\n" +
 	"\tleader_id\x18\x01 \x01(\x04R\bleaderId\x12\x1f\n" +
 	"\vleader_addr\x18\x02 \x01(\tR\n" +
-	"leaderAddr\"\xf2\x01\n" +
+	"leaderAddr\"o\n" +
+	"\n" +
+	"MemberInfo\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x12\n" +
+	"\x04addr\x18\x02 \x01(\tR\x04addr\x12$\n" +
+	"\vmatch_index\x18\x03 \x01(\x04H\x00R\n" +
+	"matchIndex\x88\x01\x01B\x0e\n" +
+	"\f_match_index\"\xdc\x02\n" +
 	"\x0eStatusResponse\x12\x1f\n" +
 	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
 	"appliedSeq\x12\x18\n" +
@@ -1006,10 +1350,23 @@ const file_kv_v1_kv_proto_rawDesc = "" +
 	"\x04term\x18\x05 \x01(\x04R\x04term\x12 \n" +
 	"\tleader_id\x18\x06 \x01(\x04H\x00R\bleaderId\x88\x01\x01\x12$\n" +
 	"\vleader_addr\x18\a \x01(\tH\x01R\n" +
-	"leaderAddr\x88\x01\x01B\f\n" +
+	"leaderAddr\x88\x01\x01\x121\n" +
+	"\x06voters\x18\b \x03(\v2\x19.peppydb.kv.v1.MemberInfoR\x06voters\x125\n" +
+	"\blearners\x18\t \x03(\v2\x19.peppydb.kv.v1.MemberInfoR\blearnersB\f\n" +
 	"\n" +
 	"_leader_idB\x0e\n" +
-	"\f_leader_addr\"\x13\n" +
+	"\f_leader_addr\"@\n" +
+	"\x11AddLearnerRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x12\n" +
+	"\x04addr\x18\x02 \x01(\tR\x04addr\"\x14\n" +
+	"\x12AddLearnerResponse\"_\n" +
+	"\x17ChangeMembershipRequest\x12\x1b\n" +
+	"\tvoter_ids\x18\x01 \x03(\x04R\bvoterIds\x12'\n" +
+	"\x0fretain_learners\x18\x02 \x01(\bR\x0eretainLearners\"\x1a\n" +
+	"\x18ChangeMembershipResponse\"=\n" +
+	"\x15TransferLeaderRequest\x12$\n" +
+	"\x0etarget_node_id\x18\x01 \x01(\x04R\ftargetNodeId\"\x18\n" +
+	"\x16TransferLeaderResponse\"\x13\n" +
 	"\x11CheckpointRequest\"Z\n" +
 	"\x12CheckpointResponse\x12\x1f\n" +
 	"\vapplied_seq\x18\x01 \x01(\x04R\n" +
@@ -1034,12 +1391,16 @@ const file_kv_v1_kv_proto_rawDesc = "" +
 	"\x03Get\x12\x19.peppydb.kv.v1.GetRequest\x1a\x1a.peppydb.kv.v1.GetResponse\x12<\n" +
 	"\x03Put\x12\x19.peppydb.kv.v1.PutRequest\x1a\x1a.peppydb.kv.v1.PutResponse\x12E\n" +
 	"\x06Delete\x12\x1c.peppydb.kv.v1.DeleteRequest\x1a\x1d.peppydb.kv.v1.DeleteResponse\x12?\n" +
-	"\x04Scan\x12\x1a.peppydb.kv.v1.ScanRequest\x1a\x1b.peppydb.kv.v1.ScanResponse2\xf7\x01\n" +
+	"\x04Scan\x12\x1a.peppydb.kv.v1.ScanRequest\x1a\x1b.peppydb.kv.v1.ScanResponse2\x8e\x04\n" +
 	"\fAdminService\x12E\n" +
 	"\x06Status\x12\x1c.peppydb.kv.v1.StatusRequest\x1a\x1d.peppydb.kv.v1.StatusResponse\x12Q\n" +
 	"\n" +
 	"Checkpoint\x12 .peppydb.kv.v1.CheckpointRequest\x1a!.peppydb.kv.v1.CheckpointResponse\x12M\n" +
-	"\bSnapshot\x12\x1e.peppydb.kv.v1.SnapshotRequest\x1a\x1f.peppydb.kv.v1.SnapshotResponse0\x01B\x1dZ\x1bpeppydb/proto/kv/v1/go;kvv1b\x06proto3"
+	"\bSnapshot\x12\x1e.peppydb.kv.v1.SnapshotRequest\x1a\x1f.peppydb.kv.v1.SnapshotResponse0\x01\x12Q\n" +
+	"\n" +
+	"AddLearner\x12 .peppydb.kv.v1.AddLearnerRequest\x1a!.peppydb.kv.v1.AddLearnerResponse\x12c\n" +
+	"\x10ChangeMembership\x12&.peppydb.kv.v1.ChangeMembershipRequest\x1a'.peppydb.kv.v1.ChangeMembershipResponse\x12]\n" +
+	"\x0eTransferLeader\x12$.peppydb.kv.v1.TransferLeaderRequest\x1a%.peppydb.kv.v1.TransferLeaderResponseB\x1dZ\x1bpeppydb/proto/kv/v1/go;kvv1b\x06proto3"
 
 var (
 	file_kv_v1_kv_proto_rawDescOnce sync.Once
@@ -1053,48 +1414,63 @@ func file_kv_v1_kv_proto_rawDescGZIP() []byte {
 	return file_kv_v1_kv_proto_rawDescData
 }
 
-var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_kv_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_kv_v1_kv_proto_goTypes = []any{
-	(*GetRequest)(nil),         // 0: peppydb.kv.v1.GetRequest
-	(*GetResponse)(nil),        // 1: peppydb.kv.v1.GetResponse
-	(*PutRequest)(nil),         // 2: peppydb.kv.v1.PutRequest
-	(*PutResponse)(nil),        // 3: peppydb.kv.v1.PutResponse
-	(*DeleteRequest)(nil),      // 4: peppydb.kv.v1.DeleteRequest
-	(*DeleteResponse)(nil),     // 5: peppydb.kv.v1.DeleteResponse
-	(*ScanRequest)(nil),        // 6: peppydb.kv.v1.ScanRequest
-	(*KeyValue)(nil),           // 7: peppydb.kv.v1.KeyValue
-	(*ScanResponse)(nil),       // 8: peppydb.kv.v1.ScanResponse
-	(*StatusRequest)(nil),      // 9: peppydb.kv.v1.StatusRequest
-	(*LeaderHint)(nil),         // 10: peppydb.kv.v1.LeaderHint
-	(*StatusResponse)(nil),     // 11: peppydb.kv.v1.StatusResponse
-	(*CheckpointRequest)(nil),  // 12: peppydb.kv.v1.CheckpointRequest
-	(*CheckpointResponse)(nil), // 13: peppydb.kv.v1.CheckpointResponse
-	(*SnapshotRequest)(nil),    // 14: peppydb.kv.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),   // 15: peppydb.kv.v1.SnapshotResponse
-	(*SnapshotTrailer)(nil),    // 16: peppydb.kv.v1.SnapshotTrailer
+	(*GetRequest)(nil),               // 0: peppydb.kv.v1.GetRequest
+	(*GetResponse)(nil),              // 1: peppydb.kv.v1.GetResponse
+	(*PutRequest)(nil),               // 2: peppydb.kv.v1.PutRequest
+	(*PutResponse)(nil),              // 3: peppydb.kv.v1.PutResponse
+	(*DeleteRequest)(nil),            // 4: peppydb.kv.v1.DeleteRequest
+	(*DeleteResponse)(nil),           // 5: peppydb.kv.v1.DeleteResponse
+	(*ScanRequest)(nil),              // 6: peppydb.kv.v1.ScanRequest
+	(*KeyValue)(nil),                 // 7: peppydb.kv.v1.KeyValue
+	(*ScanResponse)(nil),             // 8: peppydb.kv.v1.ScanResponse
+	(*StatusRequest)(nil),            // 9: peppydb.kv.v1.StatusRequest
+	(*LeaderHint)(nil),               // 10: peppydb.kv.v1.LeaderHint
+	(*MemberInfo)(nil),               // 11: peppydb.kv.v1.MemberInfo
+	(*StatusResponse)(nil),           // 12: peppydb.kv.v1.StatusResponse
+	(*AddLearnerRequest)(nil),        // 13: peppydb.kv.v1.AddLearnerRequest
+	(*AddLearnerResponse)(nil),       // 14: peppydb.kv.v1.AddLearnerResponse
+	(*ChangeMembershipRequest)(nil),  // 15: peppydb.kv.v1.ChangeMembershipRequest
+	(*ChangeMembershipResponse)(nil), // 16: peppydb.kv.v1.ChangeMembershipResponse
+	(*TransferLeaderRequest)(nil),    // 17: peppydb.kv.v1.TransferLeaderRequest
+	(*TransferLeaderResponse)(nil),   // 18: peppydb.kv.v1.TransferLeaderResponse
+	(*CheckpointRequest)(nil),        // 19: peppydb.kv.v1.CheckpointRequest
+	(*CheckpointResponse)(nil),       // 20: peppydb.kv.v1.CheckpointResponse
+	(*SnapshotRequest)(nil),          // 21: peppydb.kv.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),         // 22: peppydb.kv.v1.SnapshotResponse
+	(*SnapshotTrailer)(nil),          // 23: peppydb.kv.v1.SnapshotTrailer
 }
 var file_kv_v1_kv_proto_depIdxs = []int32{
 	7,  // 0: peppydb.kv.v1.ScanResponse.records:type_name -> peppydb.kv.v1.KeyValue
-	16, // 1: peppydb.kv.v1.SnapshotResponse.trailer:type_name -> peppydb.kv.v1.SnapshotTrailer
-	0,  // 2: peppydb.kv.v1.KvService.Get:input_type -> peppydb.kv.v1.GetRequest
-	2,  // 3: peppydb.kv.v1.KvService.Put:input_type -> peppydb.kv.v1.PutRequest
-	4,  // 4: peppydb.kv.v1.KvService.Delete:input_type -> peppydb.kv.v1.DeleteRequest
-	6,  // 5: peppydb.kv.v1.KvService.Scan:input_type -> peppydb.kv.v1.ScanRequest
-	9,  // 6: peppydb.kv.v1.AdminService.Status:input_type -> peppydb.kv.v1.StatusRequest
-	12, // 7: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
-	14, // 8: peppydb.kv.v1.AdminService.Snapshot:input_type -> peppydb.kv.v1.SnapshotRequest
-	1,  // 9: peppydb.kv.v1.KvService.Get:output_type -> peppydb.kv.v1.GetResponse
-	3,  // 10: peppydb.kv.v1.KvService.Put:output_type -> peppydb.kv.v1.PutResponse
-	5,  // 11: peppydb.kv.v1.KvService.Delete:output_type -> peppydb.kv.v1.DeleteResponse
-	8,  // 12: peppydb.kv.v1.KvService.Scan:output_type -> peppydb.kv.v1.ScanResponse
-	11, // 13: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
-	13, // 14: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
-	15, // 15: peppydb.kv.v1.AdminService.Snapshot:output_type -> peppydb.kv.v1.SnapshotResponse
-	9,  // [9:16] is the sub-list for method output_type
-	2,  // [2:9] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	11, // 1: peppydb.kv.v1.StatusResponse.voters:type_name -> peppydb.kv.v1.MemberInfo
+	11, // 2: peppydb.kv.v1.StatusResponse.learners:type_name -> peppydb.kv.v1.MemberInfo
+	23, // 3: peppydb.kv.v1.SnapshotResponse.trailer:type_name -> peppydb.kv.v1.SnapshotTrailer
+	0,  // 4: peppydb.kv.v1.KvService.Get:input_type -> peppydb.kv.v1.GetRequest
+	2,  // 5: peppydb.kv.v1.KvService.Put:input_type -> peppydb.kv.v1.PutRequest
+	4,  // 6: peppydb.kv.v1.KvService.Delete:input_type -> peppydb.kv.v1.DeleteRequest
+	6,  // 7: peppydb.kv.v1.KvService.Scan:input_type -> peppydb.kv.v1.ScanRequest
+	9,  // 8: peppydb.kv.v1.AdminService.Status:input_type -> peppydb.kv.v1.StatusRequest
+	19, // 9: peppydb.kv.v1.AdminService.Checkpoint:input_type -> peppydb.kv.v1.CheckpointRequest
+	21, // 10: peppydb.kv.v1.AdminService.Snapshot:input_type -> peppydb.kv.v1.SnapshotRequest
+	13, // 11: peppydb.kv.v1.AdminService.AddLearner:input_type -> peppydb.kv.v1.AddLearnerRequest
+	15, // 12: peppydb.kv.v1.AdminService.ChangeMembership:input_type -> peppydb.kv.v1.ChangeMembershipRequest
+	17, // 13: peppydb.kv.v1.AdminService.TransferLeader:input_type -> peppydb.kv.v1.TransferLeaderRequest
+	1,  // 14: peppydb.kv.v1.KvService.Get:output_type -> peppydb.kv.v1.GetResponse
+	3,  // 15: peppydb.kv.v1.KvService.Put:output_type -> peppydb.kv.v1.PutResponse
+	5,  // 16: peppydb.kv.v1.KvService.Delete:output_type -> peppydb.kv.v1.DeleteResponse
+	8,  // 17: peppydb.kv.v1.KvService.Scan:output_type -> peppydb.kv.v1.ScanResponse
+	12, // 18: peppydb.kv.v1.AdminService.Status:output_type -> peppydb.kv.v1.StatusResponse
+	20, // 19: peppydb.kv.v1.AdminService.Checkpoint:output_type -> peppydb.kv.v1.CheckpointResponse
+	22, // 20: peppydb.kv.v1.AdminService.Snapshot:output_type -> peppydb.kv.v1.SnapshotResponse
+	14, // 21: peppydb.kv.v1.AdminService.AddLearner:output_type -> peppydb.kv.v1.AddLearnerResponse
+	16, // 22: peppydb.kv.v1.AdminService.ChangeMembership:output_type -> peppydb.kv.v1.ChangeMembershipResponse
+	18, // 23: peppydb.kv.v1.AdminService.TransferLeader:output_type -> peppydb.kv.v1.TransferLeaderResponse
+	14, // [14:24] is the sub-list for method output_type
+	4,  // [4:14] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_kv_v1_kv_proto_init() }
@@ -1106,7 +1482,8 @@ func file_kv_v1_kv_proto_init() {
 	file_kv_v1_kv_proto_msgTypes[6].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[8].OneofWrappers = []any{}
 	file_kv_v1_kv_proto_msgTypes[11].OneofWrappers = []any{}
-	file_kv_v1_kv_proto_msgTypes[15].OneofWrappers = []any{
+	file_kv_v1_kv_proto_msgTypes[12].OneofWrappers = []any{}
+	file_kv_v1_kv_proto_msgTypes[22].OneofWrappers = []any{
 		(*SnapshotResponse_Chunk)(nil),
 		(*SnapshotResponse_Trailer)(nil),
 	}
@@ -1116,7 +1493,7 @@ func file_kv_v1_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kv_v1_kv_proto_rawDesc), len(file_kv_v1_kv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

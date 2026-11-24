@@ -14,8 +14,11 @@ service RaftService {
   rpc Vote(VoteRequest) returns (VoteResponse);
   // Pre-vote check before raising the candidate's term.
   rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
-  // Stream a complete engine snapshot to a lagging follower.
+  // Stream a complete (or resumed) engine snapshot to a lagging follower.
   rpc InstallSnapshot(stream InstallSnapshotRequest) returns (InstallSnapshotResponse);
+  // Query how many contiguous verified bytes the receiver already staged for
+  // a snapshot so InstallSnapshot can resume after a disconnect.
+  rpc SnapshotProgress(SnapshotProgressRequest) returns (SnapshotProgressResponse);
   // Ask the target follower to take over leadership.
   rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
 }
@@ -118,6 +121,26 @@ message InstallSnapshotHeader {
   uint64 from = 1;
   Vote vote = 2;
   SnapshotMeta meta = 3;
+  // Byte offset within the snapshot file where the following chunks begin.
+  uint64 offset = 4;
+  // Total byte length of the complete snapshot file (0 if omitted by legacy sender).
+  uint64 total_bytes = 5;
+  // Castagnoli CRC32C over the complete snapshot file.
+  uint32 crc32c = 6;
+}
+
+message SnapshotProgressRequest {
+  uint64 from = 1;
+  Vote vote = 2;
+  LogId last = 3;
+  uint64 total_bytes = 4;
+  uint32 crc32c = 5;
+}
+
+message SnapshotProgressResponse {
+  Vote vote = 1;
+  // Contiguous byte offset already staged on the receiver for this snapshot.
+  uint64 accepted_offset = 2;
 }
 
 message InstallSnapshotRequest {
