@@ -80,7 +80,10 @@ pub enum MembershipError {
     /// Another membership change is already in progress; retry later.
     #[error("membership change already in progress")]
     InProgress,
-    /// Invalid request (empty voters, unknown learner, or leader not ready).
+    /// The leader has not yet committed an entry in its current term; retry shortly.
+    #[error("leader has not yet committed an entry in its current term")]
+    NotReady,
+    /// Invalid request (empty voters, unknown learner, or unsupported transition).
     #[error("invalid membership change: {0}")]
     Invalid(String),
     /// Leadership changed after the membership entry was proposed.
@@ -103,6 +106,7 @@ pub(crate) fn membership_error<RT: AsyncRuntime>(
         }
         RaftError::APIError(ClientWriteError::ChangeMembershipError(err)) => match err {
             ChangeMembershipError::InProgress(_) => MembershipError::InProgress,
+            ChangeMembershipError::UncommittedLeaderLog(_) => MembershipError::NotReady,
             other => MembershipError::Invalid(other.to_string()),
         },
         RaftError::APIError(ClientWriteError::PreconditionFailed(err)) => {
