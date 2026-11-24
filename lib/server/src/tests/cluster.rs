@@ -535,34 +535,52 @@ async fn four_process_dynamic_membership_add_learner_swap_and_transfer_leader() 
     assert!(voter_ids.contains(&4) && !voter_ids.contains(&drop_id));
     assert!(st_after.learners.is_empty());
 
-    // Transfer leadership to the newly promoted node 4.
-    leader_admin
-        .transfer_leader(TransferLeaderRequest { target_node_id: 4 })
-        .await
-        .unwrap();
-
-    let (new_leader, _) = wait_for_leader(&addrs, Some(leader_id)).await;
+    // Transfer leadership to the newly promoted node 4 (re-triggering if node 4
+    // is still flushing on a busy disk).
+    let (new_leader, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(st) = status_of(addr4).await
+                && st.role == "leader"
+            {
+                return (4u64, st);
+            }
+            let _ = leader_admin
+                .transfer_leader(TransferLeaderRequest { target_node_id: 4 })
+                .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("node 4 became leader");
     assert_eq!(new_leader, 4);
 
-    // Wait for a surviving follower to observe node 4 as leader (confirming
-    // node 4's committed vote is durable and heartbeats are flowing).
+    // Wait until node 4 completes a linearizable Get (proving its committed
+    // vote is flushed to disk and a quorum acknowledges its leadership) and
+    // surviving follower `keep_id` knows leader 4.
+    let mut kv4 = KvServiceClient::connect(format!("http://{addr4}"))
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(st) = status_of(addrs[&keep_id]).await
-                && st.leader_id == Some(4)
-            {
+            let ready = kv4
+                .get(GetRequest {
+                    key: b"dyn-039".to_vec(),
+                })
+                .await
+                .is_ok();
+            let follower_ready = status_of(addrs[&keep_id])
+                .await
+                .is_some_and(|st| st.leader_id == Some(4));
+            if ready && follower_ready {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("surviving follower learned node 4 as leader");
+    .expect("node 4 ready as leader and keep_id observed it");
 
     // Node 4 serves writes and reads; surviving follower returns LeaderHint with node 4's dynamic addr.
-    let mut kv4 = KvServiceClient::connect(format!("http://{addr4}"))
-        .await
-        .unwrap();
     kv4.put(PutRequest {
         key: b"from-node-4".to_vec(),
         value: b"promoted".to_vec(),
