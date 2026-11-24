@@ -1,0 +1,36 @@
+# Entry package for the peppydb stateless gateway component (plan 0033).
+go_library(
+    name = "gateway",
+    package_name = "peppydb/lib/gateway",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    deps = [
+        "//lib/gateway-kvclient:gateway-kvclient",
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:github.com/prometheus/client_golang/prometheus",
+        "//third-party/go:github.com/prometheus/client_golang/prometheus/collectors",
+        "//third-party/go:github.com/prometheus/client_golang/prometheus/promhttp",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/health",
+        "//third-party/go:google.golang.org/grpc/health/grpc_health_v1",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+    visibility = [
+        "//bin/peppydb-gateway:",
+    ],
+)
+
+go_test(
+    name = "gateway-test",
+    srcs = glob(["*_test.go"]),
+    cgo_enabled = False,
+    target_under_test = ":gateway",
+    deps = [
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/credentials/insecure",
+        "//third-party/go:google.golang.org/grpc/health/grpc_health_v1",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+)
