@@ -9,4 +9,5 @@ engine-wal-unittest              //lib/engine-wal:engine-wal-unittest
 server-raft-log-unittest         //lib/server-raft-log:server-raft-log-unittest
 server-raft-unittest             //lib/server-raft:server-raft-unittest
 peppydb                          //bin/peppydb:peppydb
+peppydb-gateway                  //bin/peppydb-gateway:peppydb-gateway
 peppydb-load                     //bin/peppydb-load:peppydb-load
