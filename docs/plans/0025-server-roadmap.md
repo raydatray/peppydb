@@ -1,6 +1,6 @@
 # 0025: Server implementation roadmap
 
-**Status:** In progress
+**Status:** Complete (phase 2 complete; S9 follower reads deferred with engine MVCC)
 
 **Design references:** [Project direction](../design/architecture.md),
 [engine](../design/engine.md) (especially
@@ -126,7 +126,7 @@ commits or reserved plan numbers.
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix purge, torn-tail repair; a power-loss crash model, stricter than the engine's; the simulator runs over it. [Plan 0029](0029-server-raft-log.md). |
 | S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. [Plan 0030](0030-server-raft-state-machine.md). |
 | S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. [Plan 0032](0032-server-multi-node.md). |
-| S8. Membership and fault testing | S7, S3 | Add and remove nodes (learner first, then single-server changes); chunked, resumable snapshot transfer; randomized fault runs checked for linearizability. |
+| S8. Membership and fault testing | S7, S3 | Add and remove nodes (non-blocking learners + openraft joint consensus `ChangeMembership` + `TransferLeader`); file-backed, offset-resumable snapshot transfer (`SnapshotProgress` + CRC32C); seeded multi-fault runs (`SIGKILL`, snapshot catch-up, membership rotations, Linux `iptables` partitions) checked by Porcupine. [Plan 0034](0034-server-membership.md). |
 | S9. Follower reads (optional) | S7, engine MVCC | Snapshot reads in the engine (its own engine stack; recommended MVCC), a read barrier, and bounded-staleness or read-index follower reads. |
 
 ```mermaid
@@ -539,8 +539,16 @@ next to the engine's numbers.
   S3 ([plan 0033](0033-server-gateway.md), recorded in
   [gateway](../design/gateway.md)).
 
-The next step is S8 (dynamic membership changes, file-backed/resumable
-snapshots, and randomized fault testing using `lib/lincheck`).
+- [x] Draft and agree on [dynamic membership, resumable snapshots, and fault testing](0034-server-membership.md) (S8).
+- [x] Implement and verify the dynamic membership, resumable snapshots, and
+  fault testing stack, completing S8 and phase 2
+  ([plan 0034](0034-server-membership.md), recorded in
+  [server](../design/server.md), [server Raft](../design/server-raft.md), and
+  [gateway](../design/gateway.md)).
+
+Phase 2 is complete (optional S9 follower reads will wait for a dedicated engine
+MVCC roadmap). The next major milestone is **phase 3 (sharding)**, which gets
+its own roadmap.
 
 ## Sources
 

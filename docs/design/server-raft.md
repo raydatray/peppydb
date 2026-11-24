@@ -623,6 +623,24 @@ same on every node, so no election occurred, and the followers'
   the whole image would stop writes for seconds. The fixes are in
   [Extension points](#extension-points).
 
+**After S8** (run `20261124-201721-0f632d90`, 2026-11-24, revision `0f632d90`: the top of the `server-membership` stack before it was rebased onto `main`, with the same tree as after the rebase,
+default snapshot policy). File-backed snapshots, the `LeaderHint`
+envelope, and explicit `--bootstrap` leave the numbers within the variation
+between Spot VMs: puts at 0.92x to 0.98x of the first run (2,746/s with one
+writer, 76,711/s at 256), `get` and the mixed step at 1.0x. No election, no
+RPC error, and no warning under load.
+
+- **Writing the snapshot to a file does not shorten the stop.** `build`
+  still holds the applier's gate for the checkpoint and the export; only
+  the destination changed from a `Vec` to a temporary file. The leader's
+  steady-state build took 33.9 ms at p50, against 32.5 ms before, so the
+  32 ms put tail is unchanged.
+- **One stall widened the tail at concurrency 256.** All 12 of the
+  leader's builds over 40 ms (51 to 88 ms) fell within half a second; the
+  followers' builds stayed at about 33 ms. A transient stall of the
+  leader's disk or VM fits better than a regression. It accounts for the
+  put p99.9 of 54.5 ms and max of 90 ms at 256.
+
 ## Extension points
 
 - **S5 (done, plan 0029):** `DiskLog` over `server-raft-log` replaces
@@ -630,19 +648,25 @@ same on every node, so no election occurred, and the followers'
 - **S6 (done, plan 0030):** `DbStateMachine` over `engine::Db` in
   `Mode::External` replaces `ModelSm`, with the applier thread and the
   system keys in `server-keys`; the simulator runs it over `SimStore`.
-- **Soon:** snapshot data in a temporary file instead of a `Vec<u8>`.
+- **S7 (done, plan 0032):** `server` implements `Transport` over gRPC with
+  `raft.v1`, and `serve` builds a `RaftNode` over `DiskLog` and
+  `DbStateMachine`; the format marker moves under Raft; `server` checks key
+  and value limits before proposing.
+- **S8 (done, plan 0034):** `SnapshotData` (`Bytes` for simulator,
+  `SnapshotFile` temp files under `<db_dir>/snapshots/` on real disk with
+  Castagnoli CRC32C), dynamic membership (`RaftNode::add_learner` non-blocking,
+  `RaftNode::change_membership` joint consensus, `Status::membership` and
+  `Status::replication`, `Transport::register_peer`), and offset-resumable
+  `InstallSnapshot` (`SnapshotProgress`).
 - **Next: cheap snapshots** (from the [cluster runs](#three-server-vms-cluster-perf)).
-  `build` should not copy the image, because `get_current_snapshot`
-  already writes the committed checkpoint on demand; the applier's gate
-  should cover only what pins the snapshot's log id, not the whole
-  checkpoint; and the policy should follow log size or time rather than
-  a count of 5,000 entries.
-- **S7:** `server` implements `Transport` over gRPC with `raft.v1`, and
-  `serve` builds a `RaftNode` over `DiskLog` and `DbStateMachine`; the
-  format marker moves under Raft; `server` checks key and value limits
-  before it proposes.
-- **Later:** leader leases for reads, membership changes, chunked
-  snapshots, metrics. None of these changes `RaftNode`'s signature.
+  `build` should not copy the committed image, because
+  `get_current_snapshot` already writes the committed checkpoint on
+  demand; the applier's gate should cover only what pins the snapshot's
+  log id, not the whole checkpoint; and the policy should follow log size
+  or time rather than a count of 5,000 entries.
+- **Later:** leader leases for reads (optional), phase 3 migration fences and
+  placement-driven leadership transfer. None of these changes `RaftNode`'s
+  core write/read signature.
 
 ## Relationship to sources
 

@@ -1,6 +1,6 @@
 # 0034: Dynamic membership, resumable snapshots, and fault testing
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S8
 (completes phase 2; decisions 2, 3, 7, 11, 12, 15).
@@ -576,18 +576,56 @@ None. Resolved in discussion:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] 1/9 Plan commit.
-- [ ] 2/9 `server-raft` dynamic membership and `Transport::register_peer`.
-- [ ] 3/9 `kv.v1` membership RPCs and `raft.v1` resumable snapshot proto.
-- [ ] 4/9 `server` membership wiring, dynamic `GrpcTransport`, and explicit `--bootstrap`.
-- [ ] 5/9 File-backed `SnapshotFile` in `DbStateMachine`.
-- [ ] 6/9 Chunked offset-resumable `InstallSnapshot` in `GrpcTransport` / `RaftRpcServer`.
-- [ ] 7/9 Seeded randomized chaos + membership linearizability tests in `lib/lincheck`.
-- [ ] 8/9 Linux `iptables` partition chaos test under `tools/linux-run`.
-- [ ] 9/9 Design docs and stack-wide verification.
+- [x] 2/9 `server-raft` dynamic membership and `Transport::register_peer`.
+- [x] 3/9 `kv.v1` membership RPCs and `raft.v1` resumable snapshot proto.
+- [x] 4/9 `server` membership wiring, dynamic `GrpcTransport`, and explicit `--bootstrap`.
+- [x] 5/9 File-backed `SnapshotFile` in `DbStateMachine`.
+- [x] 6/9 Chunked offset-resumable `InstallSnapshot` in `GrpcTransport` / `RaftRpcServer`.
+- [x] 7/9 Seeded multi-fault + membership linearizability tests in `lib/lincheck`.
+- [x] 8/9 Linux `iptables` partition fault test under `tools/linux-run`.
+- [x] 9/9 Design docs and stack-wide verification.
+
+## Verification outcomes (2026-11-24)
+
+On macOS (Apple Silicon, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 43 Rust targets clean |
+| `tools/buck2 test -j 4 //bin/... //lib/... //proto/...` | Pass; 46 targets, 0 failures (`server-raft-unittest`: 75 passed; `server-unittest`: 32 passed including 4-node dynamic membership + resumable snapshot offset/corruption/supersede tests; `lincheck-test`: passed including seeded multi-fault + live membership swaps `[1,2,3] -> [1,3,4] -> [1,3,5]` + leader `SIGKILL` under Porcupine) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test -race ./...` | Pass (`bin/peppydb-gateway`, `bin/peppydb-load`, `lib/gateway`, `lib/gateway-kvclient`, `lib/lincheck`, `lib/load`) |
+| `GOOS=linux GOARCH=amd64 go vet` & `go test -c ./lib/lincheck/...` | Pass (Linux `iptables` partition fault test compiles cleanly; live execution runs under `tools/linux-run` with `LINCHECK_IPTABLES=1`) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| `sh tools/gcp/testing/test-driver.sh` | Pass |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (30 passed, no new `unsafe`) |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`ChangeMembershipError::UncommittedLeaderLog` must be retryable:** Openraft
+  rejects `add_learner` / `change_membership` right after an election until the
+  new leader's initial blank log entry commits. Mapping `UncommittedLeaderLog`
+  to `MembershipError::NotReady` -> gRPC `UNAVAILABLE` (rather than
+  `INVALID_ARGUMENT`) lets callers (`lincheck`, phase 3 placement manager)
+  retry cleanly across rapid leader transfers.
+- **Worker error backoff for Porcupine search bounds:** Under tight-loop fault
+  runs with zero backoff on `UNAVAILABLE`, 8 concurrent workers can accumulate
+  hundreds of overlapping unknown-outcome writes on one key during a 300 ms
+  failover, blowing up Porcupine's exponential search. Adding `ErrorBackoff`
+  (default 25 ms, 50 ms in multi-fault tests) keeps overlapping unknowns small
+  and Porcupine verification fast without weakening linearizability checks.
+- **Leader readiness after `TransferLeader`:** Openraft flips `role == Leader`
+  before its committed vote finishes fsyncing to disk; multi-process tests
+  confirming leadership readiness should wait for a linearizable read
+  (`read_barrier`) before asserting a single-shot `Put` succeeds.
+- **Live `cluster-perf` run after S8 (2026-11-24):** run
+  `20261124-201721-0f632d90` at revision `0f632d90`: the top of the `server-membership` stack before it was rebased onto `main`, with the same tree as after the rebase, all steps passed, no
+  elections, no RPC errors. Throughput is within 0.92x to 1.01x of the
+  plan 0032 run; file-backed snapshots leave the 32 ms snapshot stop
+  unchanged (33.9 ms at p50), because `build` still holds the applier's
+  gate for the checkpoint and the export. Results are in
+  [server Raft measurements](../design/server-raft.md#three-server-vms-cluster-perf).
+  Cheap snapshots are deferred to the post-phase-2 cleanup stack.
 
 ## Agent notes
 
