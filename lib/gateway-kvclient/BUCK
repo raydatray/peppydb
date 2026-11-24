@@ -1,0 +1,26 @@
+# Internal Raft-group KV client for the gateway component (plan 0033).
+go_library(
+    name = "gateway-kvclient",
+    package_name = "peppydb/lib/gateway-kvclient",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    deps = [
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/credentials/insecure",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+    visibility = ["//lib/gateway:"],
+)
+
+go_test(
+    name = "gateway-kvclient-test",
+    srcs = glob(["*_test.go"]),
+    target_under_test = ":gateway-kvclient",
+    deps = [
+        "//proto/kv/v1/go:kvv1",
+        "//third-party/go:google.golang.org/grpc",
+        "//third-party/go:google.golang.org/grpc/codes",
+        "//third-party/go:google.golang.org/grpc/status",
+    ],
+)
