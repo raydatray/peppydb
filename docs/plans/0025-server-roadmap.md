@@ -125,7 +125,7 @@ commits or reserved plan numbers.
 | S4. Raft core | — | openraft wrapped behind our types, with elections, pre-vote, replication, commit, read index, and snapshots; a seeded simulator with the safety checks of decision 15. No network or disk yet. [Plan 0028](0028-server-raft-core.md). |
 | S5. Raft log | S4 | Durable entries with terms, hard state, suffix truncation, prefix purge, torn-tail repair; a power-loss crash model, stricter than the engine's; the simulator runs over it. [Plan 0029](0029-server-raft-log.md). |
 | S6. Replicated state machine in one process | S4, S5, engine external mode | The driver: core, log, and `Db` in external mode; the apply loop; compaction; snapshot install. Several nodes in one process over an in-memory transport that injects faults. [Plan 0030](0030-server-raft-state-machine.md). |
-| S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. |
+| S7. Multi-node server | S1, S6, S2's snapshot stream | `peppydb.raft.v1` between processes; static membership from flags; leader-only writes and read-index reads; leader hints; `Status` reports role, term, and leader. Process-level tests: kill the leader, partition, restart. [Plan 0032](0032-server-multi-node.md). |
 | S8. Membership and fault testing | S7, S3 | Add and remove nodes (learner first, then single-server changes); chunked, resumable snapshot transfer; randomized fault runs checked for linearizability. |
 | S9. Follower reads (optional) | S7, engine MVCC | Snapshot reads in the engine (its own engine stack; recommended MVCC), a read barrier, and bounded-staleness or read-index follower reads. |
 
@@ -529,11 +529,14 @@ next to the engine's numbers.
   [remote benchmarks](../design/remote-benchmarks.md); live GCP runs of
   `server-perf` and `raft-perf` are run by the user from the Linux build host).
 
-The next step, in the default order, is S7: the multi-node server over
-`peppydb.raft.v1`, wiring `peppydb serve` to `server-raft`. Two follow-ups
-from plan 0030 remain open: snapshot data in a file instead of memory (no
-later than S8), and extending the store file in larger steps if Linux
-`raft-perf` confirms macOS's finding.
+- [x] Draft and agree on [the multi-node server](0032-server-multi-node.md) (S7).
+- [x] Implement and verify the multi-node server stack, completing S7
+  ([plan 0032](0032-server-multi-node.md), recorded in
+  [server](../design/server.md) and [server Raft](../design/server-raft.md)).
+
+The next step, in the default order, is S3 (Go gateway skeleton and
+linearizability checker harness) followed by S8 (dynamic membership changes,
+file-backed/resumable snapshots, and randomized fault testing).
 
 ## Sources
 

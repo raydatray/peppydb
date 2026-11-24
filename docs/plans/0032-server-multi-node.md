@@ -1,6 +1,6 @@
 # 0032: Multi-node server over Raft
 
-**Status:** In progress
+**Status:** Complete
 
 **Parent roadmap:** [Server roadmap](0025-server-roadmap.md), milestone S7
 (decisions 4, 5, 7, 8, 10, 11, 12, 14).
@@ -393,20 +393,77 @@ None. Resolved in discussion:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] 1/11 Plan commit.
-- [ ] 2/11 `peppydb.raft.v1` proto, `kv.v1` additions, `tools/gen-proto`.
-- [ ] 3/11 `GrpcTransport` and `RaftService`.
-- [ ] 4/11 Wire `KvService` and `AdminService` to `RaftNode`.
-- [ ] 5/11 Raft Prometheus metrics.
-- [ ] 6/11 Cluster CLI flags and data layout.
-- [ ] 7/11 Multi-process 3-node failover and snapshot catch-up tests.
-- [ ] 8/11 `iptables` partition test under `tools/linux-run`.
-- [ ] 9/11 Leader-hint following in `peppydb-load`.
-- [ ] 10/11 3-server-VM + 1-client-VM `cluster-perf` suite in `tools/gcp-bench`.
-- [ ] 11/11 Design docs and stack-wide verification.
+- [x] 2/11 `peppydb.raft.v1` proto, `kv.v1` additions, `tools/gen-proto`.
+- [x] 3/11 `GrpcTransport` and `RaftService`.
+- [x] 4/11 Wire `KvService` and `AdminService` to `RaftNode`.
+- [x] 5/11 Raft Prometheus metrics.
+- [x] 6/11 Cluster CLI flags and data layout.
+- [x] 7/11 Multi-process 3-node failover and snapshot catch-up tests.
+- [x] 8/11 `iptables` partition test under `tools/linux-run`.
+- [x] 9/11 Leader-hint following in `peppydb-load`.
+- [x] 10/11 3-server-VM + 1-client-VM `cluster-perf` suite in `tools/gcp-bench`.
+- [x] 11/11 Design docs and stack-wide verification.
+
+## Verification outcomes (2026-11-22)
+
+On macOS (Apple Silicon, APFS).
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh`, `tools/clippy.sh` (with `check-unsafe`) | Pass; 43 Rust targets clean |
+| `tools/buck2 test -j 4 //bin/... //lib/... //proto/...` | Pass; 42 targets, 0 failures (`server-unittest`: 27 passed, including 3-process `SIGKILL` failover + snapshot catch-up) |
+| `cargo test --workspace --locked` | Pass |
+| `go vet ./... && go test ./...` | Pass (`bin/peppydb-load` + `lib/load`) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Up to date |
+| Miri: `lib/bf-tree-circular-buffer` | Pass (30 passed, no new `unsafe`) |
+| `iptables` partition test | Compiled and gated with `#[cfg(target_os = "linux")]` + `#[ignore]`; run under `tools/linux-run` on Linux |
+| `cluster-perf` 4-VM GCP suite | `sh tools/gcp/testing/test-driver.sh` (including `cluster-ok` and `cluster-dry-run`) and `PEPPYDB_GCP_BENCH_TEST=1 tools/gcp-bench run --suite cluster-perf --dry-run` pass |
 
 ## Discoveries and plan changes
 
-None yet.
+- **`PreVote` proto message names:** `buf lint`'s `STANDARD` rules enforce
+  `RPC_REQUEST_RESPONSE_UNIQUE`, so `PreVote` uses `PreVoteRequest` /
+  `PreVoteResponse` rather than sharing `VoteRequest` / `VoteResponse`.
+- **`server-raft` ergonomics for `server`:** Defaulted `RT = TokioRuntime` on
+  `DbStateMachine` and `DiskLog`, and added `DiskLog::open_real`,
+  `DiskLog::sync_hook`, `DbStateMachine::open_dir`, `checkpoint_now`, and
+  `limits`, keeping `openraft` and `server-raft-log` completely hidden from
+  `server`.
+- **Startup lock ordering in `cli.rs`:** Opening and locking `raft-log` and
+  `db` (`prepare`) must happen *before* logging `listening on <addr>`, so a
+  second process on the same `--data-dir` deterministically fails with a lock
+  error.
+- **`LeaderHint` encoding and Go interop:** `grpc-go` strictly validates
+  `grpc-status-details-bin` as a `google.rpc.Status` protobuf. `bridge.rs`
+  therefore wraps `kv.v1.LeaderHint` in a wire-compatible `google.rpc.Status`
+  + `google.protobuf.Any` envelope (`type.googleapis.com/peppydb.kv.v1.LeaderHint`),
+  so Go clients (`peppydb-load` and `peppydb-gateway`) decode `*kvv1.LeaderHint`
+  natively through `status.FromError(err).Details()`.
+- **Live `cluster-perf` runs (2026-11-23):** two release runs at revision
+  `7829ef75`, an earlier version of this stack before the `LeaderHint`
+  envelope change; every step passed, no RPC errors, no elections. Results and
+  analysis are in
+  [server Raft measurements](../design/server-raft.md#three-server-vms-cluster-perf).
+  - `20261123-051011-7829ef75` (default snapshot policy): puts at
+    2,797/s with one writer (p50 360 µs) to 81,909/s at 256; `get` at
+    113,662/s at 64. Puts from concurrency 16 up have a 31 to 36 ms tail:
+    each snapshot, every 5,000 entries, holds the applier for about
+    32 ms while it checkpoints and copies the whole image.
+  - `20261123-051844-7829ef75` (`--snapshot-after 1000000`, from a
+    one-off copy of the suite): the tail is gone, but put throughput
+    falls to 0.4 to 0.6 times and the leader's put handler is up to 4.4
+    times slower, increasingly over the run. Not yet explained; the
+    likely cause is that without checkpoints no superseded page is
+    freed, so the store file grows on every write-through.
+  - Follow-up (next stack): cheap snapshots, as listed under the server
+    Raft design's extension points; confirm the slowdown without
+    snapshots with `--profile offcpu`.
+- **`gcp-bench` accepts several profilers for a cluster suite (open):**
+  `check_profile` refuses more than one profiler only for
+  `client-server` suites. A `cluster` suite with `--profile stat,record`
+  creates four VMs, and then every server VM fails, because
+  `run_server_role` takes one profiler. The check should cover every
+  multi-VM mode.
 
 ## Agent notes
 
