@@ -91,3 +91,33 @@ peppy_execution_platforms(
     platforms = [":exec-host", ":exec-host-miri"],
     visibility = ["PUBLIC"],
 )
+
+# BuildBuddy hybrid execution platforms (plan 0036), selected via
+# `build/config/buildbuddy.bcfg` on Linux (WSL2 and CI). All Linux compilers,
+# linkers, and sysroots are hermetic Buck2 inputs (plan 0035), so the stock
+# digest-pinned Ubuntu 24.04 image needs no custom RBE Dockerfile.
+_BUILDBUDDY_PROPS = {
+    "OSFamily": "Linux",
+    "Arch": "arm64" if host_info().arch.is_aarch64 else "amd64",
+    "container-image": "docker://docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+}
+
+peppy_execution_platform(
+    name = "exec-host-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os],
+    remote = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platform(
+    name = "exec-host-miri-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os, ":mode-miri"],
+    remote = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platforms(
+    name = "execution-platforms-buildbuddy",
+    platforms = [":exec-host-buildbuddy", ":exec-host-miri-buildbuddy"],
+    visibility = ["PUBLIC"],
+)
