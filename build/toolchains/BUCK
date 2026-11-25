@@ -11,7 +11,7 @@ load("@prelude//toolchains/go:go_bootstrap_toolchain.bzl", "go_bootstrap_distr",
 load("@prelude//toolchains/go:go_toolchain.bzl", "go_distr", "go_toolchain")
 load(":go.bzl", "GO_RELEASES", "GO_VERSION")
 load(":host.bzl", "by_host")
-load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC")
+load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC", "MIRI_STD_CRATES")
 load(":rust.bzl", "peppy_rust_toolchain")
 load(":rust_stable.bzl", "RUST_COMPONENTS", "RUST_SRC")
 
@@ -140,23 +140,39 @@ genrule(
     }),
 )
 
+# Crates from rust-src's library/Cargo.lock, pinned by tools/update-miri so
+# `:miri-sysroot` builds completely offline.
+[
+    http_archive(
+        name = "miri-std-{}-{}".format(crate["name"], crate["version"]),
+        urls = ["https://static.crates.io/crates/{name}/{name}-{version}.crate".format(**crate)],
+        sha256 = crate["sha256"],
+        type = "tar.gz",
+        strip_prefix = "{name}-{version}".format(**crate),
+    )
+    for crate in MIRI_STD_CRATES
+]
+
 # Miri's standard library, built with MIR for every function. `cargo miri
-# setup` compiles it from rust-src and downloads the standard library's
-# crates.io dependencies, so this action needs network access on its first
-# run; Buck2 caches the result.
+# setup` compiles it offline from rust-src and the pinned MIRI_STD_CRATES
+# archives; Buck2 caches the result.
 genrule(
     name = "miri-sysroot",
     out = "sysroot",
     # The scratch directory must be outside the repository: under buck-out,
     # Cargo would find the repository's Cargo.toml and treat the generated
     # sysroot package as part of that workspace.
-    cmd = " ".join([
-        "dist=$(location :rust-nightly) &&",
-        "scratch=`mktemp -d /tmp/peppydb-miri-sysroot.XXXXXX` &&",
-        "trap 'rm -rf $scratch' EXIT &&",
-        "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin",
-        "CARGO_HOME=$scratch/cargo-home RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT",
-        "$dist/bin/cargo miri setup",
+    cmd = " && ".join([
+        "dist=$(location :rust-nightly)",
+        "scratch=`mktemp -d /tmp/peppydb-miri-sysroot.XXXXXX`",
+        "trap 'rm -rf $scratch' EXIT",
+        "mkdir -p $scratch/cargo-home $scratch/vendor",
+    ] + [
+        "cp -R $(location :miri-std-{name}-{version}) $scratch/vendor/{name}-{version} && printf '{{\"files\":{{}},\"package\":\"{sha256}\"}}' > $scratch/vendor/{name}-{version}/.cargo-checksum.json".format(**crate)
+        for crate in MIRI_STD_CRATES
+    ] + [
+        "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n[source.vendored-sources]\\ndirectory = \"%s/vendor\"\\n' \"$scratch\" > $scratch/cargo-home/config.toml",
+        "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin CARGO_HOME=$scratch/cargo-home CARGO_NET_OFFLINE=true RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT $dist/bin/cargo miri setup",
     ]),
 )
 

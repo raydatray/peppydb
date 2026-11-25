@@ -77,3 +77,162 @@ MIRI_RUST_SRC = {
     "strip_prefix": "rust-src-nightly/rust-src",
     "url": "https://static.rust-lang.org/dist/2026-11-01/rust-src-nightly.tar.xz"
 }
+
+# Crates from rust-src's library/Cargo.lock, for offline `:miri-sysroot`.
+MIRI_STD_CRATES = [
+    {
+        "name": "addr2line",
+        "sha256": "e567177890eb1617b1f774005b66b26b2377afd138a2ca37aae7d8f0c81429d4",
+        "version": "0.27.1"
+    },
+    {
+        "name": "adler2",
+        "sha256": "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa",
+        "version": "2.0.1"
+    },
+    {
+        "name": "cc",
+        "sha256": "509591b7bcd67f4ef775afad7662703b4935daaa6ec0e5605cfb1090b32a2b6d",
+        "version": "1.4.3"
+    },
+    {
+        "name": "cfg-if",
+        "sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+        "version": "1.0.4"
+    },
+    {
+        "name": "dlmalloc",
+        "sha256": "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675",
+        "version": "0.2.14"
+    },
+    {
+        "name": "find-msvc-tools",
+        "sha256": "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890",
+        "version": "0.1.11"
+    },
+    {
+        "name": "foldhash",
+        "sha256": "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb",
+        "version": "0.2.0"
+    },
+    {
+        "name": "fortanix-sgx-abi",
+        "sha256": "5efc85edd5b83e8394f4371dd0da6859dff63dd387dab8568fece6af4cde6f84",
+        "version": "0.6.1"
+    },
+    {
+        "name": "getopts",
+        "sha256": "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df",
+        "version": "0.2.24"
+    },
+    {
+        "name": "gimli",
+        "sha256": "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10",
+        "version": "0.34.0"
+    },
+    {
+        "name": "hashbrown",
+        "sha256": "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a",
+        "version": "0.17.1"
+    },
+    {
+        "name": "hermit-abi",
+        "sha256": "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284",
+        "version": "0.5.3"
+    },
+    {
+        "name": "libc",
+        "sha256": "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a",
+        "version": "0.2.191"
+    },
+    {
+        "name": "memchr",
+        "sha256": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+        "version": "2.8.3"
+    },
+    {
+        "name": "miniz_oxide",
+        "sha256": "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c",
+        "version": "0.9.1"
+    },
+    {
+        "name": "moto-rt",
+        "sha256": "9f3c01b588c6d37e3f4f065712c4f33e12fad17ad4152a70e8346991e2bbe92e",
+        "version": "0.17.4"
+    },
+    {
+        "name": "object",
+        "sha256": "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b",
+        "version": "0.39.1"
+    },
+    {
+        "name": "r-efi",
+        "sha256": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f",
+        "version": "5.3.0"
+    },
+    {
+        "name": "r-efi-alloc",
+        "sha256": "dc2f58ef3ca9bb0f9c44d9aa8537601bcd3df94cc9314a40178cadf7d4466354",
+        "version": "2.1.0"
+    },
+    {
+        "name": "rand",
+        "sha256": "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41",
+        "version": "0.9.5"
+    },
+    {
+        "name": "rand_core",
+        "sha256": "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c",
+        "version": "0.9.5"
+    },
+    {
+        "name": "rand_xorshift",
+        "sha256": "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a",
+        "version": "0.4.0"
+    },
+    {
+        "name": "rustc-demangle",
+        "sha256": "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb",
+        "version": "0.1.28"
+    },
+    {
+        "name": "rustc-literal-escaper",
+        "sha256": "bfe6f213fb658c8fb95baabd5420393438cf5a98d707f5dd701d9197c705f71e",
+        "version": "0.0.8"
+    },
+    {
+        "name": "shlex",
+        "sha256": "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba",
+        "version": "2.0.1"
+    },
+    {
+        "name": "unwinding",
+        "sha256": "4b134ada16dda9e435abe2a6d76a01d497bc60707357845a15f9b0ed42dc88ce",
+        "version": "0.2.10"
+    },
+    {
+        "name": "vex-sdk",
+        "sha256": "79e5fe15afde1305478b35e2cb717fff59f485428534cf49cfdbfa4723379bf6",
+        "version": "0.27.1"
+    },
+    {
+        "name": "wasip1",
+        "sha256": "b5e26842486624357dbeb8f0381cf1fb42f022291fd787d4a816768fec8cc760",
+        "version": "1.0.0"
+    },
+    {
+        "name": "wasip2",
+        "sha256": "89aafd4b69fb41a64cfd5d7f214cde92ab422ec4d9bcd55fcc816d3f5f49bbf3",
+        "version": "2.0.1+wasi-0.2.12"
+    },
+    {
+        "name": "wasip3",
+        "sha256": "f1d5749fdf69bb9400562eba50f8f25f5cd800ef4b74300038b6f99ae7409674",
+        "version": "0.9.0+wasi-0.3.0"
+    },
+    {
+        "name": "wit-bindgen",
+        "sha256": "53cb4b5556c3a791e86838ea287782bdafa704d55b0e68b5b81a3a16b9ea5f4b",
+        "version": "0.62.0"
+    }
+]
