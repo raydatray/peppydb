@@ -1,7 +1,7 @@
 //! Informational persistence and circular-buffer benchmarks, not gates
-//! (plan 0023). Run in release mode, on Linux for contended and direct-I/O
-//! numbers (`tools/linux-run`, which sets `PEPPYDB_BENCH_DIR` to an ext4
-//! volume):
+//! (plan 0023). Run in release mode on Linux (for example WSL2) for contended
+//! and direct-I/O numbers, with `PEPPYDB_BENCH_DIR` set to a filesystem that
+//! supports `O_DIRECT`:
 //!
 //! ```text
 //! tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench_io::
