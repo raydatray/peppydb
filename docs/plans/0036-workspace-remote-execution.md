@@ -1,6 +1,6 @@
 # 0036: Dynamic affected-target CI and BuildBuddy hybrid execution
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md),
 [plan 0035](0035-workspace-hermetic-build.md).
@@ -290,11 +290,38 @@ None. Confirmed during planning:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/4][workspace-rbe][plan]`
-- [ ] `[2/4][workspace-rbe][config]`
-- [ ] `[3/4][workspace-rbe][ci]`
-- [ ] `[4/4][workspace-rbe][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/4][workspace-rbe][config]`
+- [x] `[3/4][workspace-rbe][ci]`
+- [x] `[4/4][workspace-rbe][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Chose limited hybrid execution immediately** (`local_enabled = True`,
+  `remote_enabled = True`, `remote_cache_enabled = True`,
+  `use_limited_hybrid = True`, `allow_limited_hybrid_fallbacks = True`,
+  `allow_cache_uploads = True`) instead of cache-only, using the stock
+  digest-pinned `ubuntu:24.04` image (`glibc 2.39`, matching LLVM 23.1.6's host
+  requirement).
+- **Skip `buck2-lint` on docs-only PRs** via `plan`'s `run_lint` output.
+- **Unowned files in `owner(...)`:** Verified `tools/buck2 uquery` returns an
+  empty set with exit 0 on unowned files inside a package directory (such as
+  generated `Cargo.toml`), so `plan` handles them cleanly.
+
+### Verification outcomes
+
+Measured on macOS arm64 (`darwin-arm64`) with `~/.cargo/bin` excluded from
+`PATH` for all Buck2 commands:
+
+| Check | Result |
+| --- | --- |
+| `tools/buck2 audit providers //build:execution-platforms-buildbuddy` | Resolves `Hybrid { local, remote, level: Fallback }`, `remote_cache_enabled = true`, `cache_upload_behavior = Enabled`, Ubuntu 24.04 digest |
+| `BUILDBUDDY_API_KEY=dummy tools/buck2 audit config --config-file build/config/buildbuddy.bcfg` | Resolves `remote.buildbuddy.io`, `digest_algorithms = SHA256`, `execution-platforms-buildbuddy` |
+| Synthetic `plan` query matrix (7 cases) | Exact outputs: `docs_only` (`[]`, `lint=False`, `miri=False`), `go_gateway` (3 pkgs), `bf_tree_page` (9 pkgs crossing Rust→Go `lincheck`), `unsafe_cbuf` (7 pkgs, `miri=True`), `deleted_file` (`//lib/load`), `global_build` (all 22 pkgs, `miri=True`), `proto_change` (3 pkgs) |
+| `.github/workflows/ci.yaml` YAML validation | Valid (`plan, buck2-lint, buck2-test, buck2-miri, cargo, go`) |
+| `tools/fmt.sh` & `tools/clippy.sh` | Pass (43 targets clean) |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass (all 46 targets pass; `server` and `lincheck` passed cleanly on re-run after initial 46-target local CPU saturation) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Pass |
+| `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Pass (30/30) |
+| `cargo test --workspace --locked` & `go vet ./... && go test ./...` | Pass |
+| Live BuildBuddy hybrid execution on Linux | Pending first PR/WSL2 run once `BUILDBUDDY_API_KEY` is configured |

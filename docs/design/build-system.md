@@ -276,3 +276,41 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   The genrule builds in a scratch directory outside the repository, so Cargo
   does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
+
+## CI fanout and BuildBuddy hybrid execution
+
+Pull-request CI (`.github/workflows/ci.yaml`) uses Buck2's unconfigured query
+graph and opt-in BuildBuddy hybrid execution
+([plan 0036](../plans/0036-workspace-remote-execution.md)):
+
+- **Dynamic per-package fanout.** The `plan` job runs `tools/buck2 uquery`
+  over `git diff` (`rdeps(//bin/... + //lib/... + //proto/..., owner(...))`)
+  without downloading any toolchains, emitting `packages`, `run_lint`, and
+  `run_miri`:
+  - `buck2-test` spawns one GitHub Actions check per affected package
+    (`buck2-test (//lib/bf-tree)`, `buck2-test (//lib/engine)`, etc.).
+  - `buck2-miri` runs automatically whenever `//lib/bf-tree-circular-buffer`
+    or global build/toolchain files change.
+  - Pure documentation PRs (`docs/` and `*.md`) skip `buck2-lint`,
+    `buck2-test`, and `buck2-miri`.
+  - Global build, toolchain, or dependency changes (`build/`, `third-party/`,
+    `tools/`, `go.mod`, `rust-toolchain.toml`, `.buckconfig`, `ci.yaml`) run
+    all testable packages and Miri.
+- **Opt-in BuildBuddy hybrid execution.** `build/config/buildbuddy.bcfg`
+  switches `execution_platforms` to `//build:execution-platforms-buildbuddy`
+  (`local_enabled = True`, `remote_enabled = True`,
+  `remote_cache_enabled = True`, `use_limited_hybrid = True`,
+  `allow_limited_hybrid_fallbacks = True`, `allow_cache_uploads = True`),
+  using a digest-pinned stock `ubuntu:24.04` container image (no custom RBE
+  Dockerfile is needed because all Linux toolchains are hermetic Buck2 inputs).
+- **Zero-config local dev.** Default `.buckconfig` stays 100% local so macOS
+  development and contributors without a BuildBuddy key need no setup. CI
+  writes `.buckconfig.local` automatically when `secrets.BUILDBUDDY_API_KEY`
+  is set (falling back to local builds on fork PRs). On Linux/WSL2, opt in
+  once with a git-ignored `.buckconfig.local`:
+
+  ```ini
+  <file:build/config/buildbuddy.bcfg>
+  ```
+
+  and `export BUILDBUDDY_API_KEY=...` in your shell environment.
