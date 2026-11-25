@@ -1,37 +1,42 @@
 #!/bin/sh
-# Fail if tool versions differ from their pins, or a pin is missing. Buck2 takes rustc from PATH,
-# so a mismatch would silently change build output. Buck2 downloads Go itself,
-# so a go on PATH does not matter here; its pin must match go.mod.
+# Fail if tool pins disagree across manifests, or if a host pin is missing.
+# Buck2 downloads Rust, Go, and the Miri nightly itself, so host rustc/go on
+# PATH are not checked here.
 set -eu
 cd "$(dirname "$0")/.."
 status=0
 
+rust_pins=build/toolchains/rust_stable.bzl
 want=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-have=$(rustc --version | awk '{print $2}')
-if [ "$have" != "$want" ]; then
-    echo "check-tools: rustc is $have, rust-toolchain.toml pins $want" >&2
+buck=$(sed -n 's/^RUST_VERSION = "\(.*\)"$/\1/p' "$rust_pins")
+if [ "$buck" != "$want" ]; then
+    echo "check-tools: $rust_pins pins Rust $buck, rust-toolchain.toml pins $want; run tools/update-rust" >&2
     status=1
 fi
 
+go_pins=build/toolchains/go.bzl
 if [ -f go.mod ]; then
     want=$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)
-    # Buck2 downloads the Go release named in build/toolchains/BUCK.
-    buck=$(sed -n 's/^GO_VERSION = "\(.*\)"$/\1/p' build/toolchains/BUCK)
+    buck=$(sed -n 's/^GO_VERSION = "\(.*\)"$/\1/p' "$go_pins")
     if [ "$buck" != "$want" ]; then
-        echo "check-tools: build/toolchains/BUCK pins Go $buck, go.mod pins $want" >&2
+        echo "check-tools: $go_pins pins Go $buck, go.mod pins $want; run tools/update-go" >&2
         status=1
     fi
 fi
 
-# The Miri nightly must be pinned for every host that GO_RELEASES supports.
-pins=build/toolchains/miri_nightly.bzl
-if ! grep -q '^MIRI_NIGHTLY = "[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}"$' "$pins"; then
-    echo "check-tools: $pins has no MIRI_NIGHTLY date; run tools/update-miri" >&2
+# Stable Rust and Miri nightly must be pinned for every host in GO_RELEASES.
+miri_pins=build/toolchains/miri_nightly.bzl
+if ! grep -q '^MIRI_NIGHTLY = "[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}"$' "$miri_pins"; then
+    echo "check-tools: $miri_pins has no MIRI_NIGHTLY date; run tools/update-miri" >&2
     status=1
 fi
-for host in $(sed -n 's/^ *"\([a-z0-9-]*\)": ("[a-z]*", "[a-z0-9]*", "[0-9a-f]*"),$/\1/p' build/toolchains/BUCK); do
-    if ! grep -q "^    \"$host\": {" "$pins"; then
-        echo "check-tools: $pins has no Miri toolchain for $host; run tools/update-miri" >&2
+for host in $(sed -n 's/^ *"\([a-z0-9-]*\)": ("[a-z]*", "[a-z0-9]*", "[0-9a-f]*"),$/\1/p' "$go_pins"); do
+    if ! grep -q "^    \"$host\": {" "$rust_pins"; then
+        echo "check-tools: $rust_pins has no Rust toolchain for $host; run tools/update-rust" >&2
+        status=1
+    fi
+    if ! grep -q "^    \"$host\": {" "$miri_pins"; then
+        echo "check-tools: $miri_pins has no Miri toolchain for $host; run tools/update-miri" >&2
         status=1
     fi
 done
