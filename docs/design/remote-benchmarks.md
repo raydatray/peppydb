@@ -292,11 +292,11 @@ benchmark holds the VM until `--max-run` deletes it (plan 0030 found one).
 
 ## Testing
 
-The tool is tested offline, without GCP, in the Linux container:
+The tool is tested offline, without GCP, on Linux (for example WSL2):
 
 ```sh
-tools/linux-run sh tools/gcp/testing/test-remote.sh
-tools/linux-run sh tools/gcp/testing/test-driver.sh
+sh tools/gcp/testing/test-remote.sh
+sh tools/gcp/testing/test-driver.sh
 ```
 
 Stand-ins in `tools/gcp/testing/bin/` replace `gcloud`, `apt-get`,

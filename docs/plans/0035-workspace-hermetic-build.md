@@ -1,6 +1,6 @@
 # 0035: Hermetic Buck2 toolchains and removal of `tools/linux-run`
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md),
 [remote benchmarks](../design/remote-benchmarks.md),
@@ -431,14 +431,55 @@ None. Confirmed during planning:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/7][workspace-hermetic][plan]`
-- [ ] `[2/7][workspace-hermetic][rust]`
-- [ ] `[3/7][workspace-hermetic][miri]`
-- [ ] `[4/7][workspace-hermetic][python]`
-- [ ] `[5/7][workspace-hermetic][cxx]`
-- [ ] `[6/7][workspace-hermetic][linux-run]`
-- [ ] `[7/7][workspace-hermetic][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/7][workspace-hermetic][rust]`
+- [x] `[3/7][workspace-hermetic][miri]`
+- [x] `[4/7][workspace-hermetic][python]`
+- [x] `[5/7][workspace-hermetic][cxx]`
+- [x] `[6/7][workspace-hermetic][linux-run]`
+- [x] `[7/7][workspace-hermetic][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Buck2's built-in `cmd_script` replaced hand-written wrappers.** Using
+  `@prelude//utils:cmd_script.bzl` in `build/toolchains/cxx.bzl` generates the
+  executable wrappers for `clang`, `clang++`, `linker` (`clang++ -fuse-ld=lld`),
+  and `llvm-ar` while automatically tracking both the LLVM and Debian sysroot
+  directories as hidden inputs.
+- **Cargo vendored `.cargo-checksum.json` requires the `"package"` sha256.**
+  During `:miri-sysroot` offline builds, Cargo verifies each vendored crate's
+  checksum against `rust-src`'s `library/Cargo.lock`, so `.cargo-checksum.json`
+  writes `{"files":{},"package":"<sha256>"}` using the pinned digest from
+  `MIRI_STD_CRATES` (31 crates for `nightly-2026-11-01`).
+- **Genrule shell substitution uses backticks.** Buck2 interprets `$(pwd)` as a
+  macro expansion; `:miri-sysroot` uses ``repo=`pwd` `` to construct absolute
+  paths for the Linux linker wrapper inside `$scratch`.
+- **Chromium's Debian Bullseye sysroot extracts directly to `./`** (no
+  `strip_prefix`) and has no filename extension, so its `http_archive` specifies
+  `type = "tar.xz"`. `LLVM-23.1.6-Linux-{X64,ARM64}.tar.xz` uses
+  `strip_prefix = "LLVM-23.1.6-Linux-{X64,ARM64}"`.
+- **Go pins extracted into `build/toolchains/go.bzl`.** Added
+  `tools/update-go` matching `tools/update-rust` and `tools/update-miri`, so
+  every pinned toolchain has a dedicated update command and `tools/check-tools`
+  compares `rust-toolchain.toml` and `go.mod` against `rust_stable.bzl` and
+  `go.bzl`.
+
+### Verification outcomes
+
+Measured on macOS arm64 (`darwin-arm64`) with `~/.cargo/bin` removed from
+`PATH` (`PATH=/opt/homebrew/bin:/usr/bin:/bin`) for all Buck2 commands:
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh` (without `~/.cargo/bin`) | Pass (uses `toolchains//:rust-root/bin/rustfmt` and `toolchains//:go-root/bin/gofmt`) |
+| `tools/clippy.sh` (without `~/.cargo/bin`) | Pass (43 targets clean via `toolchains//:rust-stable`) |
+| `tools/buck2 test //bin/... //lib/... //proto/...` (without `~/.cargo/bin`) | Pass (46/46 targets pass, 0 failed) |
+| `tools/autocargo --check` (without `~/.cargo/bin`) | Pass (20 files up to date via `toolchains//:rust-root/bin/cargo`) |
+| `tools/gobuckify-remote --check` | Pass (14 modules, 133 packages up to date) |
+| `tools/gen-proto --check` | Pass |
+| `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Pass (30 passed, 2 ignored; `:miri-sysroot` built offline with `CARGO_NET_OFFLINE=true`) |
+| `tools/buck2 audit providers toolchains//:python_bootstrap` | Resolves to `cpython_archive/bin/python` |
+| `tools/buck2 audit providers --target-platforms //build:linux-x86_64 toolchains//:rust toolchains//:cxx toolchains//:python_bootstrap` & `cquery` | Resolves to `rust-stable`, `llvm-cxx-tools` (`clang.sh`, `clang++.sh`, `linker.sh`, `llvm-ar.sh`), `cpython_archive`; 80 Linux targets resolve |
+| `cargo test --workspace --locked` | Pass (all unit tests + doctests pass) |
+| `go vet ./... && go test ./...` | Pass (all Go packages pass) |
+| Live Linux execution (`LLVM-23.1.6` + Debian Bullseye sysroot linking) | Pending first run on WSL2 / GitHub Actions CI `ubuntu-latest` |
