@@ -1,21 +1,26 @@
-# Toolchains used by the build. Stable Rust, Miri nightly Rust, and Go are
-# pinned downloads verified by sha256, fetched from their origin and never
-# from a remote cache (see distribution.bzl). The C compiler, which rustc uses as its
-# linker, comes from PATH until diff 5 replaces it on Linux.
+# Toolchains used by the build. Stable Rust, Miri nightly Rust (and its stdlib
+# crates), Go, and Python are pinned downloads verified by sha256 on every host.
+# The Rust, Go, and Zig toolchains are fetched from their origin and never from
+# a remote cache (see distribution.bzl).
+# On Linux, C compiling and all linking use the pinned Zig (`zig cc`), which
+# also provides glibc, so no sysroot is needed. On macOS, C/C++ linking uses
+# host Xcode CLT (Apple's MacOSX.sdk cannot be redistributed).
 
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
-load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
+load("@prelude//toolchains:cxx.bzl", "cxx_tools_info_toolchain")
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "remote_python_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//toolchains/go:go_bootstrap_toolchain.bzl", "go_bootstrap_distr", "go_bootstrap_toolchain")
 load("@prelude//toolchains/go:go_toolchain.bzl", "go_distr", "go_toolchain")
+load(":cxx.bzl", "zig_cxx_tools", "zig_runtime_cache")
 load(":distribution.bzl", "toolchain_distribution")
 load(":go.bzl", "GO_RELEASES", "GO_VERSION")
 load(":host.bzl", "by_host")
 load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC", "MIRI_STD_CRATES")
 load(":rust.bzl", "peppy_rust_toolchain")
 load(":rust_stable.bzl", "RUST_COMPONENTS", "RUST_SRC")
+load(":zig.bzl", "ZIG_RELEASES", "ZIG_TARGETS")
 
 # Cargo's default release profile. Applies to every crate, third-party included.
 RELEASE_FLAGS = [
@@ -157,29 +162,115 @@ genrule(
 
 # Miri's standard library, built with MIR for every function. `cargo miri
 # setup` compiles it offline from rust-src and the pinned MIRI_STD_CRATES
-# archives; Buck2 caches the result.
+# archives; on Linux it links build scripts with the pinned Zig, so no host C
+# compiler is needed. Buck2 caches the result.
+_MIRI_COMMON_SETUP = [
+    "repo=`pwd`",
+    "dist=$(location :rust-nightly)",
+    "scratch=`mktemp -d /tmp/peppydb-miri-sysroot.XXXXXX`",
+    "trap 'rm -rf $scratch' EXIT",
+    "mkdir -p $scratch/cargo-home $scratch/vendor",
+] + [
+    "cp -R $(location :miri-std-{name}-{version}) $scratch/vendor/{name}-{version} && printf '{{\"files\":{{}},\"package\":\"{sha256}\"}}' > $scratch/vendor/{name}-{version}/.cargo-checksum.json".format(**crate)
+    for crate in MIRI_STD_CRATES
+] + [
+    "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n[source.vendored-sources]\\ndirectory = \"%s/vendor\"\\n' \"$scratch\" > $scratch/cargo-home/config.toml",
+]
+
+_MIRI_LINUX_HOSTS = {
+    "linux-amd64": "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+    "linux-arm64": "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
+}
+
 genrule(
     name = "miri-sysroot",
     out = "sysroot",
     # The scratch directory must be outside the repository: under buck-out,
     # Cargo would find the repository's Cargo.toml and treat the generated
     # sysroot package as part of that workspace.
-    cmd = " && ".join([
-        "dist=$(location :rust-nightly)",
-        "scratch=`mktemp -d /tmp/peppydb-miri-sysroot.XXXXXX`",
-        "trap 'rm -rf $scratch' EXIT",
-        "mkdir -p $scratch/cargo-home $scratch/vendor",
-    ] + [
-        "cp -R $(location :miri-std-{name}-{version}) $scratch/vendor/{name}-{version} && printf '{{\"files\":{{}},\"package\":\"{sha256}\"}}' > $scratch/vendor/{name}-{version}/.cargo-checksum.json".format(**crate)
-        for crate in MIRI_STD_CRATES
-    ] + [
-        "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n[source.vendored-sources]\\ndirectory = \"%s/vendor\"\\n' \"$scratch\" > $scratch/cargo-home/config.toml",
-        "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin CARGO_HOME=$scratch/cargo-home CARGO_NET_OFFLINE=true RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT $dist/bin/cargo miri setup",
-    ]),
+    cmd = by_host(dict(
+        [
+            (
+                "darwin-arm64",
+                " && ".join(_MIRI_COMMON_SETUP + [
+                    "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin CARGO_HOME=$scratch/cargo-home CARGO_NET_OFFLINE=true RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT $dist/bin/cargo miri setup",
+                ]),
+            ),
+        ] + [
+            (
+                host,
+                " && ".join(_MIRI_COMMON_SETUP + [
+                    # One Zig cache for the whole Cargo build, primed once
+                    # here; Zig's cache is safe for concurrent processes.
+                    "zig=$repo/$(location :zig-{})".format(host),
+                    "wrapper=$repo/$(location :zig_cc.sh)",
+                    "mkdir -p $scratch/zig-global-cache $scratch/zig-local-cache",
+                    "tar -xf $(location :zig-runtime-cache-{}) -C $scratch/zig-global-cache".format(host),
+                    "printf '#!/bin/sh\\nexport ZIG_GLOBAL_CACHE_DIR=%s/zig-global-cache ZIG_LOCAL_CACHE_DIR=%s/zig-local-cache\\nexec /bin/sh %s - %s cc -target {} \"$@\"\\n' $scratch $scratch $wrapper $zig > $scratch/cc".format(ZIG_TARGETS[host]),
+                    "printf '#!/bin/sh\\nexport ZIG_GLOBAL_CACHE_DIR=%s/zig-global-cache ZIG_LOCAL_CACHE_DIR=%s/zig-local-cache\\nexec /bin/sh %s - %s ar \"$@\"\\n' $scratch $scratch $wrapper $zig > $scratch/ar",
+                    "chmod +x $scratch/cc $scratch/ar",
+                    "env -i HOME=$scratch TMPDIR=$scratch PATH=$dist/bin:/usr/bin:/bin CC=$scratch/cc CXX=$scratch/cc AR=$scratch/ar {}=$scratch/cc CARGO_HOME=$scratch/cargo-home CARGO_NET_OFFLINE=true RUSTC=$dist/bin/rustc MIRI_SYSROOT=$OUT $dist/bin/cargo miri setup".format(linker_env),
+                ]),
+            )
+            for host, linker_env in _MIRI_LINUX_HOSTS.items()
+        ],
+    )),
 )
 
-system_cxx_toolchain(
+# Zig, the C compiler, archiver, and linker driver on Linux (zig.bzl, plan
+# 0035). It brings its own clang, lld, glibc stubs, start files, compiler-rt,
+# and libunwind, so no sysroot is needed.
+[
+    toolchain_distribution(
+        name = "zig-" + host,
+        url = archive["url"],
+        sha256 = archive["sha256"],
+        strip_prefix = archive["strip_prefix"],
+    )
+    for host, archive in ZIG_RELEASES.items()
+]
+
+export_file(
+    name = "zig_cc.sh",
+    src = "zig_cc.sh",
+)
+
+# Zig's runtime support for each target, built once and archived. Every link
+# unpacks it into its own scratch cache instead of building it again.
+[
+    zig_runtime_cache(
+        name = "zig-runtime-cache-" + host,
+        src = "zig_runtime_cache_probe.c",
+        target = ZIG_TARGETS[host],
+        zig = ":zig-" + host,
+    )
+    for host in ZIG_RELEASES
+]
+
+zig_cxx_tools(
+    name = "zig-cxx-tools",
+    linker_script = "zig_runtime_debug_discard.ld",
+    runtime_cache = select({
+        "config//cpu:arm64": ":zig-runtime-cache-linux-arm64",
+        "DEFAULT": ":zig-runtime-cache-linux-amd64",
+    }),
+    target = select({
+        "config//cpu:arm64": ZIG_TARGETS["linux-arm64"],
+        "DEFAULT": ZIG_TARGETS["linux-amd64"],
+    }),
+    wrapper = ":zig_cc.sh",
+    zig = select({
+        "config//cpu:arm64": ":zig-linux-arm64",
+        "DEFAULT": ":zig-linux-amd64",
+    }),
+)
+
+cxx_tools_info_toolchain(
     name = "cxx",
+    cxx_tools_info = select({
+        "config//os:linux": ":zig-cxx-tools",
+        "config//os:macos": "prelude//toolchains/cxx/clang:path_clang_tools",
+    }),
     visibility = ["PUBLIC"],
 )
 
@@ -251,6 +342,19 @@ go_toolchain(
     name = "go",
     env_go_arch = GO_ARCH,
     env_go_os = GO_OS,
+    # On Linux, cgo links through `zig cc` against glibc 2.17 (zig.bzl). There,
+    # pthread and the DNS resolver functions are in libpthread and libresolv,
+    # not in libc (glibc merged them in 2.34).
+    # `go build` passes `-lpthread` (runtime/cgo) and `-lresolv` (net) from the
+    # standard library's `#cgo LDFLAGS`, but the prelude's Go link does not, so
+    # add them after the objects here.
+    external_linker_flags = select({
+        "config//os:linux": [
+            "-lpthread",
+            "-lresolv",
+        ],
+        "DEFAULT": [],
+    }),
     go_distr = ":go-distr",
     visibility = ["PUBLIC"],
 )
