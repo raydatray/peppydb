@@ -1035,11 +1035,11 @@ the VM's 12 virtual CPUs, so contended numbers include virtualisation
 effects. The reference runs on WSL2
 and on GCP (plan 0023) were not done.
 
-Commands, from the repository root:
+Commands, from the repository root on Linux (for example WSL2):
 
 ```sh
-tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
-PEPPYDB_SOAK_SECS=120 tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
+tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
+PEPPYDB_SOAK_SECS=120 tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored concurrent_soak
 ```
 
 "Diff 2" is plan 0016's diff 2: the interim inner `RwLock` and global

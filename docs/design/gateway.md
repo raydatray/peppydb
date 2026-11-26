@@ -190,7 +190,7 @@ and, if still needed, forwarding payloads without re-encoding them.
   addresses from `StatusResponse.voters`; `lib/lincheck` drives seeded
   multi-fault schedules (`SIGKILL`, restarts, snapshot catch-up, dynamic
   membership rotations, and Linux `iptables` partitions via `LINCHECK_IPTABLES=1`
-  under `tools/linux-run`) through `peppydb-gateway` and verifies strict
+  on Linux with `CAP_NET_ADMIN`) through `peppydb-gateway` and verifies strict
   linearizability with Porcupine.
 - **Phase 3 (sharding):** Replaces `StaticRouter` with a placement-backed
   `Router` (e.g. `lib/gateway-placement`) that maps keys via μshard to p-shard
