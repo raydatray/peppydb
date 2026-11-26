@@ -101,12 +101,18 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 
 - Run `tools/buck2`, never a `buck2` from `PATH`. It is pinned with DotSlash
   (`brew install dotslash`).
-- Every tool is pinned. Buck2 downloads Go itself (`GO_VERSION` in
-  `build/toolchains/BUCK`), and `tools/fmt.sh` uses its `gofmt`.
-  `tools/check-tools` fails if `rustc` on `PATH` or `GO_VERSION` differ from
-  `rust-toolchain.toml` and `go.mod`. For the plain `go` command, use the
-  Go version in `go.mod`. Put rustup's `~/.cargo/bin` before any other Rust installation
-  on `PATH`.
+- Every tool is pinned and downloaded by Buck2: stable Rust
+  (`build/toolchains/rust_stable.bzl`, updated with `tools/update-rust`), Miri
+  nightly and its stdlib crates (`build/toolchains/miri_nightly.bzl`,
+  `tools/update-miri`), Go (`build/toolchains/go.bzl`, `tools/update-go`),
+  Python (`remote_python_toolchain`), and on Linux Zig, whose `zig cc` is the
+  C compiler and the linker driver (`build/toolchains/zig.bzl`). On macOS,
+  C/C++ linking uses host Xcode CLT because Apple's `MacOSX.sdk` cannot be
+  redistributed.
+  `tools/fmt.sh` runs `rustfmt` and `gofmt` from Buck2's pinned distributions,
+  and `tools/check-tools` verifies that `rust-toolchain.toml` and `go.mod`
+  agree with the Buck2 pins. For the secondary `cargo` and `go` commands, use
+  the versions in `rust-toolchain.toml` and `go.mod`.
 - After changing a `BUCK` file, run `tools/autocargo` and commit the result.
 - To add, change, or remove a crates.io dependency, edit
   `third-party/rust/Cargo.toml`, run `tools/buckify`, and add
@@ -141,8 +147,8 @@ Run commands from the repository root. During iteration, use focused checks
 such as `tools/buck2 test //lib/bf-tree/...`, or run one unit-test
 binary with a filter:
 `tools/buck2 run //lib/bf-tree:bf-tree-unittest -- open::`.
-For Linux runs and contended benchmarks, prefix a command with
-`tools/linux-run` (a pinned Docker container; see `tools/linux/Dockerfile`).
+For Linux runs, `O_DIRECT` tests, `iptables` partitions, and contended
+benchmarks, run directly on Linux (for example WSL2 or CI).
 
 Before completing work that changes code or `BUCK` files, run:
 
