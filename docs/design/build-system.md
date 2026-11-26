@@ -305,3 +305,78 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   The genrule builds in a scratch directory outside the repository, so Cargo
   does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
+
+## CI fanout and BuildBuddy remote cache
+
+Pull-request CI (`.github/workflows/ci.yaml`) uses Buck2's unconfigured query
+graph and an opt-in BuildBuddy remote cache
+([plan 0036](../plans/0036-workspace-ci-cache.md)):
+
+- **Dynamic per-package fanout.** The `plan` job runs `tools/buck2 uquery`
+  over `git diff` (`rdeps(//bin/... + //lib/... + //proto/..., owner(...))`)
+  without downloading any toolchains, emitting `packages`, `run_lint`, and
+  `run_miri`:
+  - `buck2-test` tests every affected package on one runner, so toolchains
+    and cached outputs are downloaded once. `tools/ci/report-checks` then
+    creates one check run per package (`buck2-test (//lib/bf-tree)`,
+    `buck2-test (//lib/engine)`, etc.) from Buck2's `TestResult` events. A
+    job per package would download everything once per package.
+  - `buck2-miri` runs automatically whenever `//lib/bf-tree-circular-buffer`
+    or global build/toolchain files change.
+  - Pure documentation PRs (`docs/` and `*.md`) skip `buck2-lint`,
+    `buck2-test`, and `buck2-miri`.
+  - Global build, toolchain, or dependency changes (`build/`, `third-party/`,
+    `tools/`, `go.mod`, `rust-toolchain.toml`, `.buckconfig`, `ci.yaml`) run
+    all testable packages and Miri.
+- **Opt-in BuildBuddy remote cache.** `build/config/buildbuddy.bcfg`
+  switches `execution_platforms` to `//build:execution-platforms-buildbuddy`
+  (`local_enabled = True`, `remote_enabled = False`,
+  `remote_cache_enabled = True`, `allow_cache_uploads = True`). Every action
+  runs locally. Before it runs, Buck2 looks up the action's digest in
+  BuildBuddy's action cache. On a hit, Buck2 reuses the stored result. On a
+  miss, the action runs locally and Buck2 uploads the result. So CI reuses
+  what the WSL2 machine already built and tested, and the reverse.
+- **Uploads are opt-in per action.** Buck2 uploads the result of a local
+  action only if the executor allows uploads and the action allows them too
+  (`allow_cache_upload` on `ctx.actions.run`). Actions with no preference,
+  such as Rust library compiles, Go actions, and archive unpacking, follow
+  `[buck2] default_allow_cache_upload`. The root `.buckconfig` sets it to
+  `true`; Buck2 ignores the key when it comes from `buildbuddy.bcfg` through
+  `.buckconfig.local`. Without a remote cache the key has no effect. Most
+  `genrule`s and the C compiles of the C++ toolchain set
+  `allow_cache_upload = False`, so CI runs those actions itself.
+- **The cache client needs `engine_address`.** Buck2 creates one remote
+  client for both execution and caching, and it fails without
+  `engine_address`, even when `remote_enabled = False`. Cache errors do not
+  fail a build, so check the `up` figure in the build summary, or
+  `cache_query_error` and `cache_upload_result` in `tools/buck2 log show`,
+  not only `BUILD SUCCEEDED`. `tools/buck2 log what-uploaded` counts only
+  inputs uploaded for remote execution, so it reports 0 here.
+- **Cache hits require identical actions.** Two machines share a result only
+  when they compute the same action digest: the same command, environment,
+  inputs, and platform properties (`OSFamily`, `Arch`). The hermetic
+  toolchains are what make WSL2 and GitHub's Ubuntu runners agree. A
+  toolchain that came from the host `PATH` would make the cache unsafe or
+  useless.
+- **No remote execution.** Hybrid remote execution was tried and removed. It
+  needs a worker image with the host tools that actions call (such as `xz` and
+  `unzip` for archive unpacking), it sends every action input over the
+  network, and Buck2's limited hybrid mode is remote-first: after a cache
+  miss, actions run on BuildBuddy, not on local cores. The goal of sharing
+  results between WSL2 and CI needs only the cache. See plan 0036 for the
+  measurements.
+- **Toolchain inputs must stay small.** A toolchain directory that every
+  compile or link declares as an input is downloaded from the cache by each
+  CI runner that needs it. Keep such directories limited to the files the
+  tools use.
+- **Zero-config local dev.** Default `.buckconfig` stays 100% local so macOS
+  development and contributors without a BuildBuddy key need no setup. CI
+  writes `.buckconfig.local` automatically when `secrets.BUILDBUDDY_API_KEY`
+  is set (falling back to local builds on fork PRs). On Linux/WSL2, opt in
+  once with a git-ignored `.buckconfig.local`:
+
+  ```ini
+  <file:build/config/buildbuddy.bcfg>
+  ```
+
+  and `export BUILDBUDDY_API_KEY=...` in your shell environment.
