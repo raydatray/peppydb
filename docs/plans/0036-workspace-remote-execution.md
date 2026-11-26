@@ -1,6 +1,6 @@
 # 0036: Dynamic affected-target CI and BuildBuddy hybrid execution
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md),
 [plan 0035](0035-workspace-hermetic-build.md).
@@ -15,8 +15,8 @@ Make CI both **visible per package** and **fast**:
    automatically when unsafe crates or toolchains are affected, and skips lint
    and test jobs on docs-only PRs.
 2. Add opt-in **BuildBuddy hybrid execution + remote cache** so GitHub Actions
-   matrix runners and your WSL2 Linux machine share cached artifacts and spill
-   overflow actions to BuildBuddy's Linux executors, while macOS local
+   matrix runners and your WSL2 Linux machine share cached artifacts and run
+   cache misses on BuildBuddy's Linux executors, while macOS local
    development (and any contributor without a BuildBuddy API key) stays 100%
    local with zero configuration.
 
@@ -49,9 +49,10 @@ Make CI both **visible per package** and **fast**:
     setup (including the one-line WSL2 `.buckconfig.local` recipe).
 - **Out of scope:**
   - Remote execution on macOS (macOS local dev remains 100% local).
-  - Building or publishing a custom Docker image for RBE: because plan 0035
-    made all Linux toolchains hermetic inside Buck2, the stock digest-pinned
-    Ubuntu 24.04 image suffices.
+  - Building or publishing a custom Docker image for RBE. Plan 0035 made all
+    Linux toolchains hermetic inside Buck2, so an off-the-shelf image is
+    enough. BuildBuddy's `rbe-ubuntu24-04` image is used, not stock
+    `ubuntu:24.04` (see "Discoveries and plan changes").
   - Replacing the secondary `cargo` and `go` CI jobs.
   - Configuring the BuildBuddy account or GitHub repository secret itself (the
     user adds `BUILDBUDDY_API_KEY` in GitHub Settings → Secrets).
@@ -115,7 +116,7 @@ executor_config = CommandExecutorConfig(
 _RBE_PROPS = {
     "OSFamily": "Linux",
     "Arch": "arm64" if host_info().arch.is_aarch64 else "amd64",
-    "container-image": "docker://docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+    "container-image": "docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:be9853fc45092d2cf2bda3abed30d22182881659a50bf35c7125161d7cfc8a75",
 }
 
 peppy_execution_platform(
@@ -188,14 +189,25 @@ flowchart LR
 
 - **Limited hybrid execution (`use_limited_hybrid = True`,
   `allow_limited_hybrid_fallbacks = True`) immediately:**
-  - *Why:* Always checks local state first, then BuildBuddy's remote cache; on
-    misses, keeps fast local WSL2 / CI cores busy and spills overflow work to
-    BuildBuddy executors (falling back cleanly to local if remote queues or an
-    action is local-only).
-  - *Stock Ubuntu 24.04 image:* Because plan 0035 made every Linux toolchain
-    hermetic inside Buck2, the stock digest-pinned `ubuntu:24.04` image
-    (glibc 2.39, matching LLVM 23.1.6's host requirement) works with zero
-    custom RBE Dockerfile to maintain.
+  - *Behavior:* Limited hybrid is remote-first. It does not race local and
+    remote execution, and it does not fill local cores before it sends work to
+    BuildBuddy. Buck2 first checks its local state and BuildBuddy's action
+    cache. On a cache miss, an action runs on a BuildBuddy executor. An action
+    runs locally only when it prefers or requires local execution (for example,
+    `prefer_local` or `local_only` on `ctx.actions.run`), or when the remote
+    attempt fails and `allow_limited_hybrid_fallbacks = True` retries it
+    locally. Local CPUs are therefore mostly idle on a hybrid build.
+  - *Why:* Limited hybrid gives predictable placement, does not spend remote
+    capacity on duplicate work, and leaves the developer's machine free.
+  - *Alternative:* Full hybrid (`use_limited_hybrid = False`) starts an action
+    locally when a local slot is free and also remotely, and uses the first
+    result. It keeps both sides busy but duplicates work and BuildBuddy usage.
+    Revisit it only with measurements that show limited hybrid is slower.
+  - *Off-the-shelf Ubuntu 24.04 image:* Because plan 0035 made every Linux
+    toolchain hermetic inside Buck2, BuildBuddy's digest-pinned
+    `rbe-ubuntu24-04` image (glibc 2.39, matching LLVM 23.1.6's host
+    requirement) works with no custom RBE Dockerfile to maintain. The stock
+    `ubuntu:24.04` image does not work because it lacks `xz` and `unzip`.
   - *Trade-off:* First cold remote action that invokes LLVM uploads the
     unpacked LLVM toolchain digest to BuildBuddy CAS; subsequent runs reuse it
     from CAS.
@@ -273,8 +285,8 @@ flowchart LR
 
 None. Confirmed during planning:
 - Use limited hybrid execution (`use_limited_hybrid = True`,
-  `allow_limited_hybrid_fallbacks = True`) immediately with digest-pinned stock
-  Ubuntu 24.04.
+  `allow_limited_hybrid_fallbacks = True`) immediately with a digest-pinned
+  Ubuntu 24.04 image.
 - Skip `buck2-lint` on docs-only PRs.
 
 ## Verification strategy
@@ -290,11 +302,56 @@ None. Confirmed during planning:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/4][workspace-rbe][plan]`
-- [ ] `[2/4][workspace-rbe][config]`
-- [ ] `[3/4][workspace-rbe][ci]`
-- [ ] `[4/4][workspace-rbe][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/4][workspace-rbe][config]`
+- [x] `[3/4][workspace-rbe][ci]`
+- [x] `[4/4][workspace-rbe][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Chose limited hybrid execution immediately** (`local_enabled = True`,
+  `remote_enabled = True`, `remote_cache_enabled = True`,
+  `use_limited_hybrid = True`, `allow_limited_hybrid_fallbacks = True`,
+  `allow_cache_uploads = True`) instead of cache-only, using the stock
+  digest-pinned `ubuntu:24.04` image (`glibc 2.39`, matching LLVM 23.1.6's host
+  requirement). The image was later replaced; see the next entry.
+- **Stock `ubuntu:24.04` cannot unpack archives remotely.** The first real
+  hybrid build on WSL2 failed in `http_archive` actions with
+  `xz: Cannot exec` (for `.tar.xz` toolchains such as `rust-stable-src` and
+  `sysroot-linux-amd64`) and `unzip: not found` (for Go module zips). With
+  `digest_algorithms = SHA256` and a `sha256` on every archive, the prelude
+  defers the download and unpacks on the remote executor, which uses host
+  `xz` and `unzip`. Switched `container-image` to BuildBuddy's
+  `rbe-ubuntu24-04` multi-arch index
+  (`sha256:be9853fc45092d2cf2bda3abed30d22182881659a50bf35c7125161d7cfc8a75`).
+  Its amd64 layers contain `/usr/bin/xz`, `/usr/bin/unzip`, `/usr/bin/bzip2`,
+  and `/usr/bin/python3`. It has no `zstd`, and no archive in the repository
+  uses `.tar.zst`.
+- **Limited hybrid is remote-first, not local-first.** An earlier version of
+  this plan said limited hybrid "keeps local cores busy and spills overflow
+  work" to BuildBuddy. That is wrong. The first WSL2 hybrid build ran
+  `1 local, 1213 remote` actions with local CPUs mostly idle. The
+  "Decisions and trade-offs" section now describes the real behavior. The
+  configuration is unchanged.
+- **Skip `buck2-lint` on docs-only PRs** via `plan`'s `run_lint` output.
+- **Unowned files in `owner(...)`:** Verified `tools/buck2 uquery` returns an
+  empty set with exit 0 on unowned files inside a package directory (such as
+  generated `Cargo.toml`), so `plan` handles them cleanly.
+
+### Verification outcomes
+
+Measured on macOS arm64 (`darwin-arm64`) with `~/.cargo/bin` excluded from
+`PATH` for all Buck2 commands:
+
+| Check | Result |
+| --- | --- |
+| `tools/buck2 audit providers //build:execution-platforms-buildbuddy` | Resolves `Hybrid { local, remote, level: Fallback }`, `remote_cache_enabled = true`, `cache_upload_behavior = Enabled`, Ubuntu 24.04 digest |
+| `BUILDBUDDY_API_KEY=dummy tools/buck2 audit config --config-file build/config/buildbuddy.bcfg` | Resolves `remote.buildbuddy.io`, `digest_algorithms = SHA256`, `execution-platforms-buildbuddy` |
+| Synthetic `plan` query matrix (7 cases) | Exact outputs: `docs_only` (`[]`, `lint=False`, `miri=False`), `go_gateway` (3 pkgs), `bf_tree_page` (9 pkgs crossing Rust→Go `lincheck`), `unsafe_cbuf` (7 pkgs, `miri=True`), `deleted_file` (`//lib/load`), `global_build` (all 22 pkgs, `miri=True`), `proto_change` (3 pkgs) |
+| `.github/workflows/ci.yaml` YAML validation | Valid (`plan, buck2-lint, buck2-test, buck2-miri, cargo, go`) |
+| `tools/fmt.sh` & `tools/clippy.sh` | Pass (43 targets clean) |
+| `tools/buck2 test //bin/... //lib/... //proto/...` | Pass (all 46 targets pass; `server` and `lincheck` passed cleanly on re-run after initial 46-target local CPU saturation) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Pass |
+| `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Pass (30/30) |
+| `cargo test --workspace --locked` & `go vet ./... && go test ./...` | Pass |
+| Live BuildBuddy hybrid execution on Linux | Pending first PR/WSL2 run once `BUILDBUDDY_API_KEY` is configured |

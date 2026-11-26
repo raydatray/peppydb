@@ -276,3 +276,56 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   The genrule builds in a scratch directory outside the repository, so Cargo
   does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
+
+## CI fanout and BuildBuddy hybrid execution
+
+Pull-request CI (`.github/workflows/ci.yaml`) uses Buck2's unconfigured query
+graph and opt-in BuildBuddy hybrid execution
+([plan 0036](../plans/0036-workspace-remote-execution.md)):
+
+- **Dynamic per-package fanout.** The `plan` job runs `tools/buck2 uquery`
+  over `git diff` (`rdeps(//bin/... + //lib/... + //proto/..., owner(...))`)
+  without downloading any toolchains, emitting `packages`, `run_lint`, and
+  `run_miri`:
+  - `buck2-test` spawns one GitHub Actions check per affected package
+    (`buck2-test (//lib/bf-tree)`, `buck2-test (//lib/engine)`, etc.).
+  - `buck2-miri` runs automatically whenever `//lib/bf-tree-circular-buffer`
+    or global build/toolchain files change.
+  - Pure documentation PRs (`docs/` and `*.md`) skip `buck2-lint`,
+    `buck2-test`, and `buck2-miri`.
+  - Global build, toolchain, or dependency changes (`build/`, `third-party/`,
+    `tools/`, `go.mod`, `rust-toolchain.toml`, `.buckconfig`, `ci.yaml`) run
+    all testable packages and Miri.
+- **Opt-in BuildBuddy hybrid execution.** `build/config/buildbuddy.bcfg`
+  switches `execution_platforms` to `//build:execution-platforms-buildbuddy`
+  (`local_enabled = True`, `remote_enabled = True`,
+  `remote_cache_enabled = True`, `use_limited_hybrid = True`,
+  `allow_limited_hybrid_fallbacks = True`, `allow_cache_uploads = True`),
+  using BuildBuddy's digest-pinned `rbe-ubuntu24-04` container image
+  (Ubuntu 24.04, glibc 2.39). The compilers, linkers, and sysroots are
+  hermetic Buck2 inputs, but remote actions still run some host tools from the
+  image. In particular, when an `http_archive` has a SHA-256 checksum, Buck2
+  defers the download, and the prelude unpacks the archive on the remote
+  executor with `tar -J` (which needs `xz`) or `unzip`. The stock
+  `ubuntu:24.04` image has neither tool, so the remote image must provide
+  them. We use BuildBuddy's image rather than maintaining a custom one.
+- **Limited hybrid is remote-first.** With `use_limited_hybrid = True`, Buck2
+  does not race local and remote execution. After a cache miss, an action
+  runs on BuildBuddy. It runs locally only when the action prefers or requires
+  local execution (`prefer_local` or `local_only` on `ctx.actions.run`, the
+  genrule `large_copy` label, or a rule's `link_execution_preference`), or
+  when a remote attempt fails and `allow_limited_hybrid_fallbacks = True`
+  retries it locally. Local CPUs are mostly idle during a hybrid build. Full
+  hybrid (`use_limited_hybrid = False`) would race each action locally and
+  remotely, at the cost of duplicate work and BuildBuddy usage.
+- **Zero-config local dev.** Default `.buckconfig` stays 100% local so macOS
+  development and contributors without a BuildBuddy key need no setup. CI
+  writes `.buckconfig.local` automatically when `secrets.BUILDBUDDY_API_KEY`
+  is set (falling back to local builds on fork PRs). On Linux/WSL2, opt in
+  once with a git-ignored `.buckconfig.local`:
+
+  ```ini
+  <file:build/config/buildbuddy.bcfg>
+  ```
+
+  and `export BUILDBUDDY_API_KEY=...` in your shell environment.
