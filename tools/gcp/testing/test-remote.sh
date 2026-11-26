@@ -1,8 +1,8 @@
 #!/bin/sh
-# Offline tests of tools/gcp/remote-bench.sh (plan 0024). Linux only; run in
-# the Linux container:
+# Offline tests of tools/gcp/remote-bench.sh (plan 0024). Linux only (for
+# example WSL2):
 #
-#   tools/linux-run sh tools/gcp/testing/test-remote.sh
+#   sh tools/gcp/testing/test-remote.sh
 #
 # Fake test binaries print libtest-shaped output; stub gcloud, apt-get,
 # systemctl, and snap commands record their calls. Nothing contacts GCP.

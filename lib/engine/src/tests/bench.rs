@@ -1,6 +1,6 @@
 //! Informational engine benchmarks, not gates (plan 0023). Run in release
-//! mode, on Linux for contended and direct-I/O numbers (`tools/linux-run`
-//! sets `PEPPYDB_BENCH_DIR` to an ext4 volume):
+//! mode on Linux (for example WSL2), with `PEPPYDB_BENCH_DIR` set to a
+//! filesystem that supports `O_DIRECT` (not `tmpfs`):
 //!
 //! ```text
 //! tools/buck2 run @build/mode/release //lib/engine:engine-unittest -- --ignored --nocapture tests::bench::

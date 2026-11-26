@@ -6,7 +6,7 @@
 //! tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored --nocapture tests::bench::
 //! ```
 //!
-//! Contended numbers are meaningful only on Linux (`tools/linux-run`): the
+//! Contended numbers are meaningful only on Linux (for example WSL2): the
 //! macOS `RwLock` parks readers under reader-reader contention. Settings:
 //! `PEPPYDB_BENCH_KEY` and `PEPPYDB_BENCH_VALUE` (bytes, default 8 and 16),
 //! `PEPPYDB_BENCH_CIRCULAR_BUFFER_MIB` (default 32), `PEPPYDB_BENCH_KEYS`

@@ -1,5 +1,5 @@
-//! Direct I/O (`Io::Direct`, plan 0023). The Linux parts run in the
-//! container (`tools/linux-run`), with data in `PEPPYDB_BENCH_DIR` when set:
+//! Direct I/O (`Io::Direct`, plan 0023). The Linux parts run natively on
+//! Linux (for example WSL2), with data in `PEPPYDB_BENCH_DIR` when set:
 //! `tmpfs` rejects `O_DIRECT`, so a directory that cannot take it is a skip,
 //! not a pass.
 

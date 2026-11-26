@@ -19,12 +19,12 @@ import (
 // partitions alongside leader/follower crashes through peppydb-gateway and
 // checks client-visible linearizability with Porcupine.
 //
-// Run under tools/linux-run (with CAP_NET_ADMIN):
+// Run on Linux (for example WSL2) with CAP_NET_ADMIN:
 //
-//	tools/linux-run env LINCHECK_IPTABLES=1 tools/buck2 run //lib/lincheck:lincheck-test -- -test.v -test.run TestE2ELinuxIPTablesPartitionFaultsLinearizable
+//	LINCHECK_IPTABLES=1 tools/buck2 run //lib/lincheck:lincheck-test -- -test.v -test.run TestE2ELinuxIPTablesPartitionFaultsLinearizable
 func TestE2ELinuxIPTablesPartitionFaultsLinearizable(t *testing.T) {
 	if os.Getenv("LINCHECK_IPTABLES") != "1" {
-		t.Skip("set LINCHECK_IPTABLES=1 under tools/linux-run to run iptables partition fault tests")
+		t.Skip("set LINCHECK_IPTABLES=1 on Linux (with CAP_NET_ADMIN) to run iptables partition fault tests")
 	}
 	serverBin, gwBin := requireBinaries(t)
 
