@@ -209,8 +209,21 @@ def render(targets):
     return files
 
 
+def rust_root():
+    """Path to the Buck2-pinned stable Rust distribution."""
+    out = subprocess.check_output(
+        [str(ROOT / "tools" / "buck2"), "build", "toolchains//:rust-root", "--show-full-simple-output"],
+        cwd=ROOT,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return pathlib.Path(out.strip())
+
+
 def derive_lock(files, targets):
     """Resolve the workspace lock from the third-party lock, in a scratch copy."""
+    dist = rust_root()
+    env = {**os.environ, "RUSTC": str(dist / "bin" / "rustc")}
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         for path, text in files.items():
@@ -224,8 +237,8 @@ def derive_lock(files, targets):
         shutil.copy(ROOT / "rust-toolchain.toml", tmp)
         shutil.copy(THIRD_PARTY / "Cargo.lock", tmp / "Cargo.lock")
         subprocess.run(
-            ["cargo", "update", "--workspace", "--quiet"],
-            cwd=tmp, check=True,
+            [str(dist / "bin" / "cargo"), "update", "--workspace", "--quiet"],
+            cwd=tmp, env=env, check=True,
         )
         return (tmp / "Cargo.lock").read_text()
 

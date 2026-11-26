@@ -1,15 +1,12 @@
-"""The Rust toolchain: stable rustc from PATH, or a pinned nightly for Miri.
+"""The Rust toolchain: pinned stable rustc, or a pinned nightly for Miri.
 
-By default this is the prelude's `system_rust_toolchain`: `rustc`,
-`rustdoc`, and `clippy-driver` come from PATH, where rustup pins them with
-rust-toolchain.toml.
-
-With `nightly` set (only under `@build/mode/miri`), the compiler and rustdoc
-come from a nightly toolchain that Buck2 downloads (miri_nightly.bzl), and
-the toolchain provides a Miri driver. Every `rust_test` then has a `[miri]`
-sub-target that interprets it. The whole toolchain switches, not only the
-driver, because procedural macros must be built by the same compiler that
-loads them.
+Both toolchains are downloaded by Buck2 and verified by sha256:
+- Default: stable Rust from `rust_stable.bzl` (pinned by `tools/update-rust`),
+  including `rustc`, `rustdoc`, and `clippy-driver`.
+- `@build/mode/miri`: nightly Rust from `miri_nightly.bzl` (pinned by
+  `tools/update-miri`), providing a Miri driver and sysroot so every `rust_test`
+  gets a `[miri]` sub-target. The whole toolchain switches, not only the driver,
+  because procedural macros must be built by the same compiler that loads them.
 """
 
 load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustToolchainInfo")
@@ -26,14 +23,13 @@ _TRIPLE = select({
 })
 
 def _impl(ctx):
-    compiler = RunInfo(args = ["rustc"])
-    rustdoc = RunInfo(args = ["rustdoc"])
+    dist = ctx.attrs.dist[DefaultInfo].default_outputs[0]
+    compiler = RunInfo(args = cmd_args(dist, format = "{}/bin/rustc"))
+    rustdoc = RunInfo(args = cmd_args(dist, format = "{}/bin/rustdoc"))
+    clippy_driver = RunInfo(args = cmd_args(dist, format = "{}/bin/clippy-driver"))
     miri_driver = None
-    if ctx.attrs.nightly:
-        dist = ctx.attrs.nightly[DefaultInfo].default_outputs[0]
+    if ctx.attrs.miri_sysroot:
         sysroot = ctx.attrs.miri_sysroot[DefaultInfo].default_outputs[0]
-        compiler = RunInfo(args = cmd_args(dist, format = "{}/bin/rustc"))
-        rustdoc = RunInfo(args = cmd_args(dist, format = "{}/bin/rustdoc"))
 
         # The driver needs Miri's own sysroot (a standard library built with
         # MIR for every function) both when it compiles dependencies and when
@@ -47,7 +43,7 @@ def _impl(ctx):
         DefaultInfo(),
         RustToolchainInfo(
             allow_lints = ctx.attrs.allow_lints,
-            clippy_driver = RunInfo(args = ["clippy-driver"]),
+            clippy_driver = clippy_driver,
             compiler = compiler,
             default_edition = ctx.attrs.default_edition,
             deny_lints = ctx.attrs.deny_lints,
@@ -69,12 +65,12 @@ peppy_rust_toolchain = rule(
         "allow_lints": attrs.list(attrs.string(), default = []),
         "default_edition": attrs.option(attrs.string(), default = None),
         "deny_lints": attrs.list(attrs.string(), default = []),
+        # The merged Rust toolchain directory (bin/, lib/).
+        "dist": attrs.exec_dep(providers = [DefaultInfo]),
         "doctests": attrs.bool(default = False),
         "miri_flags": attrs.list(attrs.arg(), default = []),
-        # The Miri sysroot directory; required with `nightly`.
+        # The Miri sysroot directory; set only under `@build/mode/miri`.
         "miri_sysroot": attrs.option(attrs.exec_dep(providers = [DefaultInfo]), default = None),
-        # The merged nightly toolchain directory (bin/, lib/).
-        "nightly": attrs.option(attrs.exec_dep(providers = [DefaultInfo]), default = None),
         "rustc_flags": attrs.list(attrs.arg(), default = []),
         "rustc_target_triple": attrs.string(default = _TRIPLE),
     },
