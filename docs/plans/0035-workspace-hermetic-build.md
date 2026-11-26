@@ -1,6 +1,6 @@
 # 0035: Hermetic Buck2 toolchains and removal of `tools/linux-run`
 
-**Status:** In progress
+**Status:** Implemented; full verification on Linux (WSL2) in progress
 
 **Design references:** [Build system](../design/build-system.md),
 [remote benchmarks](../design/remote-benchmarks.md),
@@ -202,8 +202,11 @@ glibc sysroot (`crt*.o`, `libc.so`, `libgcc_s`).
 - Pin two official archive pairs in `build/toolchains/llvm.bzl` (for
   `linux-amd64` and `linux-arm64`, sha256-verified):
   - Official `llvm/llvm-project` release (`LLVM-23.1.6-Linux-X64.tar.xz` and
-    `LLVM-23.1.6-Linux-ARM64.tar.xz`), providing `bin/clang`, `bin/clang++`,
-    `bin/ld.lld`, and `bin/llvm-ar`.
+    `LLVM-23.1.6-Linux-ARM64.tar.xz`). An `http_file` downloads the archive,
+    and a `genrule` extracts only the paths in `LLVM_KEEP`: `bin/clang`,
+    `bin/clang++`, `bin/clang-23`, `bin/lld`, `bin/ld.lld`, `bin/llvm-ar`, and
+    `lib/clang` (clang's built-in headers and compiler-rt). The full release
+    unpacks to 12 GB; the extracted subset is about 630 MB.
   - Chromium's official Debian Bullseye sysroot (`debian_bullseye_amd64` and
     `debian_bullseye_arm64` from `commondatastorage.googleapis.com/chrome-linux-sysroot`),
     providing glibc 2.31 headers, `crt*.o`, `libc.so`, and `libgcc`. Binaries
@@ -272,8 +275,9 @@ cxx_tools_info_toolchain(
   - *No toolchain shims or cache dirs:* Unlike `zig cc`, `clang++ --sysroot`
     writes no hidden cache directory and needs no synthesized compiler-rt/CRT
     shims.
-  - *Trade-off:* Larger one-time download (~450 MB LLVM tarball + ~40 MB
-    sysroot, cached by Buck2). Only downloaded on Linux hosts.
+  - *Trade-off:* Larger one-time download (a 1.9 GB LLVM archive + a ~40 MB
+    sysroot archive, cached by Buck2), and about 1.5 minutes to extract the
+    LLVM subset. Only downloaded on Linux hosts.
   - *Alternatives rejected:*
     - `zig cc`: smaller (~45 MB), but introduces an unrelated toolchain,
       requires writable `ZIG_*_CACHE_DIR`, and substitutes Zig's CRT shims.
@@ -431,14 +435,87 @@ None. Confirmed during planning:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/7][workspace-hermetic][plan]`
-- [ ] `[2/7][workspace-hermetic][rust]`
-- [ ] `[3/7][workspace-hermetic][miri]`
-- [ ] `[4/7][workspace-hermetic][python]`
-- [ ] `[5/7][workspace-hermetic][cxx]`
-- [ ] `[6/7][workspace-hermetic][linux-run]`
-- [ ] `[7/7][workspace-hermetic][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/7][workspace-hermetic][rust]`
+- [x] `[3/7][workspace-hermetic][miri]`
+- [x] `[4/7][workspace-hermetic][python]`
+- [x] `[5/7][workspace-hermetic][cxx]`
+- [x] `[6/7][workspace-hermetic][linux-run]`
+- [x] `[7/7][workspace-hermetic][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Buck2's built-in `cmd_script` replaced hand-written wrappers.** Using
+  `@prelude//utils:cmd_script.bzl` in `build/toolchains/cxx.bzl` generates the
+  executable wrappers for `clang`, `clang++`, `linker` (`clang++ -fuse-ld=lld`),
+  and `llvm-ar` while automatically tracking both the LLVM and Debian sysroot
+  directories as hidden inputs.
+- **Cargo vendored `.cargo-checksum.json` requires the `"package"` sha256.**
+  During `:miri-sysroot` offline builds, Cargo verifies each vendored crate's
+  checksum against `rust-src`'s `library/Cargo.lock`, so `.cargo-checksum.json`
+  writes `{"files":{},"package":"<sha256>"}` using the pinned digest from
+  `MIRI_STD_CRATES` (31 crates for `nightly-2026-11-01`).
+- **Genrule shell substitution uses backticks.** Buck2 interprets `$(pwd)` as a
+  macro expansion; `:miri-sysroot` uses ``repo=`pwd` `` to construct absolute
+  paths for the Linux linker wrapper inside `$scratch`.
+- **Chromium's Debian Bullseye sysroot extracts directly to `./`** (no
+  `strip_prefix`) and has no filename extension, so its `http_archive` specifies
+  `type = "tar.xz"`. `LLVM-23.1.6-Linux-{X64,ARM64}.tar.xz` uses
+  `strip_prefix = "LLVM-23.1.6-Linux-{X64,ARM64}"`.
+- **The Debian sysroot contains a file name with a backslash.**
+  `lib/systemd/system/system-systemd\x2dcryptsetup.slice` makes Buck2 fail
+  when it collects the unpacked output ("slashes in path"). The stack was first
+  verified on macOS, which never unpacks the Linux sysroot, so the first Linux
+  build found the problem. The sysroot `http_archive` now uses
+  `excludes = [r"\./lib/systemd/"]`. A C/C++ sysroot needs no systemd unit
+  files. A failed unpack leaves the bad file in `buck-out`, and Buck2 cannot
+  delete it, so remove that output directory by hand once.
+- **The full LLVM release is too large to be an action input.** The release
+  unpacks to 12 GB (10,528 files): it includes Fortran, MLIR, LLDB, `libclang`,
+  `clangd`, and 170 more tools. `llvm_cxx_tools` declares the LLVM directory
+  as an input of every C/C++ compile and every Rust or cgo link. Locally this
+  costs only hashing, so the macOS verification did not show it. With a
+  remote cache or remote execution, each machine must download the whole
+  directory (plan 0036 measured 1.87 TB of cache downloads). The LLVM target
+  now downloads the archive with `http_file` and extracts only `LLVM_KEEP`
+  (631 MB, 431 files). `clang`, `lld`, and `llvm-ar` need only host system
+  libraries (`libc`, `libm`, `libstdc++`, `libgcc_s`, `libz`), not the LLVM
+  shared libraries in `lib/`. The prelude's `http_archive` `excludes` cannot
+  express an allowlist, because its regexes do not support lookahead.
+- **cgo links need `-lpthread` and `-lresolv` with the Bullseye sysroot.** The
+  first Linux build failed to link Go test binaries that use cgo, with
+  `undefined symbol: pthread_create` (and other `pthread_*` functions) and
+  `undefined symbol: __res_search`. glibc 2.31 keeps these in `libpthread` and
+  `libresolv`; glibc 2.34 and later moved them into `libc`, which is why host
+  builds on Ubuntu 24.04 (glibc 2.39) worked. The Go standard library asks
+  for them (`#cgo LDFLAGS: -lpthread` in `runtime/cgo` and `-lresolv` in
+  `net`), but the prelude's Go link did not pass them. The `go_toolchain` now
+  sets `external_linker_flags = ["-lpthread", "-lresolv"]` on Linux. The
+  prelude places these after the objects. The flags stay valid with newer
+  glibc, where both libraries remain as empty compatibility stubs.
+- **Go pins extracted into `build/toolchains/go.bzl`.** Added
+  `tools/update-go` matching `tools/update-rust` and `tools/update-miri`, so
+  every pinned toolchain has a dedicated update command and `tools/check-tools`
+  compares `rust-toolchain.toml` and `go.mod` against `rust_stable.bzl` and
+  `go.bzl`.
+
+### Verification outcomes
+
+Measured on macOS arm64 (`darwin-arm64`) with `~/.cargo/bin` removed from
+`PATH` (`PATH=/opt/homebrew/bin:/usr/bin:/bin`) for all Buck2 commands:
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh` (without `~/.cargo/bin`) | Pass (uses `toolchains//:rust-root/bin/rustfmt` and `toolchains//:go-root/bin/gofmt`) |
+| `tools/clippy.sh` (without `~/.cargo/bin`) | Pass (43 targets clean via `toolchains//:rust-stable`) |
+| `tools/buck2 test //bin/... //lib/... //proto/...` (without `~/.cargo/bin`) | Pass (46/46 targets pass, 0 failed) |
+| `tools/autocargo --check` (without `~/.cargo/bin`) | Pass (20 files up to date via `toolchains//:rust-root/bin/cargo`) |
+| `tools/gobuckify-remote --check` | Pass (14 modules, 133 packages up to date) |
+| `tools/gen-proto --check` | Pass |
+| `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Pass (30 passed, 2 ignored; `:miri-sysroot` built offline with `CARGO_NET_OFFLINE=true`) |
+| `tools/buck2 audit providers toolchains//:python_bootstrap` | Resolves to `cpython_archive/bin/python` |
+| `tools/buck2 audit providers --target-platforms //build:linux-x86_64 toolchains//:rust toolchains//:cxx toolchains//:python_bootstrap` & `cquery` | Resolves to `rust-stable`, `llvm-cxx-tools` (`clang.sh`, `clang++.sh`, `linker.sh`, `llvm-ar.sh`), `cpython_archive`; 80 Linux targets resolve |
+| `cargo test --workspace --locked` | Pass (all unit tests + doctests pass) |
+| `go vet ./... && go test ./...` | Pass (all Go packages pass) |
+| Live Linux execution (`LLVM-23.1.6` + Debian Bullseye sysroot linking) | First WSL2 runs found three Linux-only bugs (sysroot file name, 12 GB LLVM input, cgo link libraries); see "Discoveries". After the fixes, `tools/buck2 build //lib/...` succeeds on WSL2. The full test suite on WSL2 is in progress |
+| LLVM subset extraction (WSL2) | `tar -xJf` with the `LLVM_KEEP` paths: 631 MB, 431 files; `clang --version`, `ld.lld --version`, and `llvm-ar --version` report 23.1.6 |
