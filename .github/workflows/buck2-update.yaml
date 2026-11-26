@@ -35,10 +35,10 @@ jobs:
         if: steps.release.outputs.changed == 'true'
         run: tools/update-buck2 "${{ steps.release.outputs.tag }}"
 
+      # Installed only for the secondary `cargo test --workspace --locked`
+      # check below; Buck2 downloads its own toolchains.
       - uses: dtolnay/rust-toolchain@1.98.1
         if: steps.release.outputs.changed == 'true'
-        with:
-          components: clippy, rustfmt, rust-src
       - name: Install DotSlash
         if: steps.release.outputs.changed == 'true'
         run: tools/ci/install-dotslash
