@@ -8,12 +8,15 @@ fix=false
 [ "${1:-}" = "--fix" ] && fix=true
 status=0
 
-# Rust. rustfmt follows `mod` declarations from each crate root, so this
-# covers every Rust file without needing Cargo.
+# Rust, with rustfmt from the pinned Rust distribution (not from PATH).
+# rustfmt follows `mod` declarations from each crate root, so this covers every
+# Rust file without needing Cargo.
+rustroot=$(tools/buck2 build toolchains//:rust-root --show-full-simple-output 2>/dev/null)
+rustfmt="$rustroot/bin/rustfmt"
 if $fix; then
-    rustfmt lib/*/src/lib.rs proto/*/*/rust/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs
+    "$rustfmt" lib/*/src/lib.rs proto/*/*/rust/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs
 else
-    rustfmt --check lib/*/src/lib.rs proto/*/*/rust/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs || status=1
+    "$rustfmt" --check lib/*/src/lib.rs proto/*/*/rust/src/lib.rs bin/*/src/main.rs tools/*/src/main.rs || status=1
 fi
 
 # Go, with gofmt from the pinned Go distribution (not from PATH). Go files

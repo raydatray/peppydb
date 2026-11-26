@@ -1,7 +1,7 @@
-# Toolchains used by the build. rustc, clippy-driver, and rustdoc come from
-# PATH through rustup, which pins them with rust-toolchain.toml. The C compiler,
-# which rustc uses as its linker, comes from PATH. Go is a pinned download, and
-# so is the nightly Rust toolchain that `@build/mode/miri` uses.
+# Toolchains used by the build. Stable Rust, Miri nightly Rust, and Go are
+# pinned downloads verified by sha256, fetched from their origin and never
+# from a remote cache (see distribution.bzl). The C compiler, which rustc uses as its
+# linker, comes from PATH until diff 5 replaces it on Linux.
 
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
@@ -10,9 +10,12 @@ load("@prelude//toolchains:python.bzl", "remote_python_toolchain", "system_pytho
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//toolchains/go:go_bootstrap_toolchain.bzl", "go_bootstrap_distr", "go_bootstrap_toolchain")
 load("@prelude//toolchains/go:go_toolchain.bzl", "go_distr", "go_toolchain")
+load(":distribution.bzl", "toolchain_distribution")
+load(":go.bzl", "GO_RELEASES", "GO_VERSION")
 load(":host.bzl", "by_host")
 load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC")
 load(":rust.bzl", "peppy_rust_toolchain")
+load(":rust_stable.bzl", "RUST_COMPONENTS", "RUST_SRC")
 
 # Cargo's default release profile. Applies to every crate, third-party included.
 RELEASE_FLAGS = [
@@ -51,15 +54,57 @@ peppy_rust_toolchain(
         "root//build:mode-miri": ["root//build:mode-miri"],
         "DEFAULT": [],
     }),
-    # Only `@build/mode/miri` uses the nightly; other modes never download it.
+    # Default builds use pinned stable Rust; `@build/mode/miri` switches to the
+    # pinned nightly so procedural macros match the Miri driver.
+    dist = select({
+        "root//build:mode-miri": ":rust-nightly",
+        "DEFAULT": ":rust-stable",
+    }),
     miri_sysroot = select({
         "root//build:mode-miri": ":miri-sysroot",
         "DEFAULT": None,
     }),
-    nightly = select({
-        "root//build:mode-miri": ":rust-nightly",
-        "DEFAULT": None,
+    visibility = ["PUBLIC"],
+)
+
+# The stable Rust toolchain, pinned by tools/update-rust. Each component is a
+# sha256-checked archive for the host; rust-src is the same on every host.
+[
+    toolchain_distribution(
+        name = "rust-stable-{}-{}".format(component, host),
+        url = archive["url"],
+        sha256 = archive["sha256"],
+        strip_prefix = archive["strip_prefix"],
+    )
+    for host, components in RUST_COMPONENTS.items()
+    for component, archive in components.items()
+]
+
+toolchain_distribution(
+    name = "rust-stable-src",
+    url = RUST_SRC["url"],
+    sha256 = RUST_SRC["sha256"],
+    strip_prefix = RUST_SRC["strip_prefix"],
+)
+
+# One toolchain directory (bin/, lib/, lib/rustlib/...), as rustup lays it out.
+genrule(
+    name = "rust-stable",
+    out = "dist",
+    cmd = by_host({
+        host: " && ".join(["mkdir -p $OUT"] + [
+            "cp -R $(location :rust-stable-{}-{})/. $OUT/".format(component, host)
+            for component in sorted(components)
+        ] + ["cp -R $(location :rust-stable-src)/. $OUT/"])
+        for host, components in RUST_COMPONENTS.items()
     }),
+)
+
+# The pinned stable Rust distribution for this host; tools/fmt.sh and
+# tools/autocargo run its rustfmt and cargo.
+alias(
+    name = "rust-root",
+    actual = ":rust-stable",
     visibility = ["PUBLIC"],
 )
 
@@ -67,9 +112,9 @@ peppy_rust_toolchain(
 # component is a sha256-checked archive for the host; rust-src is the same on
 # every host.
 [
-    http_archive(
+    toolchain_distribution(
         name = "rust-nightly-{}-{}".format(component, host),
-        urls = [archive["url"]],
+        url = archive["url"],
         sha256 = archive["sha256"],
         strip_prefix = archive["strip_prefix"],
     )
@@ -77,9 +122,9 @@ peppy_rust_toolchain(
     for component, archive in components.items()
 ]
 
-http_archive(
+toolchain_distribution(
     name = "rust-nightly-src",
-    urls = [MIRI_RUST_SRC["url"]],
+    url = MIRI_RUST_SRC["url"],
     sha256 = MIRI_RUST_SRC["sha256"],
     strip_prefix = MIRI_RUST_SRC["strip_prefix"],
 )
@@ -156,23 +201,17 @@ noop_test_toolchain(
     visibility = ["PUBLIC"],
 )
 
-# Go: the official release for the host, downloaded and checked by sha256.
-# GO_VERSION must match go.mod; tools/check-tools checks it.
-GO_VERSION = "1.27.0"
-
-GO_RELEASES = {
-    # name: (GOOS, GOARCH, sha256)
-    "darwin-arm64": ("darwin", "arm64", "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"),
-    "linux-amd64": ("linux", "amd64", "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"),
-    "linux-arm64": ("linux", "arm64", "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"),
-}
+# Go: the official release for the host, downloaded and checked by sha256,
+# pinned by tools/update-go in go.bzl. GO_VERSION must match go.mod;
+# tools/check-tools checks it.
 
 [
-    http_archive(
+    toolchain_distribution(
         name = "go-" + name,
-        urls = ["https://go.dev/dl/go{}.{}.tar.gz".format(GO_VERSION, name)],
+        url = "https://go.dev/dl/go{}.{}.tar.gz".format(GO_VERSION, name),
         sha256 = sha256,
         strip_prefix = "go",
+        compression = "gz",
     )
     for name, (_, _, sha256) in GO_RELEASES.items()
 ]
