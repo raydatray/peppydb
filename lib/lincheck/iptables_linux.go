@@ -59,7 +59,7 @@ func (g *PartitionGuard) Heal() {
 
 // IPTablesPartitionFault isolates the current leader (or a random voter) from
 // its peers using iptables, waits for majority failover, then heals and
-// confirms catch-up. Requires CAP_NET_ADMIN (run under tools/linux-run).
+// confirms catch-up. Requires Linux with CAP_NET_ADMIN.
 func IPTablesPartitionFault(
 	ctx context.Context,
 	cluster *Cluster,

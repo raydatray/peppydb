@@ -296,11 +296,11 @@ impl Drop for PartitionGuard {
 /// distinct loopback IPs (`127.0.0.11..=13`), verifies majority failover and
 /// old-leader rejection, then heals and confirms rejoin.
 ///
-/// Run under `tools/linux-run` (with `CAP_NET_ADMIN`):
-/// `tools/linux-run tools/buck2 run //lib/server:server-unittest -- --ignored tests::cluster::iptables_partition_isolates_leader_and_heals_cleanly`
+/// Run on Linux (for example WSL2) with `CAP_NET_ADMIN`:
+/// `tools/buck2 run //lib/server:server-unittest -- --ignored tests::cluster::iptables_partition_isolates_leader_and_heals_cleanly`
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Linux with iptables (run under tools/linux-run)"]
+#[ignore = "requires Linux with iptables and CAP_NET_ADMIN"]
 async fn iptables_partition_isolates_leader_and_heals_cleanly() {
     let base_port = free_addrs(1)[0].port();
     let addrs: BTreeMap<u64, SocketAddr> = [

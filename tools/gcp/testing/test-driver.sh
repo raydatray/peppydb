@@ -1,8 +1,8 @@
 #!/bin/sh
 # Offline tests of tools/gcp-bench and tools/gcp/check-bucket.py (plan 0024).
-# Linux only; run in the Linux container:
+# Linux only (for example WSL2):
 #
-#   tools/linux-run sh tools/gcp/testing/test-driver.sh
+#   sh tools/gcp/testing/test-driver.sh
 #
 # The stub gcloud in tools/gcp/testing/bin simulates GCS and Compute Engine.
 # Its "VM" runs tools/gcp/remote-bench.sh in the background, so most cases
