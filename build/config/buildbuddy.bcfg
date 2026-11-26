@@ -1,0 +1,17 @@
+# Opt-in BuildBuddy hybrid execution and shared remote cache/CAS (plan 0036).
+#
+# Local Linux/WSL2 dev (one-time opt-in): put `<file:build/config/buildbuddy.bcfg>`
+# in a git-ignored `.buckconfig.local` and export `BUILDBUDDY_API_KEY`.
+# GitHub Actions CI activates this automatically when `secrets.BUILDBUDDY_API_KEY`
+# is set. macOS local dev does not include this file and stays 100% local.
+[buck2]
+digest_algorithms = SHA256
+
+[buck2_re_client]
+engine_address = remote.buildbuddy.io
+action_cache_address = remote.buildbuddy.io
+cas_address = remote.buildbuddy.io
+http_headers = x-buildbuddy-api-key:$BUILDBUDDY_API_KEY
+
+[build]
+execution_platforms = root//build:execution-platforms-buildbuddy

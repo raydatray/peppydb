@@ -3,4 +3,5 @@ target/**
 buck-out/**
 .zed/**
 /rust-project.json
+/.buckconfig.local
 .peppydb-bench/**

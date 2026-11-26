@@ -91,3 +91,37 @@ peppy_execution_platforms(
     platforms = [":exec-host", ":exec-host-miri"],
     visibility = ["PUBLIC"],
 )
+
+# BuildBuddy hybrid execution platforms (plan 0036), selected via
+# `build/config/buildbuddy.bcfg` on Linux (WSL2 and CI). All Linux compilers,
+# linkers, and sysroots are hermetic Buck2 inputs (plan 0035), but remote
+# actions still run host tools from the image: prelude `http_archive` unpacks
+# deferred downloads remotely with `tar -J` (needs `xz`) and `unzip`. The stock
+# `ubuntu:24.04` image has neither, so use BuildBuddy's digest-pinned
+# `rbe-ubuntu24-04` image (multi-arch index; Ubuntu 24.04, glibc 2.39), which
+# adds `xz`, `unzip`, `bzip2`, and `python3`.
+_BUILDBUDDY_PROPS = {
+    "OSFamily": "Linux",
+    "Arch": "arm64" if host_info().arch.is_aarch64 else "amd64",
+    "container-image": "docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:be9853fc45092d2cf2bda3abed30d22182881659a50bf35c7125161d7cfc8a75",
+}
+
+peppy_execution_platform(
+    name = "exec-host-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os],
+    remote = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platform(
+    name = "exec-host-miri-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os, ":mode-miri"],
+    remote = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platforms(
+    name = "execution-platforms-buildbuddy",
+    platforms = [":exec-host-buildbuddy", ":exec-host-miri-buildbuddy"],
+    visibility = ["PUBLIC"],
+)
