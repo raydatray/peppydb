@@ -7,25 +7,201 @@ permissions:
   contents: read
 
 jobs:
-  buck2:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.affected.outputs.packages }}
+      run_lint: ${{ steps.affected.outputs.run_lint }}
+      run_miri: ${{ steps.affected.outputs.run_miri }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install DotSlash
+        run: tools/ci/install-dotslash
+      - name: Compute affected Buck2 packages
+        id: affected
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          ROOT = pathlib.Path.cwd()
+          UNIVERSE = "//bin/... + //lib/... + //proto/..."
+          TESTABLE = 'kind("rust_library|rust_test|go_test", {})'
+          GLOBAL_PREFIXES = ("build/", "third-party/", "tools/")
+          GLOBAL_FILES = {
+              ".buckconfig",
+              ".buckroot",
+              ".github/workflows/ci.yaml",
+              "buf.gen.yaml",
+              "buf.yaml",
+              "go.mod",
+              "go.sum",
+              "rust-toolchain.toml",
+              "rustfmt.toml",
+          }
+          CODE_ROOTS = ("bin/", "lib/", "proto/")
+          UNSAFE_PACKAGES = {"//lib/bf-tree-circular-buffer"}
+
+          def uquery(expr):
+              out = subprocess.check_output(
+                  ["tools/buck2", "uquery", expr],
+                  text=True,
+              )
+              return [line.strip() for line in out.splitlines() if line.strip()]
+
+          def to_packages(targets):
+              pkgs = set()
+              for t in targets:
+                  pkg = t.split(":", 1)[0]
+                  if pkg.startswith("root//"):
+                      pkg = pkg[len("root"):]
+                  pkgs.add(pkg)
+              return sorted(pkgs)
+
+          def owning_package(rel_path):
+              d = pathlib.Path(rel_path).parent
+              while str(d) not in ("", "."):
+                  if (ROOT / d / "BUCK").is_file():
+                      return f"//{d.as_posix()}:"
+                  d = d.parent
+              return None
+
+          base = f"origin/{os.environ['BASE_REF']}"
+          changed = [
+              line.strip()
+              for line in subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base}...HEAD"],
+                  text=True,
+              ).splitlines()
+              if line.strip()
+          ]
+
+          is_doc = lambda p: p.startswith("docs/") or p.endswith(".md")
+          run_lint = any(not is_doc(p) for p in changed)
+          run_all = (not changed) or any(
+              p in GLOBAL_FILES or p.startswith(GLOBAL_PREFIXES) for p in changed
+          )
+
+          seeds = []
+          if not run_all:
+              for p in changed:
+                  if not p.startswith(CODE_ROOTS):
+                      continue
+                  if p.endswith("/BUCK") or not (ROOT / p).exists():
+                      pkg = owning_package(p)
+                      if pkg is None:
+                          run_all = True
+                          break
+                      seeds.append(pkg)
+                  else:
+                      seeds.append(f'owner("{p}")')
+
+          if run_all:
+              targets = uquery(TESTABLE.format(UNIVERSE))
+              packages = to_packages(targets)
+              run_miri = True
+          elif seeds:
+              seed_expr = " + ".join(sorted(set(seeds)))
+              targets = uquery(TESTABLE.format(f"rdeps({UNIVERSE}, {seed_expr})"))
+              packages = to_packages(targets)
+              run_miri = bool(UNSAFE_PACKAGES.intersection(packages))
+          else:
+              packages = []
+              run_miri = False
+
+          print(f"changed={len(changed)} run_all={run_all} run_lint={run_lint} run_miri={run_miri}")
+          print(f"packages={packages}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"packages={json.dumps(packages)}\n")
+              out.write(f"run_lint={str(run_lint).lower()}\n")
+              out.write(f"run_miri={str(run_miri).lower()}\n")
+          PY
+
+  buck2-lint:
+    needs: plan
+    if: needs.plan.outputs.run_lint == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       # Buck2 downloads its own pinned Rust, Go, Python, and Zig (Linux)
       # toolchains; only DotSlash is needed on the runner.
       - name: Install DotSlash
         run: tools/ci/install-dotslash
+      - name: Enable BuildBuddy remote cache
+        if: env.BUILDBUDDY_API_KEY != ''
+        run: echo '<file:build/config/buildbuddy.bcfg>' > .buckconfig.local
       - name: Check formatting
         run: tools/fmt.sh
       - name: Run clippy
         run: tools/clippy.sh
-      - name: Run tests
-        run: tools/buck2 test //bin/... //lib/... //proto/...
       # Without a Sapling checkout there is no parent revision to compare,
       # so CI runs lint and checks the generated code; the breaking-change
       # check runs locally.
       - name: Check generated protobuf code
         run: tools/gen-proto --check
+
+  # One runner tests every affected package, so the toolchains and cached
+  # outputs are downloaded once. report-checks then creates one check run per
+  # package, `buck2-test (//lib/...)`, so the pull request still shows a
+  # result for each package.
+  buck2-test:
+    needs: plan
+    if: needs.plan.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+      PACKAGES: ${{ needs.plan.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install DotSlash
+        run: tools/ci/install-dotslash
+      - name: Enable BuildBuddy remote cache
+        if: env.BUILDBUDDY_API_KEY != ''
+        run: echo '<file:build/config/buildbuddy.bcfg>' > .buckconfig.local
+      - name: Run tests
+        id: test
+        shell: bash
+        run: |
+          set +e
+          targets=$(python3 -c 'import json, os; print(" ".join(p + "/..." for p in json.loads(os.environ["PACKAGES"])))')
+          tools/buck2 test $targets 2>&1 | tee "$RUNNER_TEMP/buck2-test.log"
+          status=${PIPESTATUS[0]}
+          echo "exit=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Report per-package checks
+        if: always() && steps.test.outputs.exit != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: tools/ci/report-checks "$RUNNER_TEMP/buck2-test.log" "${{ steps.test.outputs.exit }}"
+
+  buck2-miri:
+    needs: plan
+    if: needs.plan.outputs.run_miri == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install DotSlash
+        run: tools/ci/install-dotslash
+      - name: Enable BuildBuddy remote cache
+        if: env.BUILDBUDDY_API_KEY != ''
+        run: echo '<file:build/config/buildbuddy.bcfg>' > .buckconfig.local
+      - name: Run Miri tests
+        run: tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'
 
   cargo:
     runs-on: ubuntu-latest
