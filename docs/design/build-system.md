@@ -141,10 +141,12 @@ and Go (`proto/kv/v1/go/`) code, which is checked in
   a git one. `buf breaking` uses the `PACKAGE` rules, which compare by
   package and type, so moving a file within its package is not breaking.
 
-## Every tool is pinned
+## Every tool is pinned and hermetic
 
 Each tool that affects build output has exactly one recorded version: buck2,
-rustc, reindeer, Go, and DotSlash in CI.
+stable Rust, Miri nightly (and its stdlib crates), Go, Python, reindeer,
+Zig on Linux, and DotSlash in CI
+([plan 0035](../plans/0035-workspace-hermetic-build.md)).
 
 - **Why.** A tool that changes without a commit makes failures hard to
   explain, and it makes old commits hard to rebuild. Pinning buck2 matters
@@ -153,14 +155,61 @@ rustc, reindeer, Go, and DotSlash in CI.
 - **Freshness without drift.** A weekly job moves the buck2 pin to the
   newest release, but only after every check passes on it. A breaking
   release shows up as a failing update, not as a broken main branch.
-- **Go is hermetic, Rust is not.** Buck2 downloads the pinned Go release,
-  because the prelude needs to know the Go version and nothing else would
-  enforce it at build time. Rust comes from `PATH`, but rustup selects the
-  version from `rust-toolchain.toml` on every call, so it is pinned without
-  extra machinery. The C linker comes from `PATH` too. `tools/check-tools`
-  compares `rustc` and the Go pin with their recorded versions.
-- **The Miri nightly is hermetic.** Buck2 downloads it like Go, from pins
-  that `tools/update-miri` writes (see "Miri" below).
+- **Hermetic on Linux, everything-except-Apple-SDK on macOS.** Buck2
+  downloads every compiler and runtime itself by sha256 into `buck-out/`.
+  The Rust, Go, and Zig distributions use `toolchain_distribution`
+  (`build/toolchains/distribution.bzl`): Buck2 downloads the archive from its
+  origin and extracts it with `allow_cache_upload = False`, so a toolchain is
+  never stored in or served from a remote cache. Toolchain trees are the
+  largest outputs in the build and hold thousands of small files; serving
+  them from BuildBuddy made every CI job download gigabytes (plan 0036).
+  - **Stable Rust** (`rustc`, `rust-std`, `cargo`, `clippy-driver`, `rustfmt`,
+    `rust-src`): pinned in `build/toolchains/rust_stable.bzl` by
+    `tools/update-rust`. `tools/fmt.sh` and `tools/autocargo` invoke `rustfmt`
+    and `cargo` from `toolchains//:rust-root`.
+  - **Go**: pinned in `build/toolchains/go.bzl` by `tools/update-go`.
+    `tools/fmt.sh` and `tools/gen-proto` invoke `gofmt` and `go` from
+    `toolchains//:go-root`.
+  - **Python**: `remote_python_toolchain(bootstrap = True)` downloads
+    Astral's sha256-pinned `python-build-standalone` for all prelude helper
+    scripts.
+  - **C compiler and linker on Linux: Zig.** `rustc` targeting
+    `*-unknown-linux-gnu` needs a C compiler driver to link: it finds the C
+    runtime start files (`crt1.o`, ...) and glibc, then runs the linker.
+    `build/toolchains/zig.bzl` pins the official Zig release (about 55 MB per
+    host), and `zig cc` is that driver. Zig ships clang and lld, and builds
+    glibc stubs for a chosen glibc version, the start files, compiler-rt, and
+    libunwind from source, so no sysroot is needed. `build/toolchains/cxx.bzl`
+    wraps `zig cc`, `zig c++`, and `zig ar` into the C++ toolchain, which the
+    prelude's Rust and Go rules use for every link and cgo compile. The design
+    follows the rue project ([references](../references.md)).
+    - **glibc floor 2.17.** Every compile and link names the Zig target
+      `x86_64-linux-gnu.2.17` (or `aarch64-...`), the oldest glibc that Rust
+      supports. Binaries run on any Linux that runs Rust programs.
+    - **Writable cache, primed once.** Zig needs writable cache directories.
+      `build/toolchains/zig_cc.sh` puts them in each action's scratch
+      directory, so actions stay hermetic. Building the runtime support costs
+      about 15 s, so `toolchains//:zig-runtime-cache-*` builds it once and
+      archives it, and every link unpacks that archive first.
+    - **Reproducible links.** Zig's runtime objects carry debug information
+      with the checkout path. The linker script
+      `zig_runtime_debug_discard.ld` discards the debug sections of those
+      objects only, so a link does not depend on where the repository is
+      checked out.
+    - **Flat response files.** The prelude's C compiles nest response files
+      (`@file` inside `@file`); `zig cc` rejects that, so `zig_cc.sh`
+      flattens them first.
+    - glibc before 2.34 keeps pthread functions in `libpthread` and the DNS
+      resolver in `libresolv`. Links must name them explicitly; the Go
+      toolchain passes `-lpthread -lresolv` to cgo links.
+  - **C/C++ linker on macOS**: uses host Xcode CLT (`path_clang_tools`),
+    because Apple's Xcode license forbids redistributing `MacOSX.sdk`.
+  - `tools/check-tools` verifies that `rust-toolchain.toml` and `go.mod` stay
+    in sync with `rust_stable.bzl` and `go.bzl` so the secondary `cargo`
+    and `go` commands build with the same versions.
+- **The Miri nightly and its sysroot are hermetic.** Buck2 downloads both
+  the nightly components and the crates.io dependencies from `rust-src`'s
+  `library/Cargo.lock`, all pinned by `tools/update-miri` (see "Miri" below).
 
 ## Build modes are platforms
 
@@ -184,30 +233,15 @@ do not use a configuration flag.
   `cfg(test)` applies only to the crate under test, so code in its
   dependencies would silently keep the normal behavior.
 
-## Linux runs in a pinned container
+## Linux runs natively on Linux (WSL2 and CI)
 
-Contended benchmarks and Linux test runs use a container, so that they are
-one command from any checkout ([plan 0016](../plans/0016-bf-tree-concurrency.md)):
-
-```sh
-tools/linux-run tools/buck2 test //lib/bf-tree/...
-```
-
-- **Why Linux.** The engine targets Linux, and the macOS standard
-  `RwLock` parks readers under reader contention, so contended numbers from
-  macOS misrepresent leaf locks.
-- **Pinned like every other tool.** `tools/linux/Dockerfile` starts from an
-  Ubuntu image pinned by digest. It installs the `rust-toolchain.toml`
-  toolchain with its components through rustup, and DotSlash through
-  `tools/ci/install-dotslash`, so each pin stays in one file.
-  `tools/linux-run` builds the image from those files and tags it with a
-  hash of them, so it rebuilds only when they change.
-- **Separate outputs.** `tools/linux-run` mounts the checkout and puts
-  named volumes over `buck-out/` and `target/` (and caches for the Cargo
-  registry and DotSlash), so Linux and host build outputs never mix. It
-  forwards the `PEPPYDB_BENCH_*` variables.
-- **Limit.** Benchmarks in the container see the CPUs of Docker's virtual
-  machine, not the host's. Record the machine with the numbers.
+Development happens natively on macOS and on Linux (WSL2, Ubuntu 24.04).
+Because Linux Buck2 builds are fully hermetic — needing only DotSlash and
+basic POSIX utilities — the earlier Docker-on-macOS wrapper
+(`tools/linux-run`, `tools/linux/Dockerfile`) was removed in
+[plan 0035](../plans/0035-workspace-hermetic-build.md). Linux-only checks
+(`O_DIRECT`, contended `RwLock` benchmarks, `iptables` partition chaos tests,
+and `tools/gcp-bench`) run directly on Linux/WSL2 and in CI.
 
 ## Strict by default
 
@@ -261,10 +295,13 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   each component archive (`rustc`, `rust-std`, `cargo`, `miri`, `rust-src`)
   for every supported host. A genrule merges them into one toolchain
   directory. Other modes never download them.
-- **The Miri sysroot needs the network once.** Miri needs a standard library
-  built with MIR for every function. A cached genrule builds it with
-  `cargo miri setup`, which downloads the standard library's crates.io
-  dependencies. Pinning those separately would add many hashes for little
-  gain. The genrule builds in a scratch directory outside the repository, so
-  Cargo does not mistake it for part of the workspace.
+- **The Miri sysroot builds completely offline.** Miri needs a standard library
+  built with MIR for every function. `tools/update-miri` extracts every
+  crates.io dependency from `rust-src`'s `library/Cargo.lock` into
+  `MIRI_STD_CRATES` in `build/toolchains/miri_nightly.bzl`. Buck2 downloads
+  those crates as sha256-checked `http_archive`s, and the cached `:miri-sysroot`
+  genrule runs `cargo miri setup` with `CARGO_NET_OFFLINE=true` against a
+  vendored copy (linking build scripts with the pinned Zig on Linux).
+  The genrule builds in a scratch directory outside the repository, so Cargo
+  does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.

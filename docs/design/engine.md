@@ -1897,12 +1897,12 @@ path.
 [Plan 0023](../plans/0023-bf-tree-io-perf.md) added three informational
 benchmarks, not gates: `bench_engine_write` and `bench_wal_recovery` in
 `lib/engine/src/tests/bench.rs`, and `bench_wal_append` in
-`lib/engine-wal/src/tests/bench.rs`. Run them in release mode, for
-example:
+`lib/engine-wal/src/tests/bench.rs`. Run them in release mode on Linux (for
+example WSL2):
 
 ```sh
-tools/linux-run tools/buck2 run @build/mode/release //lib/engine:engine-unittest -- --ignored --nocapture tests::bench::
-tools/linux-run tools/buck2 run @build/mode/release //lib/engine-wal:engine-wal-unittest -- --ignored --nocapture tests::bench::
+tools/buck2 run @build/mode/release //lib/engine:engine-unittest -- --ignored --nocapture tests::bench::
+tools/buck2 run @build/mode/release //lib/engine-wal:engine-wal-unittest -- --ignored --nocapture tests::bench::
 ```
 
 **Environment for every number in this section:** *Docker on macOS

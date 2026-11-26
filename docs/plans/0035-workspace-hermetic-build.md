@@ -1,6 +1,6 @@
 # 0035: Hermetic Buck2 toolchains and removal of `tools/linux-run`
 
-**Status:** In progress
+**Status:** Implemented; verified on macOS and on Linux (WSL2)
 
 **Design references:** [Build system](../design/build-system.md),
 [remote benchmarks](../design/remote-benchmarks.md),
@@ -48,11 +48,15 @@ toolchain drift can silently change build outputs.
   - Hermetic Python bootstrap toolchain via the prelude's
     `remote_python_toolchain(bootstrap = True)` (Astral's sha256-pinned
     `python-build-standalone` archives).
-  - Hermetic Linux C/C++ linker and glibc sysroot via pinned official LLVM
-    (`clang`, `clang++`, `lld`, `llvm-ar`) and Chromium's Debian Bullseye
-    sysroot (`amd64`, `arm64`), wired into `cxx_tools_info_toolchain` (and into
-    `:miri-sysroot` build scripts) on Linux, while keeping host Apple CLT
-    (`path_clang_tools`) on macOS.
+  - Hermetic Linux C compiler and linker driver via the pinned official Zig
+    release (`zig cc`, `zig c++`, `zig ar`; `amd64`, `arm64`), wired into
+    `cxx_tools_info_toolchain` (and into `:miri-sysroot` build scripts) on
+    Linux, while keeping host Apple CLT (`path_clang_tools`) on macOS. Zig
+    brings its own clang, lld, glibc stubs, start files, compiler-rt, and
+    libunwind, so no sysroot is needed.
+  - Toolchains (Rust, Go, Zig) fetched from their origin by a
+    `toolchain_distribution` rule and never uploaded to or served from a
+    remote cache.
   - Updating `tools/fmt.sh`, `tools/check-tools`, and `tools/autocargo` to use
     the Buck2-pinned Rust toolchain instead of host `PATH`.
   - Deleting `tools/linux-run` and `tools/linux/Dockerfile`, and updating CI
@@ -100,12 +104,12 @@ flowchart TB
         py["toolchains//:python + :python_bootstrap<br/>remote_python_toolchain(bootstrap=True)<br/>(python-build-standalone, sha256)"]
     end
     subgraph linux["Linux only (linux-amd64, linux-arm64)"]
-        llvm["toolchains//:cxx<br/>llvm_cxx_tools: clang / clang++ / lld / llvm-ar<br/>--sysroot=&lt;debian bullseye sysroot&gt; -fuse-ld=lld<br/>(llvm-project + Chromium sysroot, sha256)"]
+        zig["toolchains//:cxx<br/>zig_cxx_tools: zig cc / zig c++ / zig ar<br/>-target x86_64-linux-gnu.2.17, primed runtime cache<br/>(ziglang.org, sha256)"]
     end
     subgraph macos["macOS only (darwin-arm64)"]
         clt["toolchains//:cxx<br/>path_clang_tools<br/>(host Xcode CLT + MacOSX.sdk)"]
     end
-    rust --> llvm
+    rust --> zig
     rust --> clt
 ```
 
@@ -174,7 +178,7 @@ def _impl(ctx):
     set to `{"files":{}}`), write `$scratch/cargo-home/config.toml` replacing
     `crates-io` with `vendored-sources`, and run `$dist/bin/cargo miri setup`
     with `CARGO_NET_OFFLINE=true`.
-- In diff 5 (Linux LLVM), pass the pinned Linux `clang` wrapper via
+- In diff 5 (Linux Zig), pass the pinned Linux `zig cc` wrapper via
   `CARGO_TARGET_<TRIPLE>_LINKER` / `CC` inside `:miri-sysroot` so `std`'s
   build scripts link hermetically on Linux too.
 
@@ -191,41 +195,46 @@ visibility = ["PUBLIC"])` removes `system_python_bootstrap_toolchain` and gives
 every prelude helper script (C++/Rust internal wrappers, link wrappers, test
 runners) the pinned CPython interpreter.
 
-### 4. Hermetic Linux C/C++ linker via LLVM + Debian sysroot (`build/toolchains/llvm.bzl`, `cxx.bzl`)
+### 4. Hermetic Linux C compiler and linker via Zig (`build/toolchains/zig.bzl`, `cxx.bzl`)
 
-`third-party/rust/Cargo.toml` is pure Rust (no C/C++ crates). On Linux
-(`*-unknown-linux-gnu`), Rust's `std` dynamically links against glibc
-(`libc.so.6`, `libm`, `libpthread`, `libdl`) and `libgcc_s` for unwinding, so
-`rustc` delegates linking to a C compiler driver (`clang++` + `lld`) against a
-glibc sysroot (`crt*.o`, `libc.so`, `libgcc_s`).
+`third-party/rust/Cargo.toml` is pure Rust on Linux (no C/C++ crates). On
+Linux (`*-unknown-linux-gnu`), Rust's `std` dynamically links against glibc
+and `libgcc_s` for unwinding, so `rustc` delegates linking to a C compiler
+driver, which finds the C runtime start files (`crt1.o`, ...) and glibc and
+then runs the linker. Go's cgo also compiles C with it.
 
-- Pin two official archive pairs in `build/toolchains/llvm.bzl` (for
-  `linux-amd64` and `linux-arm64`, sha256-verified):
-  - Official `llvm/llvm-project` release (`LLVM-23.1.6-Linux-X64.tar.xz` and
-    `LLVM-23.1.6-Linux-ARM64.tar.xz`), providing `bin/clang`, `bin/clang++`,
-    `bin/ld.lld`, and `bin/llvm-ar`.
-  - Chromium's official Debian Bullseye sysroot (`debian_bullseye_amd64` and
-    `debian_bullseye_arm64` from `commondatastorage.googleapis.com/chrome-linux-sysroot`),
-    providing glibc 2.31 headers, `crt*.o`, `libc.so`, and `libgcc`. Binaries
-    linked against glibc 2.31 run on Ubuntu 22.04+, Ubuntu 24.04 (WSL2, GitHub
-    Actions, GCP VMs), and newer Linux distributions.
-- A small Starlark rule `llvm_cxx_tools` in `build/toolchains/cxx.bzl` wires
-  `clang`, `clang++`, and `llvm-ar` from the pinned LLVM archive using Buck2's
-  built-in `cmd_script` helper (`@prelude//utils:cmd_script.bzl`), attaching
-  `--sysroot=<sysroot>`, `-fuse-ld=lld`, and `-B<llvm>/bin` so `rustc`'s
-  `-Clinker=<path>` always uses the pinned LLVM + Debian sysroot (including for
-  build scripts, proc-macros, and `:miri-sysroot`):
+The design follows the rue project (`toolchains/cxx_tools.bzl` and
+`toolchains/zig/` in rue-language/rue; see `docs/references.md`).
+
+- `build/toolchains/zig.bzl` pins the official Zig 0.17.1 release for
+  `linux-amd64` and `linux-arm64` (about 55 MB each, sha256-verified), and
+  the Zig target per host: `x86_64-linux-gnu.2.17` and
+  `aarch64-linux-gnu.2.17`. glibc 2.17 is the oldest glibc that Rust supports.
+- `zig cc` is clang plus lld, and it builds glibc stubs for the chosen glibc
+  version, the start files, compiler-rt, and libunwind (for `-lgcc_s`) from
+  source. No sysroot is needed.
+- `zig_cxx_tools` in `build/toolchains/cxx.bzl` returns `CxxToolsInfo` with
+  scripts (Buck2's `cmd_script`) around `zig cc`, `zig c++`, and `zig ar`. The
+  linker is `zig cc` (`zig c++` would build libc++ on first use) with the
+  linker script `zig_runtime_debug_discard.ld`.
+- `build/toolchains/zig_cc.sh` runs Zig with its cache directories in the
+  action's scratch directory (Zig needs writable caches; an action must not
+  write to its inputs). It also flattens nested response files, which the
+  prelude's C compiles use and `zig cc` rejects.
+- `zig_runtime_cache` builds Zig's runtime support once per target by linking
+  a trivial program three ways (plain, `-pie`, `-lgcc_s`) and archives the
+  cache as one `.tar`. The linker unpacks it into its scratch cache first, so
+  a link does not spend about 15 s (rue's measurement) building it again.
 
 ```python
 # build/toolchains/cxx.bzl (sketch)
-clang_xx = cmd_script(
+linker = cmd_script(
     actions = ctx.actions,
-    name = "clang++",
+    name = "zig-link",
     cmd = cmd_args(
-        cmd_args(llvm, format = "{}/bin/clang++"),
-        cmd_args(sysroot, format = "--sysroot={}"),
-        "-fuse-ld=lld",
-        cmd_args(llvm, format = "-B{}/bin"),
+        "/bin/sh", ctx.attrs.wrapper, runtime_cache, zig,  # zig_cc.sh SEED ZIG_DIR
+        "cc", "-target", ctx.attrs.target,
+        cmd_args("-Wl,-T,", ctx.attrs.linker_script, delimiter = ""),
     ),
 )
 ```
@@ -237,7 +246,7 @@ clang_xx = cmd_script(
 cxx_tools_info_toolchain(
     name = "cxx",
     cxx_tools_info = select({
-        "config//os:linux": ":llvm-cxx-tools",
+        "config//os:linux": ":zig-cxx-tools",
         "config//os:macos": "prelude//toolchains/cxx/clang:path_clang_tools",
     }),
     visibility = ["PUBLIC"],
@@ -265,21 +274,34 @@ cxx_tools_info_toolchain(
 
 ## Decisions and trade-offs
 
-- **Pinned LLVM (`clang` + `lld`) + Debian Bullseye sysroot over Zig or musl:**
-  - *Zero runtime behavior change:* Keeps standard `*-unknown-linux-gnu`
-    binaries dynamically linked with `clang++` + `lld` against glibc, identical
-    to today's Linux builds and production/benchmark VMs.
-  - *No toolchain shims or cache dirs:* Unlike `zig cc`, `clang++ --sysroot`
-    writes no hidden cache directory and needs no synthesized compiler-rt/CRT
-    shims.
-  - *Trade-off:* Larger one-time download (~450 MB LLVM tarball + ~40 MB
-    sysroot, cached by Buck2). Only downloaded on Linux hosts.
+- **Zig (`zig cc`) over LLVM + a Debian sysroot, or musl:**
+  - *Small download:* about 55 MB per host, against 1.9 GB of LLVM plus a
+    40 MB sysroot. The first implementation used LLVM; see "Discoveries and
+    plan changes" for why it was replaced.
+  - *No runtime behavior change:* binaries stay `*-unknown-linux-gnu`,
+    dynamically linked against glibc. The glibc floor drops from 2.31 to 2.17,
+    so binaries run on more systems.
+  - *Costs:* Zig needs writable cache directories (kept in each action's
+    scratch directory) and builds its runtime support from source (built
+    once by `zig_runtime_cache`); its runtime objects carry the checkout path
+    in debug information (discarded by a linker script); and `zig cc`
+    rejects nested response files (flattened by `zig_cc.sh`).
   - *Alternatives rejected:*
-    - `zig cc`: smaller (~45 MB), but introduces an unrelated toolchain,
-      requires writable `ZIG_*_CACHE_DIR`, and substitutes Zig's CRT shims.
+    - LLVM release + Debian sysroot: used first; a 12 GB release (631 MB
+      after trimming) that every link declares as an input.
     - `*-unknown-linux-musl` + `rust-lld`: removes the external linker, but
       changes runtime behavior (musl's default allocator scales poorly under
       multi-threaded contention, skewing `bf-tree` benchmarks).
+    - Host `cc`: not hermetic, so remote-cache results could come from
+      different compilers.
+- **Toolchains never go through the remote cache (`toolchain_distribution`):**
+  - The Rust, Go, and Zig archives are downloaded from their origin and
+    extracted with `allow_cache_upload = False`. Their extracted trees are
+    the largest outputs in the build and contain thousands of small files.
+  - *Trade-off:* each machine with an empty `buck-out` downloads and
+    extracts the toolchains it needs (hundreds of MB, from the origin sites).
+    Python stays on the prelude's `remote_python_toolchain`, which peppydb
+    does not control.
 - **Offline `:miri-sysroot` via pinned `MIRI_STD_CRATES`:**
   - Keeps `cargo miri setup` (avoids brittle custom Buck2 rules for `libstd`),
     while pinning every `rust-src` dependency by sha256 so Miri setup never
@@ -315,6 +337,9 @@ cxx_tools_info_toolchain(
   - Add `tools/update-rust` and generate `build/toolchains/rust_stable.bzl` for
     Rust `1.98.1`.
   - Add `:rust-stable` and `:rust-root` in `build/toolchains/BUCK`.
+  - Add `build/toolchains/distribution.bzl` (`toolchain_distribution`) and
+    use it for the Rust components and Go, so extracted toolchains are never
+    uploaded to or served from a remote cache.
   - Update `build/toolchains/rust.bzl` to always invoke tools from `dist`.
   - Update `tools/fmt.sh` (use `toolchains//:rust-root/bin/rustfmt`),
     `tools/autocargo` (use `toolchains//:rust-root/bin/cargo`), and
@@ -355,25 +380,23 @@ cxx_tools_info_toolchain(
   - `tools/buck2 test //bin/... //lib/... //proto/...` and `tools/clippy.sh`
     pass cleanly.
 
-### `[5/7][workspace-hermetic][cxx] add hermetic LLVM + Debian sysroot toolchain on Linux`
+### `[5/7][workspace-hermetic][cxx] add hermetic zig cc toolchain on Linux`
 
 - **Purpose:** Eliminate host `clang`/`gcc`/`lld`/glibc dependencies on Linux
-  with zero runtime behavior change.
+  with no runtime behavior change.
 - **Core changes:**
-  - Add `build/toolchains/llvm.bzl` with sha256-pinned official LLVM
-    (`LLVM-23.1.6-Linux-{X64,ARM64}.tar.xz`) and Chromium Debian Bullseye
-    sysroot (`amd64`, `arm64`) archives.
-  - Add `build/toolchains/cxx.bzl` implementing `llvm_cxx_tools` (wrapping
-    `clang`, `clang++`, and `llvm-ar` with `--sysroot` and `-fuse-ld=lld` and
-    returning `CxxToolsInfo`).
+  - Add `build/toolchains/zig.bzl` with the sha256-pinned official Zig
+    release (`zig-{x86_64,aarch64}-linux-0.17.1.tar.xz`) and the Zig targets
+    (glibc 2.17).
+  - Add `build/toolchains/cxx.bzl` implementing `zig_cxx_tools` and
+    `zig_runtime_cache`, plus `zig_cc.sh`, `zig_runtime_debug_discard.ld`, and
+    `zig_runtime_cache_probe.c`.
   - Switch `toolchains//:cxx` in `build/toolchains/BUCK` to
-    `cxx_tools_info_toolchain` selecting `:llvm-cxx-tools` on Linux and
+    `cxx_tools_info_toolchain` selecting `:zig-cxx-tools` on Linux and
     `prelude//toolchains/cxx/clang:path_clang_tools` on macOS, and pass the
-    Linux `clang` wrapper into `:miri-sysroot` on Linux.
+    Linux `zig cc` wrapper into `:miri-sysroot` on Linux.
 - **Verification:**
-  - On macOS: `tools/buck2 audit providers --target-platforms
-    //build:linux-x86_64 toolchains//:cxx` shows the pinned LLVM + sysroot
-    wrappers, and native macOS tests still pass unchanged.
+  - On macOS: native macOS tests still pass unchanged.
   - On Linux (WSL2 / CI): full `tools/buck2 test //bin/... //lib/... //proto/...`
     and `@build/mode/release` link and pass without host `clang`/`gcc`/`lld`.
 
@@ -397,7 +420,7 @@ cxx_tools_info_toolchain(
   accurate.
 - **Core changes:**
   - Update `docs/design/build-system.md` and `AGENTS.md` to reflect hermetic
-    Rust, offline Miri, Python, Go, and Linux C++ (LLVM + Debian sysroot), the
+    Rust, offline Miri, Python, Go, and Linux C (Zig), the
     macOS Apple SDK exception, and removal of `tools/linux-run`.
   - Update `tools/linux-run` references in `docs/design/bf-tree-concurrency.md`,
     `docs/design/remote-benchmarks.md`, `docs/design/gateway.md`, and
@@ -409,8 +432,8 @@ cxx_tools_info_toolchain(
 
 None. Confirmed during planning:
 - Ubuntu 24.04 (WSL2 and GitHub Actions `ubuntu-latest`, glibc 2.39) is the
-  baseline Linux host for official LLVM binaries, and Debian Bullseye
-  (glibc 2.31) binaries run natively on Ubuntu 22.04/24.04+.
+  baseline Linux host; binaries built for glibc 2.17 run on it and on older
+  distributions.
 - Diff 5 is graph-verified on macOS via `--target-platforms //build:linux-x86_64`,
   and execution-verified on WSL2 / GitHub Actions CI.
 - `tools/update-go <version>` is added alongside `tools/update-rust` so every
@@ -423,7 +446,7 @@ None. Confirmed during planning:
 | Hermetic Rust (macOS) | Run `PATH=/usr/bin:/bin:/opt/homebrew/bin tools/buck2 test //bin/... //lib/... //proto/...`, `tools/fmt.sh`, `tools/clippy.sh` (without `~/.cargo/bin`) | All pass using `buck-out` Rust & Python |
 | Offline Miri | `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Builds `:miri-sysroot` with `CARGO_NET_OFFLINE=true` and passes |
 | Hermetic Python | `tools/buck2 audit providers toolchains//:python_bootstrap` | Interpreter points to `cpython_archive`, not `"python3"` |
-| Linux toolchain graph (from macOS) | `tools/buck2 audit providers --target-platforms //build:linux-x86_64 toolchains//:rust toolchains//:cxx toolchains//:python_bootstrap` | Resolves to `rust-stable`, `llvm-cxx-tools`, and `cpython_archive` |
+| Linux toolchain graph (from macOS) | `tools/buck2 audit providers --target-platforms //build:linux-x86_64 toolchains//:rust toolchains//:cxx toolchains//:python_bootstrap` | Resolves to `rust-stable`, `zig-cxx-tools`, and `cpython_archive` |
 | Hermetic Linux build & tests | Run `tools/fmt.sh`, `tools/clippy.sh`, `tools/buck2 test //bin/... //lib/... //proto/...`, `@build/mode/release` on WSL2 or CI `ubuntu-latest` without `rustup`/`clang` | All link via pinned `clang++`/`lld` + Debian sysroot and pass |
 | Generated files & secondary interfaces | `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check`, `cargo test --workspace --locked`, `go vet ./... && go test ./...` | All pass |
 
@@ -431,14 +454,118 @@ None. Confirmed during planning:
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/7][workspace-hermetic][plan]`
-- [ ] `[2/7][workspace-hermetic][rust]`
-- [ ] `[3/7][workspace-hermetic][miri]`
-- [ ] `[4/7][workspace-hermetic][python]`
-- [ ] `[5/7][workspace-hermetic][cxx]`
-- [ ] `[6/7][workspace-hermetic][linux-run]`
-- [ ] `[7/7][workspace-hermetic][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/7][workspace-hermetic][rust]`
+- [x] `[3/7][workspace-hermetic][miri]`
+- [x] `[4/7][workspace-hermetic][python]`
+- [x] `[5/7][workspace-hermetic][cxx]`
+- [x] `[6/7][workspace-hermetic][linux-run]`
+- [x] `[7/7][workspace-hermetic][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
-None yet.
+- **Buck2's built-in `cmd_script` replaced hand-written wrappers.** Using
+  `@prelude//utils:cmd_script.bzl` in `build/toolchains/cxx.bzl` generates the
+  executable wrappers for `clang`, `clang++`, `linker` (`clang++ -fuse-ld=lld`),
+  and `llvm-ar` while automatically tracking both the LLVM and Debian sysroot
+  directories as hidden inputs.
+- **Cargo vendored `.cargo-checksum.json` requires the `"package"` sha256.**
+  During `:miri-sysroot` offline builds, Cargo verifies each vendored crate's
+  checksum against `rust-src`'s `library/Cargo.lock`, so `.cargo-checksum.json`
+  writes `{"files":{},"package":"<sha256>"}` using the pinned digest from
+  `MIRI_STD_CRATES` (31 crates for `nightly-2026-11-01`).
+- **Genrule shell substitution uses backticks.** Buck2 interprets `$(pwd)` as a
+  macro expansion; `:miri-sysroot` uses ``repo=`pwd` `` to construct absolute
+  paths for the Linux linker wrapper inside `$scratch`.
+- **Chromium's Debian Bullseye sysroot extracts directly to `./`** (no
+  `strip_prefix`) and has no filename extension, so its `http_archive` specifies
+  `type = "tar.xz"`. `LLVM-23.1.6-Linux-{X64,ARM64}.tar.xz` uses
+  `strip_prefix = "LLVM-23.1.6-Linux-{X64,ARM64}"`.
+- **The Debian sysroot contains a file name with a backslash.**
+  `lib/systemd/system/system-systemd\x2dcryptsetup.slice` makes Buck2 fail
+  when it collects the unpacked output ("slashes in path"). The stack was first
+  verified on macOS, which never unpacks the Linux sysroot, so the first Linux
+  build found the problem. The sysroot `http_archive` now uses
+  `excludes = [r"\./lib/systemd/"]`. A C/C++ sysroot needs no systemd unit
+  files. A failed unpack leaves the bad file in `buck-out`, and Buck2 cannot
+  delete it, so remove that output directory by hand once.
+- **The full LLVM release is too large to be an action input.** The release
+  unpacks to 12 GB (10,528 files): it includes Fortran, MLIR, LLDB, `libclang`,
+  `clangd`, and 170 more tools. `llvm_cxx_tools` declares the LLVM directory
+  as an input of every C/C++ compile and every Rust or cgo link. Locally this
+  costs only hashing, so the macOS verification did not show it. With a
+  remote cache or remote execution, each machine must download the whole
+  directory (plan 0036 measured 1.87 TB of cache downloads). The LLVM target
+  now downloads the archive with `http_file` and extracts only `LLVM_KEEP`
+  (631 MB, 431 files). `clang`, `lld`, and `llvm-ar` need only host system
+  libraries (`libc`, `libm`, `libstdc++`, `libgcc_s`, `libz`), not the LLVM
+  shared libraries in `lib/`. The prelude's `http_archive` `excludes` cannot
+  express an allowlist, because its regexes do not support lookahead.
+- **cgo links need `-lpthread` and `-lresolv` with the Bullseye sysroot.** The
+  first Linux build failed to link Go test binaries that use cgo, with
+  `undefined symbol: pthread_create` (and other `pthread_*` functions) and
+  `undefined symbol: __res_search`. glibc 2.31 keeps these in `libpthread` and
+  `libresolv`; glibc 2.34 and later moved them into `libc`, which is why host
+  builds on Ubuntu 24.04 (glibc 2.39) worked. The Go standard library asks
+  for them (`#cgo LDFLAGS: -lpthread` in `runtime/cgo` and `-lresolv` in
+  `net`), but the prelude's Go link did not pass them. The `go_toolchain` now
+  sets `external_linker_flags = ["-lpthread", "-lresolv"]` on Linux. The
+  prelude places these after the objects. The flags stay valid with newer
+  glibc, where both libraries remain as empty compatibility stubs.
+- **Replaced LLVM + the Debian sysroot with Zig.** The LLVM release had to be
+  downloaded (1.9 GB) on every fresh machine, and every link declared its
+  directory as an input. With the remote cache of plan 0036, that traffic
+  went through BuildBuddy. Zig is about 55 MB per host and needs no sysroot.
+  The implementation follows the rue project, which runs Buck2 with `zig cc`
+  behind every Linux Rust link. Measured on WSL2 (x86-64):
+  - The Zig 0.17.1 tree unpacks to 412 MB and 19,520 files (rue measured
+    19,546 for 0.16.0).
+  - The primed runtime cache archive is 60 MB. It contains the glibc 2.17
+    stubs (`libc.so.6`, `libpthread.so.0`, `libresolv.so.2`, ...), the start
+    files (`crt1.o`, `Scrt1.o`), libunwind, and compiler-rt.
+  - `zig cc` accepts `-fuse-ld=lld` and maps `-lgcc_s` to its libunwind, so
+    no argument rewriting was needed for Rust links.
+  - `zig cc` rejected the prelude's nested response files in the Go standard
+    library's cgo compiles (`error: unable to parse command line parameters:
+    NestedResponseFile`). `zig_cc.sh` now flattens response files.
+  - The `-lpthread -lresolv` fix for cgo links stays: glibc 2.17 also keeps
+    those functions outside `libc`.
+- **Toolchains are fetched from their origin, never from the remote cache.**
+  With uploads enabled (plan 0036), `http_archive` uploaded each extracted
+  toolchain (352 extraction actions in one full build), and every CI job
+  downloaded the trees back from BuildBuddy. `toolchain_distribution`
+  (`build/toolchains/distribution.bzl`, after rue's rule of the same name)
+  downloads with `download_file` and extracts with
+  `allow_cache_upload = False`. The Rust components, Go, and Zig use it. The
+  Miri std crates stay `http_archive`s; they are small.
+- **Go pins extracted into `build/toolchains/go.bzl`.** Added
+  `tools/update-go` matching `tools/update-rust` and `tools/update-miri`, so
+  every pinned toolchain has a dedicated update command and `tools/check-tools`
+  compares `rust-toolchain.toml` and `go.mod` against `rust_stable.bzl` and
+  `go.bzl`.
+
+### Verification outcomes
+
+Measured on macOS arm64 (`darwin-arm64`) with `~/.cargo/bin` removed from
+`PATH` (`PATH=/opt/homebrew/bin:/usr/bin:/bin`) for all Buck2 commands:
+
+| Check | Result |
+| --- | --- |
+| `tools/fmt.sh` (without `~/.cargo/bin`) | Pass (uses `toolchains//:rust-root/bin/rustfmt` and `toolchains//:go-root/bin/gofmt`) |
+| `tools/clippy.sh` (without `~/.cargo/bin`) | Pass (43 targets clean via `toolchains//:rust-stable`) |
+| `tools/buck2 test //bin/... //lib/... //proto/...` (without `~/.cargo/bin`) | Pass (46/46 targets pass, 0 failed) |
+| `tools/autocargo --check` (without `~/.cargo/bin`) | Pass (20 files up to date via `toolchains//:rust-root/bin/cargo`) |
+| `tools/gobuckify-remote --check` | Pass (14 modules, 133 packages up to date) |
+| `tools/gen-proto --check` | Pass |
+| `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | Pass (30 passed, 2 ignored; `:miri-sysroot` built offline with `CARGO_NET_OFFLINE=true`) |
+| `tools/buck2 audit providers toolchains//:python_bootstrap` | Resolves to `cpython_archive/bin/python` |
+| `tools/buck2 audit providers --target-platforms //build:linux-x86_64 toolchains//:rust toolchains//:cxx toolchains//:python_bootstrap` & `cquery` | With the LLVM toolchain (later replaced): resolved to `rust-stable`, `llvm-cxx-tools` (`clang.sh`, `clang++.sh`, `linker.sh`, `llvm-ar.sh`), `cpython_archive`; 80 Linux targets resolved |
+| `cargo test --workspace --locked` | Pass (all unit tests + doctests pass) |
+| `go vet ./... && go test ./...` | Pass (all Go packages pass) |
+| Live Linux execution with LLVM + Debian sysroot (replaced) | First WSL2 runs found three Linux-only bugs (sysroot file name, 12 GB LLVM input, cgo link libraries); see "Discoveries" |
+| `toolchain_distribution` at diff 2 (WSL2) | `tools/buck2 test //lib/bf-tree-node-id: //lib/gateway-kvclient:` passes (3/3); the 12 extraction actions log `allows_cache_upload: false` |
+| Zig toolchain at diff 5 (WSL2): `tools/buck2 test //bin/... //lib/... //proto/...` | Pass (46/46 targets) |
+| Zig toolchain at diff 5 (WSL2): Miri `bf-tree-circular-buffer-unittest[miri]` | Pass (1/1); the Miri sysroot links build scripts through `zig cc` |
+| Zig toolchain at diff 5 (WSL2): `tools/clippy.sh`, `tools/fmt.sh` | Pass (43 targets clean) |
+| glibc floor of `//bin/peppydb` (WSL2): `objdump -T` | Highest symbol version `GLIBC_2.17` |
+| Checkout path in debug info (WSL2): `readelf --debug-dump=info` on `//bin/peppydb`, `strings` on `//bin/peppydb-gateway` | No `DW_AT_comp_dir` or string contains the checkout path |

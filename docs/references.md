@@ -96,3 +96,17 @@ dissertation, Stanford University, 2014.
   one CRC per batch of entries.
 - **Use:** the framing, alignment, and torn-tail choices of the Raft log
   ([server Raft log](design/server-raft-log.md), plan 0029).
+
+## rue: Buck2 with a hermetic Zig C toolchain
+
+- [Source repository](https://github.com/rue-language/rue) (Apache-2.0),
+  [revision inspected: `c07cbdf7480a`](https://github.com/rue-language/rue/tree/c07cbdf7480ab230f7a8c57fbb70bcf9e41e527e).
+- Relevant files: `toolchains/cxx_tools.bzl` (`zig cc` as the C++
+  toolchain behind every Linux Rust link), `toolchains/zig/defs.bzl` (the
+  per-action cache wrapper and the primed runtime cache),
+  `toolchains/zig/runtime-debug-discard.ld`, and `toolchains/distribution.bzl`
+  (toolchains fetched from their origin, never from the remote cache).
+- **Use:** the design of peppydb's Zig toolchain and `toolchain_distribution`
+  ([build system](design/build-system.md), plan 0035). peppydb writes its own
+  rules; the measurements quoted from rue (about 15 s per link without a
+  primed cache, a 19,546-file Zig tree) are rue's.
