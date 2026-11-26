@@ -1,0 +1,22 @@
+# Opt-in BuildBuddy remote cache (plan 0036). Actions still run locally.
+#
+# Local Linux/WSL2 dev (one-time opt-in): put `<file:build/config/buildbuddy.bcfg>`
+# in a git-ignored `.buckconfig.local` and export `BUILDBUDDY_API_KEY`.
+# GitHub Actions CI activates this automatically when `secrets.BUILDBUDDY_API_KEY`
+# is set. macOS local dev does not include this file and stays 100% local.
+[buck2]
+digest_algorithms = SHA256
+# `default_allow_cache_upload` is set in the root `.buckconfig`: Buck2 ignores
+# it when it comes from this file through `.buckconfig.local`.
+
+[buck2_re_client]
+# Required even though nothing executes remotely: without it, Buck2 cannot
+# create its remote cache client, every cache lookup fails ("No engine
+# address"), and nothing is uploaded.
+engine_address = remote.buildbuddy.io
+action_cache_address = remote.buildbuddy.io
+cas_address = remote.buildbuddy.io
+http_headers = x-buildbuddy-api-key:$BUILDBUDDY_API_KEY
+
+[build]
+execution_platforms = root//build:execution-platforms-buildbuddy

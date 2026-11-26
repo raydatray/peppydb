@@ -21,6 +21,16 @@
     target:prelude//...->prelude//platforms:default \
     target:toolchains//...->prelude//platforms:default
 
+[buck2]
+  # Let local actions that state no preference of their own (Rust library
+  # compiles, Go actions, archive unpacking) upload their results when a
+  # remote cache is configured (build/config/buildbuddy.bcfg, plan 0036).
+  # Without a remote cache, nothing is uploaded. The hermetic toolchains
+  # (plan 0035) make the results safe to share. `rust_test` links and most
+  # `genrule`s still opt out in the prelude. This key must be here: Buck2
+  # ignores it when it comes from buildbuddy.bcfg through .buckconfig.local.
+  default_allow_cache_upload = true
+
 [build]
   # The host, and the host in Miri mode; see build/platforms.bzl.
   execution_platforms = root//build:execution-platforms

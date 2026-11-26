@@ -91,3 +91,34 @@ peppy_execution_platforms(
     platforms = [":exec-host", ":exec-host-miri"],
     visibility = ["PUBLIC"],
 )
+
+# Local execution platforms with BuildBuddy's remote cache (plan 0036),
+# selected via `build/config/buildbuddy.bcfg` on Linux (WSL2 and CI). Every
+# action runs locally. Results are shared through the cache, which is safe
+# because all Linux compilers, linkers, and sysroots are hermetic Buck2 inputs
+# (plan 0035). The properties are part of each action's cache key, so they
+# keep amd64 and arm64 results apart.
+_BUILDBUDDY_PROPS = {
+    "OSFamily": "Linux",
+    "Arch": "arm64" if host_info().arch.is_aarch64 else "amd64",
+}
+
+peppy_execution_platform(
+    name = "exec-host-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os],
+    remote_cache = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platform(
+    name = "exec-host-miri-buildbuddy",
+    constraints = [host_configuration.cpu, host_configuration.os, ":mode-miri"],
+    remote_cache = True,
+    remote_execution_properties = _BUILDBUDDY_PROPS,
+)
+
+peppy_execution_platforms(
+    name = "execution-platforms-buildbuddy",
+    platforms = [":exec-host-buildbuddy", ":exec-host-miri-buildbuddy"],
+    visibility = ["PUBLIC"],
+)
