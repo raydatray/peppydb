@@ -250,8 +250,8 @@ fn overlapping_writers_on_a_large_buffer_agree() {
     });
 }
 
-/// A long randomized run for Linux, not a gate. Run with
-/// `tools/linux-run tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored concurrent_soak`;
+/// A long randomized run for Linux, not a gate. Run on Linux (for example WSL2) with
+/// `tools/buck2 run @build/mode/release //lib/bf-tree:bf-tree-unittest -- --ignored concurrent_soak`;
 /// `PEPPYDB_SOAK_SECS` sets the duration (default 60).
 #[test]
 #[ignore = "soak test"]
