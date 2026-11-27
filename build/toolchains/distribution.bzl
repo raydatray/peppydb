@@ -4,9 +4,9 @@
 the Rust components, Go, and Zig. It follows the rule of the same name in the
 rue project (`toolchains/distribution.bzl` in rue-language/rue, Apache-2.0).
 
-Why not `http_archive`: its extraction is an ordinary action. With
-`[buck2] default_allow_cache_upload = true` (plan 0036), the extracted tree
-is uploaded to the remote cache, and every machine with an empty `buck-out`
+Why not `http_archive`: its extraction is an ordinary action. With a remote
+cache and `[buck2] default_allow_cache_upload = true` (tried and removed in
+plan 0036), the extracted tree is uploaded to the cache, and every machine with an empty `buck-out`
 then downloads the whole tree from the cache instead of the much smaller
 archive from its origin. These trees are the largest outputs in the build and
 contain thousands of small files, so they dominated the remote-cache traffic

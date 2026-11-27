@@ -305,3 +305,41 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   The genrule builds in a scratch directory outside the repository, so Cargo
   does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
+
+## Affected-package CI
+
+Pull-request CI (`.github/workflows/ci.yaml`) tests only the packages that a
+change affects ([plan 0036](../plans/0036-workspace-ci-fanout.md)):
+
+- **Affected packages from the query graph.** The `plan` job runs
+  `tools/buck2 uquery` over `git diff`
+  (`rdeps(//bin/... + //lib/... + //proto/..., owner(...))`) without
+  downloading any toolchains, and emits `packages`, `run_lint`, and
+  `run_miri`.
+  - `buck2-test` tests every affected package on one runner, so toolchains
+    are downloaded and shared dependencies are built once.
+    `tools/ci/test-summary` then writes a per-package table to the job
+    summary and an error annotation for each failing package. A job per
+    package would repeat the downloads and builds for each package, and
+    check runs created from the job are attached by GitHub to an arbitrary
+    workflow run, so neither is used.
+  - `buck2-miri` runs only when `//lib/bf-tree-circular-buffer` or global
+    build or toolchain files change.
+  - Documentation-only PRs (`docs/` and `*.md`) skip `buck2-lint`,
+    `buck2-test`, and `buck2-miri`.
+  - Global build, toolchain, or dependency changes (`build/`, `third-party/`,
+    `tools/`, `go.mod`, `rust-toolchain.toml`, `.buckconfig`, `ci.yaml`) run
+    all testable packages and Miri.
+- **No shared remote cache.** CI and local machines do not share build
+  results. A BuildBuddy remote cache was built and measured, then removed:
+  one CI run moved about 600–700 MB, mostly debug test binaries, so the free
+  tier (100 GB) would last only days. Remote execution was tried before that
+  and moved terabytes of toolchain inputs. Plan 0036 records the measurements
+  and the Buck2 behaviors that a future attempt must handle (the cache client
+  needs `engine_address`; uploads depend on
+  `[buck2] default_allow_cache_upload`; limited hybrid execution is
+  remote-first).
+- **Hermetic toolchains keep a cache possible.** The toolchains of plan 0035
+  make action digests identical on WSL2 and GitHub's Ubuntu runners, which a
+  shared cache requires. `toolchain_distribution` already keeps toolchain
+  trees out of any cache.
