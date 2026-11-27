@@ -162,20 +162,12 @@ const _: fn() = || {
 };
 
 impl CircularBuffer {
-    /// A circular buffer of `capacity` bytes serving blocks of the sizes in
-    /// `classes`.
-    ///
-    /// `capacity` must be a power of two of at least twice the largest class
-    /// plus its 16-byte charge, so that an empty buffer always fits the
-    /// largest block even after a filler. `classes` must be nonempty, nonzero,
-    /// and strictly ascending. `second_chance_percent` is the share of the
-    /// buffer, at the head, from which freed blocks are not reused; it must be
-    /// at most 100.
-    pub fn new(
+    /// Check configuration parameters without allocating a slab.
+    pub fn validate(
         capacity: usize,
         classes: &[usize],
         second_chance_percent: u32,
-    ) -> Result<Self, CircularBufferError> {
+    ) -> Result<(), CircularBufferError> {
         let (Some(&smallest), Some(&largest)) = (classes.first(), classes.last()) else {
             return Err(CircularBufferError::InvalidClasses("no classes"));
         };
@@ -207,6 +199,24 @@ impl CircularBuffer {
         if second_chance_percent > 100 {
             return Err(CircularBufferError::InvalidPercent(second_chance_percent));
         }
+        Ok(())
+    }
+
+    /// A circular buffer of `capacity` bytes serving blocks of the sizes in
+    /// `classes`.
+    ///
+    /// `capacity` must be a power of two of at least twice the largest class
+    /// plus its header charge, so that an empty buffer always fits the
+    /// largest block even after a filler. `classes` must be nonempty, nonzero,
+    /// and strictly ascending. `second_chance_percent` is the share of the
+    /// buffer, at the head, from which freed blocks are not reused; it must be
+    /// at most 100.
+    pub fn new(
+        capacity: usize,
+        classes: &[usize],
+        second_chance_percent: u32,
+    ) -> Result<Self, CircularBufferError> {
+        Self::validate(capacity, classes, second_chance_percent)?;
 
         // capacity * (100 - p) / 100, exactly; p = 0 means no region.
         let second_chance = match second_chance_percent {

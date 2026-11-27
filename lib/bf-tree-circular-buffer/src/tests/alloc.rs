@@ -43,6 +43,8 @@ fn configuration_errors() {
     // The boundaries themselves are accepted.
     CircularBuffer::new(512, &[240], 100).unwrap();
     CircularBuffer::new(512, &[64], 0).unwrap();
+    // `validate` allocates nothing, so huge capacities succeed immediately.
+    CircularBuffer::validate(1 << 40, &[64, 4096], 10).unwrap();
 }
 
 #[test]
