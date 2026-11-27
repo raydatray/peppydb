@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""CI only: summarize Buck2 test results per package (plan 0036).
+
+The `buck2-test` job runs every affected package in one `tools/buck2 test`
+invocation, so that one runner downloads the toolchains and builds shared
+dependencies once. This script writes a table with one row per package to the job summary,
+and an error annotation for each failing package, so a failure names its
+package in the pull request's checks tab.
+
+Usage: test-summary CONSOLE_LOG TEST_EXIT_CODE
+
+Environment:
+  PACKAGES             JSON list of packages that were tested, e.g. ["//lib/a"].
+  GITHUB_STEP_SUMMARY  set by GitHub Actions.
+
+Per-target results come from the `TestResult` events in Buck2's event log
+(`tools/buck2 log show`). Targets that failed to build have no test result,
+so build failures come from `Failed to build` lines in the console log. A
+status other than "pass" counts as a failure. This script never changes the
+job's result: the test step's own exit code does that.
+
+An earlier version created one GitHub check run per package. GitHub attaches
+check runs created with the workflow token to a check suite of its choice
+(in practice, another workflow run for the same commit) and ignores their
+`details_url`, so those checks were misleading. See plan 0036.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+# buck2_data TestStatus: 1 is PASS. Anything else is reported as a failure.
+PASS = 1
+
+BUILD_FAILURE = re.compile(r"(?:Failed to build|Action failed:)[^\n]*?root(//[^:\s'`]+):")
+
+
+def package_of(label: str) -> str:
+    """`root//lib/a:b` or `root//lib/a` -> `//lib/a`."""
+    package = label.split(":", 1)[0]
+    return package[len("root") :] if package.startswith("root//") else package
+
+
+def test_results() -> list[dict]:
+    log = subprocess.run(
+        ["tools/buck2", "log", "show"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    results = []
+    for line in log.splitlines():
+        if '"TestResult"' not in line:
+            continue
+        event = json.loads(line)["Event"]["data"]
+        result = event.get("Instant", {}).get("data", {}).get("TestResult")
+        if result:
+            results.append(result)
+    return results
+
+
+def main() -> None:
+    console_log, test_exit = sys.argv[1], int(sys.argv[2])
+    packages = json.loads(os.environ["PACKAGES"])
+
+    with open(console_log, encoding="utf-8", errors="replace") as f:
+        build_failures = {package_of("root" + m) for m in BUILD_FAILURE.findall(f.read())}
+
+    passed: dict[str, list[str]] = {p: [] for p in packages}
+    failed: dict[str, list[str]] = {p: [] for p in packages}
+    for result in test_results():
+        package = package_of(result["target_label"]["label"]["package"])
+        if package in passed:
+            (passed if result["status"] == PASS else failed)[package].append(result["name"])
+
+    rows = []
+    for package in packages:
+        problems = [f"`{name}` failed" for name in sorted(failed[package])]
+        if package in build_failures:
+            problems.append("a target failed to build")
+        if not problems and not passed[package] and test_exit != 0:
+            problems.append("no test results; the test run failed")
+        if problems:
+            # An annotation names the package in the pull request's checks tab.
+            print(f"::error title=buck2-test ({package})::{'; '.join(problems)}")
+            rows.append(f"| `{package}` | ✗ {'; '.join(problems)} |")
+        else:
+            count = len(passed[package])
+            rows.append(f"| `{package}` | ✓ {count} test target{'' if count == 1 else 's'} passed |")
+
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("| Package | Result |\n| --- | --- |\n" + "\n".join(rows) + "\n")
+
+
+if __name__ == "__main__":
+    main()
