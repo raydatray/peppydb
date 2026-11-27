@@ -26,7 +26,8 @@ fn keep_alive(value: impl Any + Send) {
 
 /// The block's offset from the start of the slab, header included.
 fn offset(buffer: &CircularBuffer, block: &Block) -> usize {
-    block.ptr().as_ptr().addr() - buffer.slab.range(0, 0).as_ptr().addr()
+    let payload = block.ptr().as_ptr().addr() - buffer.slab.range(0, 0).as_ptr().addr();
+    payload - BLOCK_HEADER_BYTES
 }
 
 /// The victim of a claim that must find one.

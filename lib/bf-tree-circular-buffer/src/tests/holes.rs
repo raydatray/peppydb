@@ -66,8 +66,8 @@ fn a_request_does_not_take_a_hole_of_a_larger_class() {
 #[test]
 fn a_freed_block_in_the_region_becomes_a_tombstone() {
     // 50 percent of 1024: blocks at least 512 bytes behind the tail.
-    let buffer = CircularBuffer::new(1024, &[112], 50).unwrap();
-    let mut blocks = fill(&buffer, 112, 6);
+    let buffer = CircularBuffer::new(1024, &[120], 50).unwrap();
+    let mut blocks = fill(&buffer, 120, 6);
     // Tail 768. Block 1 (addr 128) is 640 behind: in the region.
     // Block 4 (addr 512) is 256 behind: outside it.
     assert!(buffer.in_second_chance(blocks[1].addr()));
@@ -80,8 +80,8 @@ fn a_freed_block_in_the_region_becomes_a_tombstone() {
     assert_eq!(buffer.metrics().tombstones, 1);
 
     // Only the hole outside the region is reused.
-    let reused = buffer.alloc(112, Kind::Mini, leaf(9)).unwrap();
-    assert_eq!(reused.addr(), 4 * (H + 112));
+    let reused = buffer.alloc(120, Kind::Mini, leaf(9)).unwrap();
+    assert_eq!(reused.addr(), 4 * (H + 120));
     assert_eq!(buffer.metrics().reuses, 1);
 
     blocks.push(reused);
@@ -91,8 +91,8 @@ fn a_freed_block_in_the_region_becomes_a_tombstone() {
 
 #[test]
 fn a_hole_that_ages_into_the_region_is_tombstoned_instead_of_reused() {
-    let buffer = CircularBuffer::new(1024, &[112, 240], 50).unwrap();
-    let mut blocks = fill(&buffer, 112, 3);
+    let buffer = CircularBuffer::new(1024, &[120, 248], 50).unwrap();
+    let mut blocks = fill(&buffer, 120, 3);
     // Tail 384; block 1 (addr 128) is 256 behind, outside the region.
     let hole = blocks.remove(1);
     let hole_addr = hole.addr();
@@ -101,10 +101,10 @@ fn a_hole_that_ages_into_the_region_is_tombstoned_instead_of_reused() {
 
     // A larger block, which cannot take the hole, moves the tail to 640: the
     // hole is now 512 behind, in the region.
-    blocks.push(buffer.alloc(240, Kind::Mini, leaf(8)).unwrap());
+    blocks.push(buffer.alloc(248, Kind::Mini, leaf(8)).unwrap());
     assert!(buffer.in_second_chance(hole_addr));
 
-    let next = buffer.alloc(112, Kind::Mini, leaf(9)).unwrap();
+    let next = buffer.alloc(120, Kind::Mini, leaf(9)).unwrap();
     assert_eq!(next.addr(), 640);
     assert_eq!(buffer.metrics().reuses, 0);
     assert_eq!(buffer.metrics().tombstones, 1);

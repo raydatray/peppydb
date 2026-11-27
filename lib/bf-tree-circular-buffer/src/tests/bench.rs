@@ -69,10 +69,8 @@ fn bench_circular_buffer_free() {
     let owners = 50_000;
     let steps = 3_000_000;
     for holes in [true, false] {
-        let mut buffer = CircularBuffer::new(capacity, &classes, 10).unwrap();
-        if !holes {
-            buffer = buffer.without_holes();
-        }
+        let percent = if holes { 10 } else { 100 };
+        let buffer = CircularBuffer::new(capacity, &classes, percent).unwrap();
         let mut rng = Rng::new(42);
         let mut held: Vec<Option<(Block, usize)>> = (0..owners).map(|_| None).collect();
         let mut live_bytes = 0usize;

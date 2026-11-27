@@ -85,7 +85,7 @@ pub struct TreeConfig {
     /// Largest accepted value length; may be 0.
     pub max_value_len: usize,
     /// Circular-buffer budget for mini-pages, in bytes. A power of two, at
-    /// least `2 * (leaf_capacity + 16)`. A runtime setting: the superblock
+    /// least `2 * (leaf_capacity + 8)`. A runtime setting: the superblock
     /// does not record it.
     pub circular_buffer_bytes: usize,
     /// Share of the circular buffer, in percent, nearest the head in which
@@ -214,7 +214,7 @@ impl TreeConfig {
         )
         .map_err(|_| {
             TreeError::InvalidConfig(
-                "circular_buffer_bytes must be a power of two of at least 2 * (leaf_capacity + 16)",
+                "circular_buffer_bytes must be a power of two of at least 2 * (leaf_capacity + 8)",
             )
         })?;
 

@@ -28,7 +28,7 @@ fn defaults_validate() {
 #[test]
 fn the_circular_buffer_budget_is_checked() {
     let base = config(256, 128, 8, 16);
-    // At least 2 * (256 + 16) = 544, so 1024 is the smallest power of two.
+    // At least 2 * (256 + 8) = 528, so 1024 is the smallest power of two.
     for bytes in [1024, 4096, 1 << 30] {
         let ok = TreeConfig {
             circular_buffer_bytes: bytes,
