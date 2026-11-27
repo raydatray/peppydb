@@ -1,6 +1,6 @@
 # 0036: Affected-package CI (BuildBuddy remote cache rejected)
 
-**Status:** Agreed
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md),
 [plan 0035](0035-workspace-hermetic-build.md).
@@ -227,9 +227,9 @@ None.
 
 - [x] Agree on the design and commit stack with the user.
 - [x] `[1/3][workspace-ci-fanout][plan]`
-- [ ] `[2/3][workspace-ci-fanout][ci]`
-- [ ] `[3/3][workspace-ci-fanout][docs]`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[2/3][workspace-ci-fanout][ci]`
+- [x] `[3/3][workspace-ci-fanout][docs]`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
@@ -247,3 +247,17 @@ None.
 - **Unowned files in `owner(...)`:** `tools/buck2 uquery` returns an empty
   set with exit 0 for unowned files inside a package directory (such as a
   generated `Cargo.toml`), so `plan` handles them.
+
+### Verification outcomes
+
+| Check | Result |
+| --- | --- |
+| Synthetic `plan` query matrix (7 cases) | Exact outputs: `docs_only` (`[]`, `lint=False`, `miri=False`), `go_gateway` (3 packages), `bf_tree_page` (9 packages, crossing Rust→Go `lincheck`), `unsafe_cbuf` (7 packages, `miri=True`), `deleted_file` (`//lib/load`), `global_build` (all 22 packages, `miri=True`), `proto_change` (3 packages) |
+| `tools/ci/test-summary` | Real `TestResult` events gave passing rows; a simulated build failure and a package without results gave failing rows and `::error` annotations |
+| Workflow syntax | Valid; jobs `plan`, `buck2-lint`, `buck2-test`, `buck2-miri`, `cargo`, `go` |
+| No BuildBuddy left | No matches outside `docs/` |
+| `tools/fmt.sh`, `tools/clippy.sh` | Pass |
+| `tools/buck2 test //bin/... //lib/... //proto/...` (WSL2) | Pass (46 targets) |
+| `tools/autocargo --check`, `tools/gobuckify-remote --check`, `tools/gen-proto --check` | Pass |
+| Miri: `//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]` | Pass |
+| `cargo test --workspace --locked`, `go vet ./... && go test ./...` | Pass |
