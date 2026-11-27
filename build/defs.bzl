@@ -41,3 +41,54 @@ def peppy_rust_library(name, deps = [], test_deps = [], visibility = [], feature
             visibility = variant["visibility"],
             **common
         )
+
+def _tla_test_impl(ctx: AnalysisContext) -> list[Provider]:
+    java = cmd_args(ctx.attrs._jre[DefaultInfo].default_outputs[0], format = "{}/bin/java")
+    jar = ctx.attrs._tla2tools[DefaultInfo].default_outputs[0]
+
+    # Run TLC in a fresh temporary `-metadir` so parallel Buck2 tests never
+    # collide on `states/` or leave untracked files in the working tree.
+    # Avoid `exec` so the EXIT trap removes the temporary directory, and use
+    # POSIX `shift` instead of bash array slicing for dash compatibility.
+    cmd = cmd_args(
+        "/bin/sh",
+        "-c",
+        'set -eu; java=$1; jar=$2; cfg=$3; spec=$4; shift 4; ' +
+        'd=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; ' +
+        '"$java" -XX:+UseParallelGC -XX:ParallelGCThreads=1 ' +
+        '-Djava.rmi.server.hostname=127.0.0.1 -cp "$jar" tlc2.TLC ' +
+        '-cleanup -metadir "$d" -config "$cfg" "$@" "$spec"',
+        "peppy_tla_test",
+        java,
+        jar,
+        ctx.attrs.cfg,
+        ctx.attrs.spec,
+        ctx.attrs.tlc_flags,
+        hidden = ctx.attrs.deps,
+    )
+    return [
+        DefaultInfo(),
+        ExternalRunnerTestInfo(
+            type = "tla",
+            command = [cmd],
+        ),
+    ]
+
+peppy_tla_test = rule(
+    impl = _tla_test_impl,
+    doc = """Run the TLC model checker on a TLA+ specification and configuration.
+
+    Uses the hermetic Temurin JRE (`toolchains//:jre`) and pinned `tla2tools.jar`
+    (`toolchains//:tla2tools`). Defaults to `-workers 1` and serial GC so Buck2
+    owns test parallelism across cores. Pass `deps` for any sibling `.tla`
+    modules imported with `EXTENDS` or `INSTANCE`.
+    """,
+    attrs = {
+        "cfg": attrs.source(),
+        "deps": attrs.list(attrs.source(), default = []),
+        "spec": attrs.source(),
+        "tlc_flags": attrs.list(attrs.string(), default = ["-workers", "1"]),
+        "_jre": attrs.default_only(attrs.dep(default = "toolchains//:jre")),
+        "_tla2tools": attrs.default_only(attrs.dep(default = "toolchains//:tla2tools")),
+    },
+)
