@@ -56,6 +56,7 @@ def _tla_test_impl(ctx: AnalysisContext) -> list[Provider]:
         'set -eu; java=$1; jar=$2; cfg=$3; spec=$4; shift 4; ' +
         'd=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; ' +
         '"$java" -XX:+UseParallelGC -XX:ParallelGCThreads=1 ' +
+        '-Djava.io.tmpdir="$d" ' +
         '-Djava.rmi.server.hostname=127.0.0.1 -cp "$jar" tlc2.TLC ' +
         '-cleanup -metadir "$d" -config "$cfg" "$@" "$spec"',
         "peppy_tla_test",
