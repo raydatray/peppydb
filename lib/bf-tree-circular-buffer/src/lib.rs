@@ -61,7 +61,7 @@ mod state;
 
 pub use block::Block;
 use slab::Slab;
-use state::{BlockState, State};
+use state::{BlockHeader, BlockState, State};
 
 /// Bookkeeping bytes charged to every block on top of its size.
 pub const BLOCK_HEADER_BYTES: usize = 8;
@@ -88,13 +88,6 @@ pub struct Victim {
     pub kind: Kind,
     /// The leaf the block was allocated for.
     pub owner: LeafId,
-    seq: u64,
-}
-
-impl Victim {
-    pub(crate) fn seq(&self) -> u64 {
-        self.seq
-    }
 }
 
 /// The outcome of [`CircularBuffer::claim_victim`].
@@ -269,29 +262,40 @@ impl CircularBuffer {
     ) -> Result<Block, CircularBufferFull> {
         let class = self.class(size);
         let len = u32::try_from(size).expect("classes fit in u32");
+        let owner_raw = u32::try_from(owner.raw())
+            .ok()
+            .filter(|&raw| raw != u32::MAX)
+            .expect("owner leaf ID fits in 32 bits");
 
-        let (seq, addr) = {
+        let addr = {
             let mut state = self.lock_state();
-            let reserved = match state.take_hole(class, self.second_chance, kind, owner) {
-                Some(hole) => {
-                    state.metrics.reuses += 1;
-                    hole
-                }
-                None => {
-                    let bumped = state
-                        .bump(self.capacity, BLOCK_HEADER_BYTES + size, kind, owner)
-                        .ok_or(CircularBufferFull)?;
-                    state.metrics.allocs += 1;
-                    self.tail.store(state.tail, Ordering::Relaxed);
-                    bumped
-                }
-            };
+            let reserved =
+                match state.take_hole(&self.slab, class, self.second_chance, kind, owner_raw) {
+                    Some(hole) => {
+                        state.metrics.reuses += 1;
+                        hole
+                    }
+                    None => {
+                        let bumped = state
+                            .bump(
+                                &self.slab,
+                                BLOCK_HEADER_BYTES + size,
+                                kind,
+                                class,
+                                owner_raw,
+                            )
+                            .ok_or(CircularBufferFull)?;
+                        state.metrics.allocs += 1;
+                        self.tail.store(state.tail, Ordering::Relaxed);
+                        bumped
+                    }
+                };
             state.outstanding += 1;
             reserved
         };
 
         // Zero outside the mutex: the reservation made this the only handle.
-        let mut block = Block::new(&self.slab, self.offset(addr), addr, seq, len);
+        let mut block = Block::new(&self.slab, self.offset(addr), addr, len);
         block.as_mut().fill(0);
         Ok(block)
     }
@@ -307,34 +311,44 @@ impl CircularBuffer {
             self.slab.contains(block.ptr(), block.len()),
             "block does not belong to this circular buffer"
         );
+        let addr = block.addr();
+        let expected_ptr = self
+            .slab
+            .range(self.offset(addr) + BLOCK_HEADER_BYTES, block.len());
+        assert_eq!(
+            block.ptr(),
+            expected_ptr,
+            "block pointer does not match its logical address"
+        );
 
         let mut state = self.lock_state();
-        let meta = state
-            .get(block.seq())
-            .filter(|meta| meta.addr == block.addr() && meta.span == block.span());
-        let claimed = match meta.map(|meta| (meta.state, meta.freed_while_claimed)) {
-            Some((BlockState::Live, _)) => false,
-            Some((BlockState::Evicting, false)) => true,
+        let header = state
+            .in_active_window(addr)
+            .then(|| state.read_header(&self.slab, addr))
+            .filter(|header| header.span() == block.span());
+        let (mut header, claimed) = match header {
+            Some(header) if header.state == BlockState::Live => (header, false),
+            Some(header) if header.state == BlockState::Evicting && !header.freed_while_claimed() => {
+                (header, true)
+            }
             _ => panic!("block is not a live block of this circular buffer"),
         };
 
         let class = self.class(block.len());
-        let seq = block.seq();
         if claimed {
             // The evictor's `retire` makes it dead.
-            state
-                .get_mut(seq)
-                .expect("checked above")
-                .freed_while_claimed = true;
-        } else if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
-            state.get_mut(seq).expect("checked above").state = BlockState::Tombstone;
+            header.set_freed_while_claimed(true);
+            state.write_header(&self.slab, addr, header);
+        } else if state.is_head(addr) || state.in_second_chance(addr, self.second_chance) {
+            header.state = BlockState::Tombstone;
+            state.write_header(&self.slab, addr, header);
             state.metrics.tombstones += 1;
         } else {
-            state.add_hole(seq, class);
+            state.add_hole(&self.slab, addr, class);
         }
         state.outstanding -= 1;
         state.metrics.frees += 1;
-        state.advance_head();
+        state.advance_head(&self.slab);
     }
 
     /// Claim the oldest live block for eviction. Dead blocks at the head are
@@ -342,13 +356,12 @@ impl CircularBuffer {
     /// until it is retired or unclaimed.
     pub fn claim_victim(&self) -> Claim {
         let mut state = self.lock_state();
-        state.advance_head();
-        match state.claim_oldest() {
-            Ok((seq, meta)) => Claim::Victim(Victim {
-                addr: meta.addr,
-                kind: meta.kind,
-                owner: meta.owner.expect("live blocks have an owner"),
-                seq,
+        state.advance_head(&self.slab);
+        match state.claim_oldest(&self.slab) {
+            Ok((addr, header)) => Claim::Victim(Victim {
+                addr,
+                kind: header.kind(),
+                owner: header.owner().expect("live blocks have an owner"),
             }),
             Err(true) => Claim::Busy,
             Err(false) => Claim::Empty,
@@ -360,11 +373,12 @@ impl CircularBuffer {
     /// block without a handle.
     pub fn unclaim(&self, victim: Victim) {
         let mut state = self.lock_state();
-        let freed = claimed(&state, &victim);
-        if freed {
-            retire_claimed(&mut state, victim.seq);
+        let mut header = claimed(&state, &self.slab, &victim);
+        if header.freed_while_claimed() {
+            retire_claimed(&mut state, &self.slab, victim.addr, header);
         } else {
-            state.get_mut(victim.seq).expect("checked above").state = BlockState::Live;
+            header.state = BlockState::Live;
+            state.write_header(&self.slab, victim.addr, header);
         }
     }
 
@@ -373,9 +387,12 @@ impl CircularBuffer {
     /// would pass bytes that a handle still covers.
     pub fn retire(&self, victim: Victim) {
         let mut state = self.lock_state();
-        let freed = claimed(&state, &victim);
-        assert!(freed, "retire requires the block to be freed first");
-        retire_claimed(&mut state, victim.seq);
+        let header = claimed(&state, &self.slab, &victim);
+        assert!(
+            header.freed_while_claimed(),
+            "retire requires the block to be freed first"
+        );
+        retire_claimed(&mut state, &self.slab, victim.addr, header);
     }
 
     /// Whether the block at logical address `addr` is in the second-chance
@@ -434,23 +451,30 @@ impl Drop for CircularBuffer {
     }
 }
 
-/// Check that `victim` names a claimed block of this buffer, and return
-/// whether its owner has freed it.
-fn claimed(state: &State, victim: &Victim) -> bool {
-    let meta = state
-        .get(victim.seq)
-        .filter(|meta| meta.addr == victim.addr);
-    match meta {
-        Some(meta) if meta.state == BlockState::Evicting => meta.freed_while_claimed,
+/// Check that `victim` names a claimed block of this buffer, and return its
+/// header.
+fn claimed(state: &State, slab: &Slab, victim: &Victim) -> BlockHeader {
+    let header = state
+        .in_active_window(victim.addr)
+        .then(|| state.read_header(slab, victim.addr));
+    match header {
+        Some(header)
+            if header.state == BlockState::Evicting
+                && header.owner() == Some(victim.owner)
+                && header.kind() == victim.kind =>
+        {
+            header
+        }
         _ => panic!("victim is not a claimed block of this circular buffer"),
     }
 }
 
 /// Mark a claimed, freed block evicted and move the head past it if it can.
-fn retire_claimed(state: &mut State, seq: u64) {
-    state.get_mut(seq).expect("checked by `claimed`").state = BlockState::Evicted;
+fn retire_claimed(state: &mut State, slab: &Slab, addr: usize, mut header: BlockHeader) {
+    header.state = BlockState::Evicted;
+    state.write_header(slab, addr, header);
     state.metrics.retired += 1;
-    state.advance_head();
+    state.advance_head(slab);
 }
 
 #[cfg(test)]
