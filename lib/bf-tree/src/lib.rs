@@ -207,10 +207,10 @@ impl TreeConfig {
                 "second_chance_percent must be at most 100",
             ));
         }
-        CircularBuffer::new(
+        CircularBuffer::validate(
             self.circular_buffer_bytes,
             &self.buffer_classes(&classes),
-            0,
+            u32::from(self.second_chance_percent),
         )
         .map_err(|_| {
             TreeError::InvalidConfig(
