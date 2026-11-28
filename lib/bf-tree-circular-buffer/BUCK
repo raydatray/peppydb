@@ -1,4 +1,4 @@
-load("//build:defs.bzl", "peppy_rust_library")
+load("//build:defs.bzl", "peppy_rust_library", "peppy_tla_test")
 
 # The only crate allowed to contain unsafe code (tools/check-unsafe); see
 # docs/plans/0010-bf-tree-circular-buffer.md for the safety argument.
@@ -13,4 +13,18 @@ peppy_rust_library(
         "//lib/bf-tree-mini-page:",
         "//lib/bf-tree:",
     ],
+)
+
+peppy_tla_test(
+    name = "circular-buffer-tla",
+    cfg = "spec/CircularBuffer.cfg",
+    spec = "spec/CircularBuffer.tla",
+    tlc_flags = ["-workers", "1", "-deadlock"],
+)
+
+peppy_tla_test(
+    name = "circular-buffer-no-region-tla",
+    cfg = "spec/CircularBufferNoRegion.cfg",
+    spec = "spec/CircularBuffer.tla",
+    tlc_flags = ["-workers", "1", "-deadlock"],
 )
