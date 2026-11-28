@@ -105,8 +105,9 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
   (`build/toolchains/rust_stable.bzl`, updated with `tools/update-rust`), Miri
   nightly and its stdlib crates (`build/toolchains/miri_nightly.bzl`,
   `tools/update-miri`), Go (`build/toolchains/go.bzl`, `tools/update-go`),
-  Python (`remote_python_toolchain`), and on Linux Zig, whose `zig cc` is the
-  C compiler and the linker driver (`build/toolchains/zig.bzl`). On macOS,
+  Python (`remote_python_toolchain`), TLA+ TLC and Temurin JRE
+  (`build/toolchains/tla.bzl`, `tools/update-tla`), and on Linux Zig, whose
+  `zig cc` is the C compiler and the linker driver (`build/toolchains/zig.bzl`). On macOS,
   C/C++ linking uses host Xcode CLT because Apple's `MacOSX.sdk` cannot be
   redistributed.
   `tools/fmt.sh` runs `rustfmt` and `gofmt` from Buck2's pinned distributions,
@@ -127,6 +128,9 @@ Buck2 builds and tests everything. `BUCK` files are the source of truth; the
 - Release builds: `tools/buck2 run @build/mode/release <target> -- <args>`.
 - Miri: `tools/buck2 test @build/mode/miri '<test target>[miri]'`. Buck2
   downloads the pinned nightly; `tools/update-miri` moves the pin.
+- TLA+: declare `peppy_tla_test` from `//build:defs.bzl` in a crate's `BUCK`
+  file beside its `spec/*.tla` and `spec/*.cfg`. Buck2 downloads the pinned
+  Temurin JRE and `tla2tools.jar` lazily; `tools/update-tla` moves the pins.
 - Go code is one module at the repository root (`go.mod`, hand-written,
   module `peppydb`). Its `ignore` list keeps the `go` command out of
   `buck-out/`, `target/`, and `third-party/`. A Go package can live in any

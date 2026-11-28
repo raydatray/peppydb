@@ -1,6 +1,6 @@
 # 0037: Workspace TLA+ toolchain and Buck2 test rule
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Build system](../design/build-system.md)
 
@@ -77,20 +77,24 @@ flowchart LR
 ```python
 def _tla_test_impl(ctx: AnalysisContext) -> list[Provider]:
     java = cmd_args(ctx.attrs._jre[DefaultInfo].default_outputs[0], format = "{}/bin/java")
+    jar = ctx.attrs._tla2tools[DefaultInfo].default_outputs[0]
+
     cmd = cmd_args(
         "/bin/sh",
         "-c",
-        'set -eu; d=$(mktemp -d); trap "rm -rf \\"$d\\"" EXIT; '
-        + 'exec "$1" -XX:+UseSerialGC -cp "$2" tlc2.TLC '
-        + '-cleanup -metadir "$d" -config "$3" "$4" "${@:5}"',
+        'set -eu; java=$1; jar=$2; cfg=$3; spec=$4; shift 4; ' +
+        'd=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; ' +
+        '"$java" -XX:+UseParallelGC -XX:ParallelGCThreads=1 ' +
+        '-Djava.rmi.server.hostname=127.0.0.1 -cp "$jar" tlc2.TLC ' +
+        '-cleanup -metadir "$d" -config "$cfg" "$@" "$spec"',
         "peppy_tla_test",
         java,
-        ctx.attrs._tla2tools[DefaultInfo].default_outputs[0],
+        jar,
         ctx.attrs.cfg,
         ctx.attrs.spec,
         ctx.attrs.tlc_flags,
+        hidden = ctx.attrs.deps,
     )
-    cmd.hidden(ctx.attrs.deps)
     return [
         DefaultInfo(),
         ExternalRunnerTestInfo(
@@ -102,9 +106,9 @@ def _tla_test_impl(ctx: AnalysisContext) -> list[Provider]:
 peppy_tla_test = rule(
     impl = _tla_test_impl,
     attrs = {
-        "spec": attrs.source(),
         "cfg": attrs.source(),
         "deps": attrs.list(attrs.source(), default = []),
+        "spec": attrs.source(),
         "tlc_flags": attrs.list(attrs.string(), default = ["-workers", "1"]),
         "_jre": attrs.default_only(attrs.dep(default = "toolchains//:jre")),
         "_tla2tools": attrs.default_only(attrs.dep(default = "toolchains//:tla2tools")),
@@ -214,22 +218,22 @@ None. (Resolved: run TLC in `//lib/...` and CI by default; pin immutable
 
 ## Verification strategy
 
-| Check | Command or procedure | Expected result |
-| --- | --- | --- |
-| Toolchain targets build | `tools/buck2 build toolchains//:jre toolchains//:tla2tools` | Downloads verify sha256 and extract cleanly |
-| Smoke check (temporary, deleted before commit) | Run `peppy_tla_test` on a temporary spec: valid invariant, broken invariant, and `--target-platforms=//build:linux-x86_64` `cquery` | Valid passes with no `states/` left behind; broken fails with counterexample; Linux graph resolves |
-| Formatting & lints | `tools/fmt.sh && tools/clippy.sh` | Clean |
-| Full test suite | `tools/buck2 test //bin/... //lib/... //proto/...` | All pass |
-| Generated files & secondary tools | `tools/autocargo --check && tools/gobuckify-remote --check && tools/gen-proto --check && cargo test --workspace --locked && go vet ./... && go test ./...` | All pass |
+| Check | Command or procedure | Expected result | Outcome |
+| --- | --- | --- | --- |
+| Toolchain targets build | `tools/buck2 build toolchains//:jre toolchains//:tla2tools` | Downloads verify sha256 and extract cleanly | Pass (`jdk-21.0.13.1+2` + `tla2tools.jar` `v1.7.4`) |
+| Smoke check (temporary, deleted before commit) | Run `peppy_tla_test` on a temporary spec: valid invariant, broken invariant, `uquery`, and `--target-platforms=//build:linux-x86_64` `cquery` | Valid passes with no `states/` left behind; broken fails with counterexample; Linux graph resolves | Pass: valid `1.6s` (4 distinct states, 0 warnings, no `states/`), broken failed with exit 32 and full counterexample trace, Linux `cquery` resolved `jre-linux-amd64` + `tla2tools`, CI `uquery` matched `peppy_tla_test` |
+| Formatting & lints | `tools/fmt.sh && tools/clippy.sh` | Clean | Pass (`clippy: 43 targets clean`) |
+| Full Buck2 test suite | `tools/buck2 test //bin/... //lib/... //proto/...` | All pass | Pass (46 targets; `server-unittest` and `lincheck-test` timed out under parallel saturation and passed on re-run in `10.0s` / `11.1s`) |
+| Generated files & secondary tools | `tools/autocargo --check && tools/gobuckify-remote --check && tools/gen-proto --check && cargo test --workspace --locked && go vet ./... && go test ./...` | All pass | Pass (`autocargo` 20 files, `gobuckify-remote` 14 modules / 133 packages, `gen-proto`, `cargo test --workspace --locked`, `go vet` & `go test`) |
 
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] `[1/4][workspace-tla][plan] draft workspace TLA+ toolchain plan`
-- [ ] `[2/4][workspace-tla][pins] add tools/update-tla and pinned JRE and tla2tools.jar`
-- [ ] `[3/4][workspace-tla][rule] add peppy_tla_test rule`
-- [ ] `[4/4][workspace-tla][docs] document TLA+ toolchain and finalize plan`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[1/4][workspace-tla][plan] draft workspace TLA+ toolchain plan`
+- [x] `[2/4][workspace-tla][pins] add tools/update-tla and pinned JRE and tla2tools.jar`
+- [x] `[3/4][workspace-tla][rule] add peppy_tla_test rule`
+- [x] `[4/4][workspace-tla][docs] document TLA+ toolchain and finalize plan`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
@@ -239,6 +243,16 @@ None. (Resolved: run TLC in `//lib/...` and CI by default; pin immutable
 - **CI affected-package filter:** `.github/workflows/ci.yaml` filters targets
   with `kind("rust_library|rust_test|go_test", ...)`; diff 3 adds
   `peppy_tla_test` so PRs editing `.tla`/`.cfg` files run TLC in CI.
+- **JVM GC & macOS RMI startup delay:** `-XX:+UseSerialGC` triggered TLC's
+  GC warning, and default RMI hostname resolution hit macOS's 5-second `.local`
+  mDNS timeout (`5.68s` wall for 4 states). Switching to
+  `-XX:+UseParallelGC -XX:ParallelGCThreads=1 -Djava.rmi.server.hostname=127.0.0.1`
+  silenced the warning, kept GC single-threaded, and dropped runtime to `0.59s`.
+- **POSIX shell & trap cleanup:** Replaced bash-only `"${@:5}"` and `exec`
+  with POSIX `shift 4` and a direct subshell invocation so `/bin/sh` (`dash` on
+  Ubuntu) works and the `EXIT` trap removes the temporary `-metadir`.
+- **Buck2 `cmd_args` hidden inputs:** Passed `hidden = ctx.attrs.deps` as a
+  keyword argument to `cmd_args(...)` rather than calling a `.hidden()` method.
 
 ## Agent notes
 

@@ -144,9 +144,10 @@ and Go (`proto/kv/v1/go/`) code, which is checked in
 ## Every tool is pinned and hermetic
 
 Each tool that affects build output has exactly one recorded version: buck2,
-stable Rust, Miri nightly (and its stdlib crates), Go, Python, reindeer,
-Zig on Linux, and DotSlash in CI
-([plan 0035](../plans/0035-workspace-hermetic-build.md)).
+stable Rust, Miri nightly (and its stdlib crates), Go, Python, TLA+ (TLC and
+Temurin JRE), reindeer, Zig on Linux, and DotSlash in CI
+([plan 0035](../plans/0035-workspace-hermetic-build.md),
+[plan 0037](../plans/0037-workspace-tla-toolchain.md)).
 
 - **Why.** A tool that changes without a commit makes failures hard to
   explain, and it makes old commits hard to rebuild. Pinning buck2 matters
@@ -173,6 +174,10 @@ Zig on Linux, and DotSlash in CI
   - **Python**: `remote_python_toolchain(bootstrap = True)` downloads
     Astral's sha256-pinned `python-build-standalone` for all prelude helper
     scripts.
+  - **TLA+ (TLC and Temurin JRE)**: pinned in `build/toolchains/tla.bzl` by
+    `tools/update-tla`. `toolchains//:jre` uses `toolchain_distribution`
+    (Temurin 21 LTS JRE per host), and `toolchains//:tla2tools` pins the
+    immutable `tla2tools.jar` release via `http_file` (see "TLA+" below).
   - **C compiler and linker on Linux: Zig.** `rustc` targeting
     `*-unknown-linux-gnu` needs a C compiler driver to link: it finds the C
     runtime start files (`crt1.o`, ...) and glibc, then runs the linker.
@@ -305,6 +310,41 @@ tools/buck2 test @build/mode/miri '//lib/<crate>:<crate>-unittest[miri]'
   The genrule builds in a scratch directory outside the repository, so Cargo
   does not mistake it for part of the workspace.
 - **Cargo does not run Miri.** `cargo miri` is not part of the workflow.
+
+## TLA+
+
+Concurrent state machines and recovery protocols can be model-checked with
+TLC through Buck2 ([plan 0037](../plans/0037-workspace-tla-toolchain.md)).
+A crate declares a `peppy_tla_test` target from `//build:defs.bzl` beside its
+`spec/` files:
+
+```python
+load("//build:defs.bzl", "peppy_tla_test")
+
+peppy_tla_test(
+    name = "my-model-tla",
+    spec = "spec/MyModel.tla",
+    cfg = "spec/MyModel.cfg",
+)
+```
+
+- **Hermetic and lazy.** Buck2 downloads the pinned Temurin 21 JRE
+  (`toolchains//:jre`) and `tla2tools.jar` (`toolchains//:tla2tools`) only
+  when a `peppy_tla_test` target is built or tested. No host Java or TLA+
+  installation is used.
+- **Immutable release pins.** `tools/update-tla` pins `tla2tools.jar` to an
+  immutable `tlaplus/tlaplus` release tag (`v1.7.4`) rather than the mutable
+  `v1.8.0` pre-release tag, whose asset is rebuilt on pushes to `master`.
+- **Buck2 owns parallelism.** `peppy_tla_test` defaults to `-workers 1` and
+  `-XX:+UseParallelGC -XX:ParallelGCThreads=1` so parallel Buck2 test targets
+  do not oversubscribe cores, and passes `-Djava.rmi.server.hostname=127.0.0.1`
+  to avoid a 5-second macOS mDNS lookup on startup. Each run uses a fresh
+  temporary `-metadir` removed on exit so parallel runs never collide on
+  `states/`.
+- **Included in `//lib/...` and CI.** `tools/buck2 test //lib/...` runs
+  crate-local `peppy_tla_test` targets alongside Rust and Go tests, and
+  `.github/workflows/ci.yaml` includes `peppy_tla_test` in its affected-package
+  query. `tools/autocargo` ignores them; Cargo does not run TLA+.
 
 ## Affected-package CI
 
