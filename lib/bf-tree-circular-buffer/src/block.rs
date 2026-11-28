@@ -1,7 +1,8 @@
-//! `Block`: the handle to one byte range of the slab.
+//! `Block`: the handle to one payload byte range of the slab.
 //!
-//! With `slab.rs`, the only module with `unsafe` code. Here it builds slices
-//! from a block's pointer and declares `Block` `Send` and `Sync`.
+//! Together with `slab.rs` and `state.rs`, one of the crate's unsafe modules.
+//! Here it builds payload slices from a block's pointer and declares `Block`
+//! `Send` and `Sync`.
 
 #![allow(unsafe_code)]
 
@@ -25,7 +26,6 @@ pub struct Block {
     /// Logical address of the block's header; increases forever across laps of
     /// the slab.
     addr: usize,
-    seq: u64,
     /// Payload length: exactly the requested size.
     len: u32,
 }
@@ -46,17 +46,12 @@ impl Block {
     /// The caller, the circular buffer, guarantees that no other live handle
     /// covers the payload range and that the slab outlives the handle; slices
     /// built from the block rely on both.
-    pub(super) fn new(slab: &Slab, offset: usize, addr: usize, seq: u64, len: u32) -> Self {
+    pub(super) fn new(slab: &Slab, offset: usize, addr: usize, len: u32) -> Self {
         let payload_offset = offset
             .checked_add(BLOCK_HEADER_BYTES)
             .expect("payload offset overflows");
         let ptr = slab.range(payload_offset, len as usize);
-        Self {
-            ptr,
-            addr,
-            seq,
-            len,
-        }
+        Self { ptr, addr, len }
     }
 
     /// The block's logical address in the circular buffer.
@@ -66,11 +61,7 @@ impl Block {
 
     /// Whether this is the block that `victim` names.
     pub fn is(&self, victim: &Victim) -> bool {
-        self.seq == victim.seq()
-    }
-
-    pub(super) fn seq(&self) -> u64 {
-        self.seq
+        self.addr == victim.addr
     }
 
     pub(super) fn ptr(&self) -> NonNull<u8> {

@@ -1,8 +1,9 @@
 //! The slab: one fixed allocation that every block lives in.
 //!
-//! This module and `block.rs` are the only places with `unsafe` code. Here it
-//! allocates and frees the slab. Block pointers are derived with safe pointer
-//! arithmetic after a bounds check.
+//! Together with `block.rs` and `state.rs`, one of the crate's unsafe modules.
+//! Here it allocates and frees the slab and provides by-value byte accessors
+//! for headers and freed-block links. Block pointers are derived with safe
+//! pointer arithmetic after a bounds check.
 
 #![allow(unsafe_code)]
 
@@ -80,6 +81,40 @@ impl Slab {
     /// it.
     pub(super) fn leak(&mut self) {
         self.leaked = true;
+    }
+
+    /// Copy `N` bytes out of the slab starting at `offset`.
+    ///
+    /// # Safety
+    /// No live `Block` may hold a mutable reference overlapping
+    /// `[offset, offset + N)`, and access must be synchronized with any
+    /// concurrent writes to that range.
+    pub(super) unsafe fn read_bytes<const N: usize>(&self, offset: usize) -> [u8; N] {
+        let ptr = self.range(offset, N);
+        let mut out = [0u8; N];
+        // SAFETY: `self.range` bounds-checked `[offset, offset + N)` inside the
+        // slab, `out` is a distinct stack buffer, and the caller guarantees no
+        // conflicting mutable borrow or unsynchronized write overlaps the range.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr.as_ptr(), out.as_mut_ptr(), N);
+        }
+        out
+    }
+
+    /// Copy `bytes` into the slab starting at `offset`.
+    ///
+    /// # Safety
+    /// No live `Block` may hold any reference overlapping
+    /// `[offset, offset + N)`, and access must be synchronized with any
+    /// concurrent reads or writes to that range.
+    pub(super) unsafe fn write_bytes<const N: usize>(&self, offset: usize, bytes: [u8; N]) {
+        let ptr = self.range(offset, N);
+        // SAFETY: `self.range` bounds-checked `[offset, offset + N)` inside the
+        // slab, `bytes` is a distinct stack buffer, and the caller guarantees no
+        // conflicting borrow or unsynchronized access overlaps the range.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.as_ptr(), N);
+        }
     }
 }
 

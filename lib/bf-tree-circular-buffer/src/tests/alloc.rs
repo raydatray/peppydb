@@ -240,9 +240,9 @@ fn dropping_the_buffer_with_a_block_out_leaks_the_slab() {
 }
 
 #[test]
-fn blocks_are_32_bytes_with_a_niche() {
-    assert_eq!(size_of::<Block>(), 32);
-    assert_eq!(size_of::<Option<Block>>(), 32);
+fn blocks_are_24_bytes_with_a_niche() {
+    assert_eq!(size_of::<Block>(), 24);
+    assert_eq!(size_of::<Option<Block>>(), 24);
 }
 
 #[test]
