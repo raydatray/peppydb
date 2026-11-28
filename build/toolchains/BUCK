@@ -20,6 +20,7 @@ load(":host.bzl", "by_host")
 load(":miri_nightly.bzl", "MIRI_COMPONENTS", "MIRI_RUST_SRC", "MIRI_STD_CRATES")
 load(":rust.bzl", "peppy_rust_toolchain")
 load(":rust_stable.bzl", "RUST_COMPONENTS", "RUST_SRC")
+load(":tla.bzl", "JRE_RELEASES", "TLA_JAR")
 load(":zig.bzl", "ZIG_RELEASES", "ZIG_TARGETS")
 
 # Cargo's default release profile. Applies to every crate, third-party included.
@@ -371,5 +372,33 @@ go_bootstrap_toolchain(
     env_go_arch = GO_ARCH,
     env_go_os = GO_OS,
     go_bootstrap_distr = ":go-bootstrap-distr",
+    visibility = ["PUBLIC"],
+)
+
+# TLA+ model checker (TLC) and its Temurin JRE, pinned by tools/update-tla in
+# tla.bzl. Used by `peppy_tla_test` in //build:defs.bzl.
+
+[
+    toolchain_distribution(
+        name = "jre-" + host,
+        url = url,
+        sha256 = sha256,
+        strip_prefix = strip_prefix,
+        compression = "gz",
+    )
+    for host, (url, sha256, strip_prefix) in JRE_RELEASES.items()
+]
+
+alias(
+    name = "jre",
+    actual = by_host({host: ":jre-" + host for host in JRE_RELEASES}),
+    visibility = ["PUBLIC"],
+)
+
+http_file(
+    name = "tla2tools",
+    urls = [TLA_JAR["url"]],
+    sha256 = TLA_JAR["sha256"],
+    out = "tla2tools.jar",
     visibility = ["PUBLIC"],
 )
