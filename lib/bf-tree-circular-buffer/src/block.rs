@@ -61,7 +61,7 @@ impl Block {
 
     /// Whether this is the block that `victim` names.
     pub fn is(&self, victim: &Victim) -> bool {
-        self.addr == victim.addr
+        self.addr == victim.addr()
     }
 
     pub(super) fn ptr(&self) -> NonNull<u8> {

@@ -290,7 +290,7 @@ impl Run {
         match actual {
             Claim::Victim(v) => {
                 let found = MClaim::Victim {
-                    addr: v.addr,
+                    addr: v.addr(),
                     owner: v.owner,
                     kind: v.kind,
                 };
@@ -308,7 +308,7 @@ impl Run {
             return;
         }
         let (victim, _) = self.claims.swap_remove(self.rng.below(self.claims.len()));
-        self.model.unclaim(victim.addr);
+        self.model.unclaim(victim.addr());
         self.buffer.unclaim(victim);
     }
 
@@ -325,7 +325,7 @@ impl Run {
             self.model.free(held.block.addr());
             self.buffer.free(held.block);
         }
-        self.model.retire(victim.addr);
+        self.model.retire(victim.addr());
         self.buffer.retire(victim);
     }
 
@@ -334,6 +334,17 @@ impl Run {
         assert_eq!(used, self.model.tail - self.model.head, "used");
         assert!(used <= self.buffer.capacity());
         assert_eq!(self.buffer.metrics(), self.model.metrics, "metrics");
+        let expected_holes = self
+            .model
+            .blocks
+            .values()
+            .filter(|block| block.state == MState::Freed)
+            .count();
+        assert_eq!(
+            self.buffer.lock_state().free_entries(&self.buffer.slab),
+            expected_holes,
+            "free list entries"
+        );
 
         // Held blocks sit at their logical address, inside the slab, do not
         // overlap, and keep their bytes.

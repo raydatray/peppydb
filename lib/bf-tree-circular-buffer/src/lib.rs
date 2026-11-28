@@ -61,13 +61,10 @@ mod state;
 
 pub use block::Block;
 use slab::Slab;
-use state::{BlockHeader, BlockState, State};
+use state::{MAX_CLASSES, State};
 
 /// Bookkeeping bytes charged to every block on top of its size.
 pub const BLOCK_HEADER_BYTES: usize = 8;
-
-/// Maximum number of size classes (6-bit class index in the block header).
-const MAX_CLASSES: usize = 64;
 
 /// Minimum payload size: a freed block's payload holds two 8-byte links.
 const MIN_CLASS_BYTES: usize = 16;
@@ -84,10 +81,21 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Victim {
     /// The block's logical address.
-    pub addr: usize,
+    addr: usize,
     pub kind: Kind,
     /// The leaf the block was allocated for.
     pub owner: LeafId,
+}
+
+impl Victim {
+    fn new(addr: usize, kind: Kind, owner: LeafId) -> Self {
+        Self { addr, kind, owner }
+    }
+
+    /// The block's logical address in its circular buffer.
+    pub fn addr(&self) -> usize {
+        self.addr
+    }
 }
 
 /// The outcome of [`CircularBuffer::claim_victim`].
@@ -167,9 +175,7 @@ impl CircularBuffer {
             return Err(CircularBufferError::InvalidClasses("no classes"));
         };
         if classes.len() > MAX_CLASSES {
-            return Err(CircularBufferError::InvalidClasses(
-                "more than 64 classes",
-            ));
+            return Err(CircularBufferError::InvalidClasses("more than 64 classes"));
         }
         if smallest < MIN_CLASS_BYTES {
             return Err(CircularBufferError::InvalidClasses(
@@ -321,34 +327,9 @@ impl CircularBuffer {
             "block pointer does not match its logical address"
         );
 
-        let mut state = self.lock_state();
-        let header = state
-            .in_active_window(addr)
-            .then(|| state.read_header(&self.slab, addr))
-            .filter(|header| header.span() == block.span());
-        let (mut header, claimed) = match header {
-            Some(header) if header.state == BlockState::Live => (header, false),
-            Some(header) if header.state == BlockState::Evicting && !header.freed_while_claimed() => {
-                (header, true)
-            }
-            _ => panic!("block is not a live block of this circular buffer"),
-        };
-
         let class = self.class(block.len());
-        if claimed {
-            // The evictor's `retire` makes it dead.
-            header.set_freed_while_claimed(true);
-            state.write_header(&self.slab, addr, header);
-        } else if state.is_head(addr) || state.in_second_chance(addr, self.second_chance) {
-            header.state = BlockState::Tombstone;
-            state.write_header(&self.slab, addr, header);
-            state.metrics.tombstones += 1;
-        } else {
-            state.add_hole(&self.slab, addr, class);
-        }
-        state.outstanding -= 1;
-        state.metrics.frees += 1;
-        state.advance_head(&self.slab);
+        self.lock_state()
+            .free_block(&self.slab, addr, block.span(), class, self.second_chance);
     }
 
     /// Claim the oldest live block for eviction. Dead blocks at the head are
@@ -357,42 +338,21 @@ impl CircularBuffer {
     pub fn claim_victim(&self) -> Claim {
         let mut state = self.lock_state();
         state.advance_head(&self.slab);
-        match state.claim_oldest(&self.slab) {
-            Ok((addr, header)) => Claim::Victim(Victim {
-                addr,
-                kind: header.kind(),
-                owner: header.owner().expect("live blocks have an owner"),
-            }),
-            Err(true) => Claim::Busy,
-            Err(false) => Claim::Empty,
-        }
+        state.claim_oldest(&self.slab)
     }
 
     /// Give a claim back without evicting. If the owner freed the block in
     /// the meantime, this retires it instead, so it cannot become a live
     /// block without a handle.
     pub fn unclaim(&self, victim: Victim) {
-        let mut state = self.lock_state();
-        let mut header = claimed(&state, &self.slab, &victim);
-        if header.freed_while_claimed() {
-            retire_claimed(&mut state, &self.slab, victim.addr, header);
-        } else {
-            header.state = BlockState::Live;
-            state.write_header(&self.slab, victim.addr, header);
-        }
+        self.lock_state().unclaim(&self.slab, &victim);
     }
 
     /// Finish an eviction. The owner must have returned the block with
     /// `free` while it was claimed; this panics otherwise, because the head
     /// would pass bytes that a handle still covers.
     pub fn retire(&self, victim: Victim) {
-        let mut state = self.lock_state();
-        let header = claimed(&state, &self.slab, &victim);
-        assert!(
-            header.freed_while_claimed(),
-            "retire requires the block to be freed first"
-        );
-        retire_claimed(&mut state, &self.slab, victim.addr, header);
+        self.lock_state().retire(&self.slab, &victim);
     }
 
     /// Whether the block at logical address `addr` is in the second-chance
@@ -449,32 +409,6 @@ impl Drop for CircularBuffer {
             self.slab.leak();
         }
     }
-}
-
-/// Check that `victim` names a claimed block of this buffer, and return its
-/// header.
-fn claimed(state: &State, slab: &Slab, victim: &Victim) -> BlockHeader {
-    let header = state
-        .in_active_window(victim.addr)
-        .then(|| state.read_header(slab, victim.addr));
-    match header {
-        Some(header)
-            if header.state == BlockState::Evicting
-                && header.owner() == Some(victim.owner)
-                && header.kind() == victim.kind =>
-        {
-            header
-        }
-        _ => panic!("victim is not a claimed block of this circular buffer"),
-    }
-}
-
-/// Mark a claimed, freed block evicted and move the head past it if it can.
-fn retire_claimed(state: &mut State, slab: &Slab, addr: usize, mut header: BlockHeader) {
-    header.state = BlockState::Evicted;
-    state.write_header(slab, addr, header);
-    state.metrics.retired += 1;
-    state.advance_head(slab);
 }
 
 #[cfg(test)]

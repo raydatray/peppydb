@@ -140,31 +140,32 @@ fn a_freed_head_block_is_never_a_hole() {
 }
 
 #[test]
-fn stale_entries_are_never_handed_out_and_are_compacted() {
+fn passed_holes_are_unlinked_immediately() {
     let buffer = CircularBuffer::new(4096, &[64], 0).unwrap();
     let mut blocks = fill(&buffer, 64, 9);
     // Holes at 1, 3, 5, 7 (behind live blocks, outside any region).
     for i in [7, 5, 3, 1] {
         buffer.free(blocks.remove(i));
     }
-    assert_eq!(buffer.lock_state().free_entries(), 4);
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 4);
 
-    // Freeing block 0 lets the head pass the hole behind it; freeing block 2
-    // passes another. Two of four entries are stale: not yet more than half.
+    // Freeing block 0 lets the head pass hole 1, unlinking it immediately.
+    // Freeing blocks 2 and 4 unlinks holes 3 and 5 immediately too.
     let mut blocks = blocks.into_iter();
     buffer.free(blocks.next().unwrap());
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 3);
     buffer.free(blocks.next().unwrap());
     let head = buffer.lock_state().head;
     assert_eq!(head, 4 * (H + 64));
-    assert_eq!(buffer.lock_state().free_entries(), 4);
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 2);
 
-    // A third passed hole tips the balance, and the lists are filtered.
     buffer.free(blocks.next().unwrap());
-    assert_eq!(buffer.lock_state().free_entries(), 1);
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 1);
 
     // The remaining hole (at block 7) is reused; passed holes are not.
     let reused = buffer.alloc(64, Kind::Mini, leaf(9)).unwrap();
     assert_eq!(reused.addr(), 7 * (H + 64));
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 0);
     let fresh = buffer.alloc(64, Kind::Mini, leaf(10)).unwrap();
     assert_eq!(fresh.addr(), 9 * (H + 64));
 
@@ -172,6 +173,7 @@ fn stale_entries_are_never_handed_out_and_are_compacted() {
         .chain([reused, fresh])
         .for_each(|block| buffer.free(block));
     assert_eq!(buffer.used(), 0);
+    assert_eq!(buffer.lock_state().free_entries(&buffer.slab), 0);
 }
 
 #[test]
