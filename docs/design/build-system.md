@@ -266,8 +266,9 @@ disagree.
   `--cap-lints=allow`, so the toolchain's lint levels never reach them.
 - **Current allowlist:** `lib/bf-tree-circular-buffer`, whose slab hands
   out disjoint byte ranges of one allocation
-  ([plan 0010](../plans/0010-bf-tree-circular-buffer.md)). Within it, only
-  `slab.rs` and `block.rs` lower the lint.
+  ([plan 0010](../plans/0010-bf-tree-circular-buffer.md),
+  [plan 0038](../plans/0038-bf-tree-circular-buffer-v2.md)). Within it,
+  `slab.rs`, `block.rs`, and `state.rs` lower the lint.
 
 ## Miri
 

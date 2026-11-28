@@ -7,8 +7,11 @@ pages: it hands out blocks of bytes. [Plan 0010](../plans/0010-bf-tree-circular-
 built it; [plan 0011](../plans/0011-bf-tree-mini-page.md) allocates
 mini-pages from it, [plan 0013](../plans/0013-bf-tree-mini-tree.md) puts it
 into the tree, [plan 0014](../plans/0014-bf-tree-eviction.md) evicts
-from it, and [plan 0015](../plans/0015-bf-tree-caching.md) keeps full pages
-in it ([caching policy](bf-tree-caching.md)).
+from it, [plan 0015](../plans/0015-bf-tree-caching.md) keeps full pages
+in it ([caching policy](bf-tree-caching.md)), and
+[plan 0038](../plans/0038-bf-tree-circular-buffer-v2.md) moved per-block
+metadata into an 8-byte slab header and free-list links into freed payloads so
+total memory is strictly bounded and allocation-free after creation.
 
 ## Shape
 
@@ -16,30 +19,37 @@ in it ([caching policy](bf-tree-caching.md)).
 flowchart LR
     subgraph CB["CircularBuffer"]
         direction LR
-        subgraph State["Mutex<State>: metadata only"]
-            H["head"] --> B1["Live"] --> B2["Freed hole"] --> B3["Live"] --> B4["Tombstone"] --> F["Filler"] --> B5["Evicting"] --> T["tail"]
+        State["Mutex<State>: head, tail, outstanding, free_head[class], metrics"]
+        subgraph S["Slab: one 64-byte-aligned allocation (capacity bytes)"]
+            B1["8B hdr | Live payload"] --> B2["8B hdr | Freed: [prev|next]"] --> B3["8B hdr | Tombstone"] --> B4["8B hdr | Evicting"]
         end
-        S["Slab: one 64-byte-aligned allocation"]
     end
-    B3 -. "Block: pointer and length" .-> S
+    State -. "head, tail, free_head" .-> S
 ```
 
-- **One slab.** Every block lives in one allocation of `capacity` bytes, a
-  power of two. A block at logical address `addr` occupies
-  `[addr, addr + 16 + size)`; its slab offset is `addr & (capacity - 1)`.
-  Logical addresses only increase.
+- **One slab, strictly bounded RAM.** Every block lives in one allocation of
+  `capacity` bytes, a power of two. A block at logical address `addr` occupies
+  `[addr, addr + 8 + size)`; its slab offset is `addr & (capacity - 1)`.
+  Logical addresses only increase and identify blocks without sequence numbers.
+- **8-byte intrusive block header.** Every block starts with an 8-byte
+  `BlockHeader` (`owner: u32`, `span_units: u16` in 8-byte units,
+  `state: BlockState`, `flags: u8` packing `Kind`, `freed_while_claimed`, and
+  6-bit class index). `Block` exposes only the payload bytes `[8..8+size]`, so
+  safe callers cannot reach or corrupt headers.
+- **Intrusive doubly-linked free lists.** `State` holds one fixed
+  `free_head: Box<[u64]>` per size class. A `Freed` block stores
+  `[prev: u64, next: u64]` in its first 16 dead payload bytes (requiring
+  classes `>= 16` bytes and multiples of 8). Pushing, popping, and unlinking
+  when `head` passes a `Freed` block are all O(1) with zero stale entries and
+  zero runtime heap allocations after `CircularBuffer::new`.
 - **Physical budget.** `used = tail - head <= capacity`. A dead block keeps
   its space until the head passes it, so a block that dies behind the head
   makes room only when the head reaches it.
 - **Wrap fillers.** A block never crosses the end of the slab. When it
-  would, a dead filler covers the rest of the slab first. With
-  `capacity >= 2 * (largest class + 16)`, an empty buffer always fits the
+  would, a dead filler covers the rest of the slab first (always a multiple of
+  8 bytes, so it always holds an 8-byte header). With
+  `capacity >= 2 * (largest class + 8)`, an empty buffer always fits the
   largest block after a filler.
-- **Metadata outside the slab.** Block states live in a `VecDeque` behind
-  the mutex, not in inline headers as upstream does, so a bug in page code
-  cannot corrupt the buffer's bookkeeping. The 16 header bytes per block are
-  still charged, which keeps the paper's accounting; debug builds store a
-  canary there.
 
 ## Block states
 
@@ -81,10 +91,11 @@ stateDiagram-v2
 ## Safety
 
 `bf-tree-circular-buffer` is the only crate on the `tools/check-unsafe`
-allowlist ([build system](build-system.md)). Within it, only `slab.rs` and
-`block.rs` allow `unsafe` code. The unsafe operations are allocating and
-freeing the slab, building slices from a `Block`, and declaring `Block`
-`Send` and `Sync`. They rely on four invariants:
+allowlist ([build system](build-system.md)). Within it, `slab.rs`, `block.rs`,
+and `state.rs` allow `unsafe` code. The unsafe operations are allocating and
+freeing the slab, copying 8-byte headers and 16-byte freed-block links by value
+under `Mutex<State>`, building payload slices from a `Block`, and declaring
+`Block` `Send` and `Sync`. They rely on five invariants:
 
 1. **No two handles cover one byte.** A range is handed out only from the
    tail or from a `Freed` hole, and becomes reusable only after `free`
@@ -92,12 +103,17 @@ freeing the slab, building slices from a `Block`, and declaring `Block`
    because otherwise the head would pass bytes that a handle still covers.
    `alloc` panics on a size that is not a class, because such a size could
    overlap the next block when it lands in a hole.
-2. **A block belongs to its buffer.** `free` asserts that the block lies in
-   this slab and matches a live or claimed entry's sequence number,
-   address, and span.
-3. **The slab outlives every handle.** If blocks are still outstanding when
+2. **Headers and links never alias live `Block` slices.** `Block` covers only
+   payload bytes `[offset + 8, offset + 8 + len)`, never the 8-byte header.
+   Free-list links in `[offset + 8, offset + 24)` are read and written only
+   while the block's state is `Freed` (no `Block` handle exists) and under
+   `Mutex<State>`.
+3. **A block belongs to its buffer.** `free` asserts that the block's payload
+   lies in this slab at the expected offset for its address and matches a live
+   or claimed header's span and state.
+4. **The slab outlives every handle.** If blocks are still outstanding when
    the buffer is dropped, the slab is leaked instead of freed.
-4. **Access follows the handle.** `AsMut` needs `&mut Block` and `AsRef`
+5. **Access follows the handle.** `AsMut` needs `&mut Block` and `AsRef`
    gives `&[u8]`, so the borrow checker enforces aliasing per handle.
 
 Block bytes are leaf-level data, read and written only under the owning
@@ -105,8 +121,10 @@ leaf's lock, so no optimistic reader touches the slab. (Inner nodes, which
 readers traverse optimistically, use immutable images; see the
 [concurrency design](bf-tree-concurrency.md#frames).)
 
-The tests run under Miri through Buck2 (`@build/mode/miri`), including a
-threaded stress test.
+The state machine is model-checked with TLC
+(`lib/bf-tree-circular-buffer/spec/CircularBuffer.tla`, [plan 0038](../plans/0038-bf-tree-circular-buffer-v2.md)),
+and the Rust implementation runs under Miri through Buck2 (`@build/mode/miri`),
+including a differential model test and a threaded stress test.
 
 ## Locking
 
@@ -130,10 +148,10 @@ circular buffer, owned by its `LeafMap`
 - **Budget.** `TreeConfig::circular_buffer_bytes` sets the capacity
   (default `DEFAULT_CIRCULAR_BUFFER_BYTES`, 32 MiB). It is a runtime
   setting: the superblock does not record it, and `Tree::open_with` takes it
-  for an existing store. `TreeConfig::validate` builds a buffer with
-  `CircularBuffer::new` to check the budget, so construction cannot fail on
-  a validated configuration. `TreeConfig::second_chance_percent` sets the
-  second-chance share (see [Configuration](#configuration)).
+  for an existing store. `TreeConfig::validate` checks the budget with
+  `CircularBuffer::validate` (without allocating a slab), so construction
+  cannot fail on a validated configuration. `TreeConfig::second_chance_percent`
+  sets the second-chance share (see [Configuration](#configuration)).
 - **Classes.** The buffer's classes are the
   [mini-page ladder](bf-tree-mini-page.md#size-classes-and-the-admission-rule)
   followed by the leaf page size `L`. Full pages use the `L` class
@@ -217,7 +235,7 @@ returns one of three results:
   (`TARGET_EVICT_SIZE` in `src/tree.rs`).
 - **`Empty` never blocks a write.** With no live block, the head has
   reached the tail, and the capacity rule
-  (`capacity >= 2 * (largest class + 16)`) guarantees that any allocation
+  (`capacity >= 2 * (largest class + 8)`) guarantees that any allocation
   fits. The slack therefore never makes a write wait.
 - **Room appears only when the head advances.** An eviction behind the
   head makes no room at once; the evicted block keeps its space until the
@@ -358,7 +376,7 @@ through one of them. A bump without a change only skips a hint.
 
 | Setting | Default | Rule |
 | --- | --- | --- |
-| `circular_buffer_bytes` | `DEFAULT_CIRCULAR_BUFFER_BYTES` (32 MiB) | Power of two, at least `2 * (L + 16)` |
+| `circular_buffer_bytes` | `DEFAULT_CIRCULAR_BUFFER_BYTES` (32 MiB) | Power of two, at least `2 * (L + 8)` |
 | `second_chance_percent` | `DEFAULT_SECOND_CHANCE_PERCENT` (10) | `validate` rejects values above 100 |
 
 `second_chance_percent` is passed to `CircularBuffer::new`. It is a runtime

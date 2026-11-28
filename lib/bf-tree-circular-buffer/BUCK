@@ -1,7 +1,8 @@
 load("//build:defs.bzl", "peppy_rust_library", "peppy_tla_test")
 
 # The only crate allowed to contain unsafe code (tools/check-unsafe); see
-# docs/plans/0010-bf-tree-circular-buffer.md for the safety argument.
+# docs/plans/0010-bf-tree-circular-buffer.md and
+# docs/plans/0038-bf-tree-circular-buffer-v2.md for the safety argument.
 peppy_rust_library(
     name = "bf-tree-circular-buffer",
     deps = [

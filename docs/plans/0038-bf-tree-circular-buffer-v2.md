@@ -1,6 +1,6 @@
 # 0038: Circular buffer v2 — TLA+ model, 8-byte intrusive slab header, and allocation-free free lists
 
-**Status:** In progress
+**Status:** Complete
 
 **Design references:** [Circular buffer](../design/bf-tree-circular-buffer.md),
 [Tree structure](../design/bf-tree-structure.md),
@@ -388,28 +388,28 @@ and `without_holes()`, using `second_chance_percent = 100` in
 
 ## Verification strategy
 
-| Check | Command or procedure | Expected result |
-| --- | --- | --- |
-| TLA+ model checking | `tools/buck2 test //lib/bf-tree-circular-buffer/...` | All 6 invariants hold across all reachable states; broken unlink fails TLC |
-| Formatting | `tools/fmt.sh` | Clean |
-| Lints & unsafe allowlist | `tools/clippy.sh` | Clean; only `bf-tree-circular-buffer` (`slab.rs`, `block.rs`, `state.rs`) allows `unsafe_code` |
-| Buck2 tests | `tools/buck2 test //bin/... //lib/... //proto/...` | All pass |
-| Miri (unsafe & threading) | `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | All pass (`alloc`, `holes`, `claims`, `model`, `stress`) |
-| Build & generated files | `tools/autocargo --check && tools/gobuckify-remote --check && tools/gen-proto --check` | Clean |
-| Cargo & Go checks | `cargo test --workspace --locked && go vet ./... && go test ./...` | All pass |
-| Microbenchmark (before/after) | `tools/buck2 run @build/mode/release //lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest -- --ignored --nocapture tests::bench::` | Record alloc/free ns/op before and after |
+| Check | Command or procedure | Expected result | Outcome |
+| --- | --- | --- | --- |
+| TLA+ model checking | `tools/buck2 test //lib/bf-tree-circular-buffer/...` | All 6 invariants hold across all reachable states; broken unlink fails TLC | Pass: `circular-buffer-tla` (163,920 generated / 27,655 distinct states, depth 26, `3.4s`) and `circular-buffer-no-region-tla` (19,943 generated / 3,878 distinct states, depth 20, `2.1s`); omitting `Unlink` in `Advance` violated `FreeListIntegrity` at depth 5 |
+| Formatting | `tools/fmt.sh` | Clean | Pass |
+| Lints & unsafe allowlist | `tools/clippy.sh` | Clean; only `bf-tree-circular-buffer` (`slab.rs`, `block.rs`, `state.rs`) allows `unsafe_code` | Pass (`clippy: 43 targets clean`) |
+| Buck2 tests | `tools/buck2 test //bin/... //lib/... //proto/...` | All pass | Pass (48 targets including both TLA+ specs; `server-unittest` and `lincheck-test` flaked under full-suite parallel saturation and passed on re-run) |
+| Miri (unsafe & threading) | `tools/buck2 test @build/mode/miri '//lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest[miri]'` | All pass (`alloc`, `holes`, `claims`, `model`, `stress`) | Pass (30/30 tests in `21.3s`) |
+| Build & generated files | `tools/autocargo --check && tools/gobuckify-remote --check && tools/gen-proto --check` | Clean | Pass (`autocargo` 20 files, `gobuckify-remote` 14 modules / 133 packages, `gen-proto`) |
+| Cargo & Go checks | `cargo test --workspace --locked && go vet ./... && go test ./...` | All pass | Pass |
+| Microbenchmark (before/after, macOS M4 Pro, release) | `tools/buck2 run @build/mode/release //lib/bf-tree-circular-buffer:bf-tree-circular-buffer-unittest -- --ignored --nocapture tests::bench::` | Record alloc/free ns/op before and after | `circular_buffer_cost` (10k / 100k / 300k): `60.1 / 131.3 / 166.0` → `60.8 / 138.5 / 169.8` ns/op; `bench_circular_buffer_free` free lists: `125.9` ns, 426,599 evictions → `135.5` ns, 420,579 evictions; tombstone-on-free: `72.1` ns, 967,219 evictions → `75.7` ns, 962,372 evictions |
 
 ## Progress
 
 - [x] Agree on the design and commit stack with the user.
-- [ ] `[1/7][bf-tree-cb-v2][plan] draft circular buffer v2 plan`
-- [ ] `[2/7][bf-tree-cb-v2][spec] model-check circular buffer v2 in TLA+`
-- [ ] `[3/7][bf-tree-cb-v2][validate] add CircularBuffer::validate without allocating`
-- [ ] `[4/7][bf-tree-cb-v2][block] shrink slab header to 8 bytes and make blocks payload-only`
-- [ ] `[5/7][bf-tree-cb-v2][header] move block metadata into the 8-byte slab header`
-- [ ] `[6/7][bf-tree-cb-v2][holes] store doubly-linked free lists in freed payloads`
-- [ ] `[7/7][bf-tree-cb-v2][docs] update circular buffer design docs and finalize plan`
-- [ ] Complete stack-wide verification and design-document updates.
+- [x] `[1/7][bf-tree-cb-v2][plan] draft circular buffer v2 plan`
+- [x] `[2/7][bf-tree-cb-v2][spec] model-check circular buffer v2 in TLA+`
+- [x] `[3/7][bf-tree-cb-v2][validate] add CircularBuffer::validate without allocating`
+- [x] `[4/7][bf-tree-cb-v2][block] shrink slab header to 8 bytes and make blocks payload-only`
+- [x] `[5/7][bf-tree-cb-v2][header] move block metadata into the 8-byte slab header`
+- [x] `[6/7][bf-tree-cb-v2][holes] store doubly-linked free lists in freed payloads`
+- [x] `[7/7][bf-tree-cb-v2][docs] update circular buffer design docs and finalize plan`
+- [x] Complete stack-wide verification and design-document updates.
 
 ## Discoveries and plan changes
 
@@ -424,11 +424,17 @@ and `without_holes()`, using `second_chance_percent = 100` in
   buffer decoupled from `bf-tree-page`.
 - **Sequence numbers are not generation counters:** Reused holes already keep
   their old `seq`, so logical `addr` provides the same identity guarantee
-  (to be confirmed by TLC in diff 2).
+  (verified by TLC in diff 2 via `ClaimIdentity`).
 - **`TreeConfig::validate` allocates up to 1 GiB in tests:**
   `lib/bf-tree/src/tests/config.rs` calls `validate()` with
   `circular_buffer_bytes = 1 << 30` via `CircularBuffer::new`. Diff 3 fixes
-  this.
+  this (`tests::config::` now completes in `0.00s`).
+- **Parallel `peppy_tla_test` shared `java.io.tmpdir` race:** Running two
+  `peppy_tla_test` targets concurrently caused both JVMs to unpack TLC's
+  standard modules (`Integers.tla`, etc.) to the same `$TMPDIR` path,
+  occasionally triggering a parser NPE. Diff 2 added `-Djava.io.tmpdir="$d"`
+  to `peppy_tla_test` in `build/defs.bzl` so every TLC run gets an isolated
+  temp directory.
 
 ## Agent notes
 

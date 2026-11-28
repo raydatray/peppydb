@@ -355,7 +355,7 @@ impl FileStore {
   aarch64).
 - **A bounce buffer, no `unsafe` code.** The tree's buffers are not
   4096-aligned: scratch pages are ordinary heap slices, and circular-buffer
-  blocks follow a 16-byte header in a packed slab. With `Io::Direct`, a
+  blocks follow an 8-byte header in a packed slab. With `Io::Direct`, a
   read or write whose buffer address or length is not a multiple of 4096
   goes through a thread-local buffer of `AlignedPage` values
   (`#[repr(C, align(4096))]`), viewed as bytes through `zerocopy`. The

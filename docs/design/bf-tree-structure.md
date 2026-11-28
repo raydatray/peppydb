@@ -245,7 +245,7 @@ value limit `V`:
 
 `validate` checks, in order: the leaf and inner capacities are valid page
 capacities, `K >= 1`, the ladder (with checked arithmetic), the inner-node
-rule, and the circular-buffer budget (`CircularBuffer::new` with the
+rule, and the circular-buffer budget (`CircularBuffer::validate` with the
 ladder classes plus `L`). The ladder runs before the inner-node rule
 because it bounds `K` and `V` by `L` without overflow; the inner-node sum
 would overflow first for limits such as `usize::MAX`.
