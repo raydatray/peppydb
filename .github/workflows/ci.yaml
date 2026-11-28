@@ -32,7 +32,7 @@ jobs:
 
           ROOT = pathlib.Path.cwd()
           UNIVERSE = "//bin/... + //lib/... + //proto/..."
-          TESTABLE = 'kind("rust_library|rust_test|go_test", {})'
+          TESTABLE = 'kind("rust_library|rust_test|go_test|peppy_tla_test", {})'
           GLOBAL_PREFIXES = ("build/", "third-party/", "tools/")
           GLOBAL_FILES = {
               ".buckconfig",
