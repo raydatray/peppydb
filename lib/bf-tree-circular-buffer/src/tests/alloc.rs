@@ -19,6 +19,19 @@ fn configuration_errors() {
         CircularBufferError::InvalidClasses(_)
     ));
     assert!(matches!(
+        invalid(1024, &[8, 64], 0),
+        CircularBufferError::InvalidClasses(_)
+    ));
+    assert!(matches!(
+        invalid(1024, &[20, 64], 0),
+        CircularBufferError::InvalidClasses(_)
+    ));
+    let too_many: Vec<usize> = (1..=65).map(|i| i * 16).collect();
+    assert!(matches!(
+        invalid(4096, &too_many, 0),
+        CircularBufferError::InvalidClasses(_)
+    ));
+    assert!(matches!(
         invalid(1024, &[64, 64], 0),
         CircularBufferError::InvalidClasses(_)
     ));
@@ -30,7 +43,7 @@ fn configuration_errors() {
         invalid(1000, &[64], 0),
         CircularBufferError::InvalidCapacity(_)
     ));
-    // Twice (largest + header) is 2 * 272 = 544 > 512.
+    // Twice (largest + header) is 2 * 264 = 528 > 512.
     assert!(matches!(
         invalid(512, &[256], 0),
         CircularBufferError::InvalidCapacity(_)
@@ -41,8 +54,8 @@ fn configuration_errors() {
     );
 
     // The boundaries themselves are accepted.
-    CircularBuffer::new(512, &[240], 100).unwrap();
-    CircularBuffer::new(512, &[64], 0).unwrap();
+    CircularBuffer::new(512, &[248], 100).unwrap();
+    CircularBuffer::new(512, &[16], 0).unwrap();
     // `validate` allocates nothing, so huge capacities succeed immediately.
     CircularBuffer::validate(1 << 40, &[64, 4096], 10).unwrap();
 }
@@ -58,7 +71,7 @@ fn blocks_are_exact_charged_and_inside_the_slab() {
     assert_eq!(buffer.used(), (H + 64) + (H + 128));
     assert_eq!((a.addr(), b.addr()), (0, H + 64));
     assert_eq!(offset(&buffer, &b), H + 64);
-    assert!(buffer.slab.contains(b.ptr(), b.span()));
+    assert!(buffer.slab.contains(b.ptr(), b.len()));
 
     buffer.free(a);
     buffer.free(b);
@@ -69,10 +82,10 @@ fn blocks_are_exact_charged_and_inside_the_slab() {
 
 #[test]
 fn blocks_are_zeroed_on_every_lap() {
-    let buffer = CircularBuffer::new(512, &[112], 0).unwrap();
+    let buffer = CircularBuffer::new(512, &[120], 0).unwrap();
     // Four 128-byte spans fill one lap, so 20 allocations cover five laps.
     for round in 0..20u8 {
-        let mut block = buffer.alloc(112, Kind::Mini, leaf(1)).unwrap();
+        let mut block = buffer.alloc(120, Kind::Mini, leaf(1)).unwrap();
         assert!(
             block.as_ref().iter().all(|&byte| byte == 0),
             "round {round}"
@@ -107,13 +120,13 @@ fn a_block_that_would_cross_the_end_follows_a_filler() {
     buffer.free(b);
     assert_eq!(buffer.used(), 0);
 
-    // The tail is at offset 416; 416 + 208 crosses 512, so a 96-byte filler
+    // The tail is at offset 400; 400 + 200 crosses 512, so a 112-byte filler
     // covers the rest of the slab and the block starts at offset 0.
     assert!(buffer.has_room(192));
     let c = buffer.alloc(192, Kind::Mini, leaf(3)).unwrap();
     assert_eq!(c.addr(), 512);
     assert_eq!(offset(&buffer, &c), 0);
-    assert_eq!(buffer.used(), 96 + H + 192);
+    assert_eq!(buffer.used(), 112 + H + 192);
     assert_eq!(buffer.metrics().fillers, 1);
 
     // The filler is dead: freeing the block behind it empties the buffer.
@@ -123,29 +136,29 @@ fn a_block_that_would_cross_the_end_follows_a_filler() {
 
 #[test]
 fn full_exactly_at_the_budget() {
-    let buffer = CircularBuffer::new(512, &[112], 0).unwrap();
+    let buffer = CircularBuffer::new(512, &[120], 0).unwrap();
     let blocks: Vec<_> = (0..4)
-        .map(|i| buffer.alloc(112, Kind::Mini, leaf(i)).unwrap())
+        .map(|i| buffer.alloc(120, Kind::Mini, leaf(i)).unwrap())
         .collect();
     assert_eq!(buffer.used(), buffer.capacity());
-    assert!(!buffer.has_room(112));
+    assert!(!buffer.has_room(120));
     assert_eq!(
-        buffer.alloc(112, Kind::Mini, leaf(9)).unwrap_err(),
+        buffer.alloc(120, Kind::Mini, leaf(9)).unwrap_err(),
         CircularBufferFull
     );
     assert_eq!(buffer.metrics().allocs, 4);
 
     blocks.into_iter().for_each(|block| buffer.free(block));
-    assert!(buffer.has_room(112));
+    assert!(buffer.has_room(120));
 }
 
 #[test]
 fn has_room_counts_the_filler() {
-    let buffer = CircularBuffer::new(512, &[64, 192], 0).unwrap();
+    let buffer = CircularBuffer::new(512, &[72, 200], 0).unwrap();
     let small: Vec<_> = (0..3)
-        .map(|i| buffer.alloc(64, Kind::Mini, leaf(i)).unwrap())
+        .map(|i| buffer.alloc(72, Kind::Mini, leaf(i)).unwrap())
         .collect();
-    let large = buffer.alloc(192, Kind::Mini, leaf(3)).unwrap();
+    let large = buffer.alloc(200, Kind::Mini, leaf(3)).unwrap();
     let mut small = small.into_iter();
     buffer.free(small.next().unwrap());
     buffer.free(small.next().unwrap());
@@ -153,9 +166,9 @@ fn has_room_counts_the_filler() {
     // Head 160, tail 448: 224 bytes are free, enough for a 208-byte block,
     // but at offset 448 it would cross 512 and needs a 64-byte filler first.
     assert_eq!(buffer.used(), 288);
-    assert!(!buffer.has_room(192));
+    assert!(!buffer.has_room(200));
     assert_eq!(
-        buffer.alloc(192, Kind::Mini, leaf(9)).unwrap_err(),
+        buffer.alloc(200, Kind::Mini, leaf(9)).unwrap_err(),
         CircularBufferFull
     );
     assert_eq!(
@@ -164,9 +177,9 @@ fn has_room_counts_the_filler() {
         "a failed allocation adds no filler"
     );
 
-    // A 64-byte block also needs the filler, and both fit.
-    assert!(buffer.has_room(64));
-    let c = buffer.alloc(64, Kind::Mini, leaf(4)).unwrap();
+    // A 72-byte block also needs the filler, and both fit.
+    assert!(buffer.has_room(72));
+    let c = buffer.alloc(72, Kind::Mini, leaf(4)).unwrap();
     assert_eq!(offset(&buffer, &c), 0);
     assert_eq!(buffer.metrics().fillers, 1);
 

@@ -14,8 +14,8 @@ fn victims_are_claimed_oldest_first_past_dead_blocks() {
         let y = buffer.alloc(192, Kind::Mini, leaf(9)).unwrap();
         buffer.free(x);
         buffer.free(y);
-        // Head and tail at 416. `a` ends at 496; `b` would cross 512, so a
-        // 16-byte filler precedes it.
+        // Head and tail at 400. `a` ends at 472; `b` would cross 512, so a
+        // 40-byte filler precedes it.
         let a = buffer.alloc(64, Kind::Mini, leaf(0)).unwrap();
         let b = buffer.alloc(64, Kind::Full, leaf(1)).unwrap();
         let dead = buffer.alloc(64, Kind::Mini, leaf(2)).unwrap();

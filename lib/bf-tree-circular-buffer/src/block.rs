@@ -12,16 +12,18 @@ use super::{BLOCK_HEADER_BYTES, Victim};
 
 /// A live block: the only handle to its byte range in the circular buffer.
 ///
-/// The bytes are reached through `AsRef<[u8]>` and `AsMut<[u8]>`, so the
-/// borrow checker enforces exclusive access through this handle. Return the
-/// block with [`CircularBuffer::free`](super::CircularBuffer::free); dropping
-/// it instead leaks its space until the buffer is dropped.
+/// The bytes are reached through `AsRef<[u8]>` and `AsMut<[u8]>`, covering
+/// only the payload (never the leading header bytes). The borrow checker
+/// enforces exclusive access through this handle. Return the block with
+/// [`CircularBuffer::free`](super::CircularBuffer::free); dropping it instead
+/// leaks its space until the buffer is dropped.
 #[must_use = "return the block with CircularBuffer::free"]
 #[derive(Debug)]
 pub struct Block {
-    /// The block's first byte: the 16-byte header, then the payload.
+    /// The payload's first byte (immediately after the block header).
     ptr: NonNull<u8>,
-    /// Logical address; increases forever across laps of the slab.
+    /// Logical address of the block's header; increases forever across laps of
+    /// the slab.
     addr: usize,
     seq: u64,
     /// Payload length: exactly the requested size.
@@ -38,14 +40,17 @@ unsafe impl Send for Block {}
 unsafe impl Sync for Block {}
 
 impl Block {
-    /// A handle to the header and payload at `offset` in `slab`. Panics if
-    /// the range does not lie in the slab.
+    /// A handle to the payload of a block whose header starts at `offset` in
+    /// `slab`. Panics if the header and payload do not lie in the slab.
     ///
     /// The caller, the circular buffer, guarantees that no other live handle
-    /// covers the range and that the slab outlives the handle; slices built
-    /// from the block rely on both.
+    /// covers the payload range and that the slab outlives the handle; slices
+    /// built from the block rely on both.
     pub(super) fn new(slab: &Slab, offset: usize, addr: usize, seq: u64, len: u32) -> Self {
-        let ptr = slab.range(offset, BLOCK_HEADER_BYTES + len as usize);
+        let payload_offset = offset
+            .checked_add(BLOCK_HEADER_BYTES)
+            .expect("payload offset overflows");
+        let ptr = slab.range(payload_offset, len as usize);
         Self {
             ptr,
             addr,
@@ -77,40 +82,28 @@ impl Block {
         BLOCK_HEADER_BYTES + self.len as usize
     }
 
-    fn whole(&self) -> &[u8] {
-        // SAFETY: `[ptr, ptr + span)` lies in the slab (checked in `new`), the
-        // slab outlives every block (it is leaked if blocks remain at drop),
-        // its bytes are initialized (allocated zeroed, written only as bytes),
-        // and no other handle covers the range. `&self` excludes a mutable
-        // borrow through this handle. `span` is at most the slab size, which
-        // `Layout` bounds by `isize::MAX`.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.span()) }
-    }
-
-    fn whole_mut(&mut self) -> &mut [u8] {
-        // SAFETY: as in `whole`; `&mut self` makes this the only borrow of the
-        // range.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.span()) }
-    }
-
-    /// The 16 header bytes before the payload. They hold a debug canary.
-    pub(super) fn header(&self) -> &[u8] {
-        &self.whole()[..BLOCK_HEADER_BYTES]
-    }
-
-    pub(super) fn header_mut(&mut self) -> &mut [u8] {
-        &mut self.whole_mut()[..BLOCK_HEADER_BYTES]
+    /// Payload length.
+    pub(super) fn len(&self) -> usize {
+        self.len as usize
     }
 }
 
 impl AsRef<[u8]> for Block {
     fn as_ref(&self) -> &[u8] {
-        &self.whole()[BLOCK_HEADER_BYTES..]
+        // SAFETY: `[ptr, ptr + len)` lies in the slab (checked in `new`), the
+        // slab outlives every block (it is leaked if blocks remain at drop),
+        // its bytes are initialized (allocated zeroed, written only as bytes),
+        // and no other handle covers the payload range. `&self` excludes a
+        // mutable borrow through this handle. `len` is bounded by the slab
+        // size, which `Layout` bounds by `isize::MAX`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) }
     }
 }
 
 impl AsMut<[u8]> for Block {
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.whole_mut()[BLOCK_HEADER_BYTES..]
+        // SAFETY: as in `AsRef::as_ref`; `&mut self` makes this the only
+        // borrow of the payload range.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize) }
     }
 }

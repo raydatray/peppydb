@@ -64,7 +64,13 @@ use slab::Slab;
 use state::{BlockState, State};
 
 /// Bookkeeping bytes charged to every block on top of its size.
-pub const BLOCK_HEADER_BYTES: usize = 16;
+pub const BLOCK_HEADER_BYTES: usize = 8;
+
+/// Maximum number of size classes (6-bit class index in the block header).
+const MAX_CLASSES: usize = 64;
+
+/// Minimum payload size: a freed block's payload holds two 8-byte links.
+const MIN_CLASS_BYTES: usize = 16;
 
 /// What a block holds; recorded for eviction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,10 +154,6 @@ pub struct CircularBuffer {
     /// A block at least this far behind the tail is in the second-chance
     /// region; `usize::MAX` when the region is empty.
     second_chance: usize,
-    /// Whether `free` keeps holes for reuse (the size-class free lists).
-    /// Always true outside the free-list benchmark, which compares it with
-    /// tombstone-on-free.
-    holes: bool,
 }
 
 // Compile-time check: the buffer and its blocks can be shared between threads.
@@ -171,23 +173,39 @@ impl CircularBuffer {
         let (Some(&smallest), Some(&largest)) = (classes.first(), classes.last()) else {
             return Err(CircularBufferError::InvalidClasses("no classes"));
         };
-        if smallest == 0 {
-            return Err(CircularBufferError::InvalidClasses("a class is zero"));
+        if classes.len() > MAX_CLASSES {
+            return Err(CircularBufferError::InvalidClasses(
+                "more than 64 classes",
+            ));
+        }
+        if smallest < MIN_CLASS_BYTES {
+            return Err(CircularBufferError::InvalidClasses(
+                "a class is below 16 bytes",
+            ));
         }
         if classes.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(CircularBufferError::InvalidClasses(
                 "classes are not strictly ascending",
             ));
         }
-        if u32::try_from(largest).is_err() {
-            return Err(CircularBufferError::InvalidClasses("a class exceeds u32"));
+        if classes
+            .iter()
+            .any(|&class| !class.is_multiple_of(BLOCK_HEADER_BYTES))
+        {
+            return Err(CircularBufferError::InvalidClasses(
+                "classes must be multiples of 8 bytes",
+            ));
+        }
+        let largest_span = largest.checked_add(BLOCK_HEADER_BYTES);
+        if largest_span.is_none_or(|span| span / BLOCK_HEADER_BYTES > usize::from(u16::MAX)) {
+            return Err(CircularBufferError::InvalidClasses(
+                "a class exceeds the maximum block span",
+            ));
         }
         if !capacity.is_power_of_two() {
             return Err(CircularBufferError::InvalidCapacity("not a power of two"));
         }
-        let minimum = largest
-            .checked_add(BLOCK_HEADER_BYTES)
-            .and_then(|span| span.checked_mul(2));
+        let minimum = largest_span.and_then(|span| span.checked_mul(2));
         if minimum.is_none_or(|minimum| capacity < minimum) {
             return Err(CircularBufferError::InvalidCapacity(
                 "less than twice the largest class plus its header",
@@ -206,11 +224,11 @@ impl CircularBuffer {
     /// `classes`.
     ///
     /// `capacity` must be a power of two of at least twice the largest class
-    /// plus its header charge, so that an empty buffer always fits the
-    /// largest block even after a filler. `classes` must be nonempty, nonzero,
-    /// and strictly ascending. `second_chance_percent` is the share of the
-    /// buffer, at the head, from which freed blocks are not reused; it must be
-    /// at most 100.
+    /// plus its 8-byte header, so that an empty buffer always fits the
+    /// largest block even after a filler. `classes` must be nonempty, strictly
+    /// ascending multiples of 8 bytes (at least 16, at most 64 classes).
+    /// `second_chance_percent` is the share of the buffer, at the head, from
+    /// which freed blocks are not reused; it must be at most 100.
     pub fn new(
         capacity: usize,
         classes: &[usize],
@@ -234,16 +252,7 @@ impl CircularBuffer {
             capacity,
             classes: classes.into(),
             second_chance,
-            holes: true,
         })
-    }
-
-    /// Make every `free` a tombstone, so space returns only when the head
-    /// passes it. For the free-list benchmark only.
-    #[cfg(test)]
-    pub(crate) fn without_holes(mut self) -> Self {
-        self.holes = false;
-        self
     }
 
     /// Allocate a zeroed block of exactly `size` bytes for `owner`. Panics if
@@ -284,7 +293,6 @@ impl CircularBuffer {
         // Zero outside the mutex: the reservation made this the only handle.
         let mut block = Block::new(&self.slab, self.offset(addr), addr, seq, len);
         block.as_mut().fill(0);
-        write_canary(&mut block);
         Ok(block)
     }
 
@@ -296,10 +304,9 @@ impl CircularBuffer {
     /// evictor retires it.
     pub fn free(&self, block: Block) {
         assert!(
-            self.slab.contains(block.ptr(), block.span()),
+            self.slab.contains(block.ptr(), block.len()),
             "block does not belong to this circular buffer"
         );
-        check_canary(&block);
 
         let mut state = self.lock_state();
         let meta = state
@@ -311,7 +318,7 @@ impl CircularBuffer {
             _ => panic!("block is not a live block of this circular buffer"),
         };
 
-        let class = self.class(block.as_ref().len());
+        let class = self.class(block.len());
         let seq = block.seq();
         if claimed {
             // The evictor's `retire` makes it dead.
@@ -319,10 +326,7 @@ impl CircularBuffer {
                 .get_mut(seq)
                 .expect("checked above")
                 .freed_while_claimed = true;
-        } else if !self.holes
-            || state.is_head(seq)
-            || state.in_region(block.addr(), self.second_chance)
-        {
+        } else if state.is_head(seq) || state.in_region(block.addr(), self.second_chance) {
             state.get_mut(seq).expect("checked above").state = BlockState::Tombstone;
             state.metrics.tombstones += 1;
         } else {
@@ -447,35 +451,6 @@ fn retire_claimed(state: &mut State, seq: u64) {
     state.get_mut(seq).expect("checked by `claimed`").state = BlockState::Evicted;
     state.metrics.retired += 1;
     state.advance_head();
-}
-
-/// Debug builds record each block's sequence number and length in its
-/// header, and `free` checks them, to catch errors in the address arithmetic.
-const CANARY: [u8; 4] = *b"CBUF";
-
-fn canary(block: &Block) -> [u8; BLOCK_HEADER_BYTES] {
-    let mut header = [0; BLOCK_HEADER_BYTES];
-    header[..4].copy_from_slice(&CANARY);
-    header[4..8].copy_from_slice(&(block.as_ref().len() as u32).to_le_bytes());
-    header[8..].copy_from_slice(&block.seq().to_le_bytes());
-    header
-}
-
-fn write_canary(block: &mut Block) {
-    if cfg!(debug_assertions) {
-        let header = canary(block);
-        block.header_mut().copy_from_slice(&header);
-    }
-}
-
-fn check_canary(block: &Block) {
-    if cfg!(debug_assertions) {
-        assert_eq!(
-            block.header(),
-            canary(block),
-            "block header was overwritten"
-        );
-    }
 }
 
 #[cfg(test)]
